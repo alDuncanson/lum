@@ -1,0 +1,9 @@
+# Build outputs
+/bin/
+/data-plane/target/
+
+# Local tool installs (protoc plugins, etc.)
+/.tools/
+
+# macOS
+.DS_Store

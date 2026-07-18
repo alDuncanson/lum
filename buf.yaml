@@ -1,0 +1,11 @@
+# buf configuration (v2). `buf` compiles our .proto files without a
+# protoc install and runs lint checks against them. See `make proto`.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

@@ -1,0 +1,53 @@
+# lumen — lum's data plane.
+#
+# A single self-contained binary that owns the "bytes" side of the system:
+# parsing documents, chunking text, generating embeddings (fastembed, local
+# ONNX models auto-downloaded on first run), and vector storage/search
+# (qdrant-edge, an embedded in-process Qdrant — think SQLite for vectors).
+#
+# It exposes one gRPC service (see proto/lum/v1/dataplane.proto) and is
+# spawned and supervised by the Go control plane (lumd).
+
+[package]
+name = "lumen"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "lum data plane: parse, chunk, embed, and search documents"
+
+[dependencies]
+# --- gRPC server ---
+tonic = "0.14"        # gRPC over HTTP/2
+tonic-prost = "0.14"  # prost (protobuf) codec for tonic
+prost = "0.14"        # protobuf runtime (generated message types)
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+
+# --- The pipeline ---
+# Local embedding inference via ONNX Runtime. Models are downloaded to
+# our data dir on first use; no API keys, no network at query time.
+fastembed = "5"
+# Embedded vector search engine from the Qdrant project. Runs entirely
+# in-process; data lives under ~/.lum/vectors. Beta, but its API surface
+# we use (update/query) is small and wrapped behind our VectorStore trait
+# so it can be swapped for a Qdrant server later without touching the
+# pipeline.
+qdrant-edge = "0.7"
+
+# --- Utilities ---
+uuid = { version = "1", features = ["v5"] }  # deterministic chunk point IDs
+serde_json = "1"                             # chunk payloads
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+# Compiles proto/lum/v1/dataplane.proto at build time. protox is a pure
+# Rust protobuf compiler, so contributors don't need protoc installed.
+tonic-prost-build = "0.14"
+protox = "0.9"
+
+[profile.release]
+# qdrant-edge and ort are large; thin-LTO keeps the binary lean without
+# blowing up compile times.
+lto = "thin"
