@@ -1,0 +1,135 @@
+// dataplane.proto — the contract between lum's two planes.
+//
+// This file is the single source of truth for how the Go control plane
+// (lumd) talks to the Rust data plane (lumen). Both sides generate code
+// from it:
+//
+//   - Go:   `make proto` runs buf + protoc-gen-go/protoc-gen-go-grpc and
+//           commits the output to control-plane/internal/gen/.
+//   - Rust: data-plane/build.rs compiles it at build time with protox
+//           (a pure-Rust protobuf compiler — no protoc install needed).
+//
+// Design notes:
+//
+//   - The control plane owns all *orchestration* state: which sources
+//     exist, which documents they contain, content hashes, chunk counts.
+//     The data plane is intentionally stateless between calls — every
+//     request carries everything the data plane needs. This keeps the
+//     data plane restartable at any time without coordination.
+//
+//   - Chunk bookkeeping: when a document is ingested, the data plane
+//     splits it into N chunks and stores one vector point per chunk,
+//     with a point ID derived deterministically from (document_id,
+//     chunk_index). The control plane records N (chunk_count) in its
+//     catalog and passes it back on re-ingest/delete so the data plane
+//     can remove exactly the stale points. This avoids needing filtered
+//     deletes in the vector store.
+//
+// Versioning: the `lum.v1` package name is the API version. Breaking
+// changes mean a new `lum.v2` package, never edits that change the
+// meaning of existing fields.
+
+syntax = "proto3";
+
+package lum.v1;
+
+option go_package = "github.com/alDuncanson/lum/control-plane/internal/gen/lum/v1;lumv1";
+
+// DataPlane is the ingestion + retrieval engine.
+//
+// It is deliberately a *narrow* interface (four RPCs). New source types,
+// schedulers, watchers, etc. live entirely in the control plane and reuse
+// these same RPCs — adding an RSS source requires zero changes here.
+// New *file formats* live entirely in the data plane behind its Parser
+// trait — also zero changes here.
+service DataPlane {
+  // Health reports whether the data plane is ready to serve requests.
+  // "Ready" means the embedding model is loaded (downloaded on first
+  // run) and the vector store is open. The control plane polls this
+  // after spawning the data plane process.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // IngestDocument runs the full pipeline for one document:
+  // parse → chunk → embed → upsert vectors.
+  //
+  // Idempotent: re-ingesting the same document_id replaces its chunks.
+  rpc IngestDocument(IngestDocumentRequest) returns (IngestDocumentResponse);
+
+  // DeleteDocument removes all vector points belonging to a document.
+  rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
+
+  // Search embeds the query text and returns the nearest chunks.
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  // True once the embedding model and vector store are initialized.
+  bool ready = 1;
+  // Human-readable detail, e.g. the embedding model name.
+  string detail = 2;
+}
+
+message IngestDocumentRequest {
+  // Stable identifier for the document, assigned by the control plane
+  // (a UUID). Chunk point IDs are derived from this, so it must not
+  // change across re-ingests of the same logical document.
+  string document_id = 1;
+  // The source this document belongs to (control-plane source UUID).
+  // Stored in chunk payloads so results can be traced back.
+  string source_id = 2;
+  // Human-meaningful location, e.g. "/Users/al/Documents/notes.md" or,
+  // later, an RSS item URL. Returned in search results.
+  string uri = 3;
+  // MIME type detected by the source (e.g. "text/markdown"). The data
+  // plane picks a Parser implementation based on this.
+  string mime_type = 4;
+  // Raw document bytes. Parsing happens in the data plane so that new
+  // formats (PDF, HTML, ...) never require control-plane changes.
+  bytes content = 5;
+  // How many chunks the *previous* ingest of this document produced
+  // (0 if new). The data plane deletes those points before upserting,
+  // which keeps re-ingests clean even when the new chunk count shrinks.
+  uint32 previous_chunk_count = 6;
+}
+
+message IngestDocumentResponse {
+  // Number of chunks stored. The control plane records this in its
+  // catalog and echoes it back as previous_chunk_count next time.
+  uint32 chunk_count = 1;
+}
+
+message DeleteDocumentRequest {
+  string document_id = 1;
+  // Chunk count from the control plane's catalog; identifies exactly
+  // which derived point IDs to remove.
+  uint32 chunk_count = 2;
+}
+
+message DeleteDocumentResponse {}
+
+message SearchRequest {
+  // Natural-language query. Embedded with the same model as passages.
+  string query = 1;
+  // Maximum number of chunks to return.
+  uint32 limit = 2;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+}
+
+// SearchResult is one matching chunk. Fields mirror what was provided
+// at ingest time (stored in the vector point's payload).
+message SearchResult {
+  string document_id = 1;
+  string source_id = 2;
+  string uri = 3;
+  uint32 chunk_index = 4;
+  // Cosine similarity score in [0, 1]; higher is more similar.
+  float score = 5;
+  // The chunk text itself, so callers can show a snippet without
+  // re-reading the original file.
+  string text = 6;
+}
