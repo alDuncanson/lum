@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tonic::{Request, Response, Status};
 
@@ -21,13 +22,19 @@ use crate::store::{edge::EdgeStore, DocumentMeta, VectorStore};
 /// Must match the control plane's dataplane.ContractVersion.
 const CONTRACT_VERSION: &str = "1";
 
-fn log_request<T>(request: &Request<T>, rpc: &'static str) {
+fn log_request<T>(request: &Request<T>, rpc: &'static str) -> String {
     let request_id = request
         .metadata()
         .get("x-request-id")
         .and_then(|value| value.to_str().ok())
-        .unwrap_or("missing");
+        .unwrap_or("missing")
+        .to_owned();
     tracing::info!(request_id, rpc, "gRPC request");
+    request_id
+}
+
+fn milliseconds(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
 }
 
 /// Shared, immutable pipeline. Wrapped in `Arc` so request handlers can
@@ -83,7 +90,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         &self,
         request: Request<pb::HealthRequest>,
     ) -> Result<Response<pb::HealthResponse>, Status> {
-        log_request(&request, "Health");
+        let _ = log_request(&request, "Health");
         // Initialization completes before the server starts listening,
         // so reachable implies ready.
         Ok(Response::new(pb::HealthResponse {
@@ -97,24 +104,53 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         &self,
         request: Request<pb::IngestDocumentRequest>,
     ) -> Result<Response<pb::IngestDocumentResponse>, Status> {
-        log_request(&request, "IngestDocument");
+        let request_id = log_request(&request, "IngestDocument");
         let req = request.into_inner();
         let chunk_count = self
             .run_blocking(move |p| {
+                let total_started = Instant::now();
+                let content_bytes = req.content.len();
+
+                let started = Instant::now();
                 let text = p.parsers.parse(&req.mime_type, &req.content)?;
+                let parse_duration = started.elapsed();
+
+                let started = Instant::now();
                 let chunks = p.chunker.chunk(&text);
+                let chunk_duration = started.elapsed();
 
                 // Drop the previous generation of points first, so a
                 // shrinking document leaves no stale tail behind.
+                let started = Instant::now();
                 p.store
                     .delete_document(&req.document_id, req.previous_chunk_count)?;
+                let delete_duration = started.elapsed();
 
                 if chunks.is_empty() {
+                    tracing::info!(
+                        request_id,
+                        document_id = req.document_id,
+                        content_bytes,
+                        chunks = 0,
+                        batch_size = 0,
+                        parse_ms = milliseconds(parse_duration),
+                        chunk_ms = milliseconds(chunk_duration),
+                        delete_ms = milliseconds(delete_duration),
+                        embed_ms = 0.0,
+                        upsert_ms = 0.0,
+                        total_ms = milliseconds(total_started.elapsed()),
+                        "ingest pipeline complete"
+                    );
                     return Ok(0); // empty file: nothing to index
                 }
 
                 let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+                let batch_size = texts.len();
+                let started = Instant::now();
                 let vectors = p.embedder.embed_passages(&texts)?;
+                let embed_duration = started.elapsed();
+
+                let started = Instant::now();
                 p.store.upsert_document(
                     DocumentMeta {
                         document_id: &req.document_id,
@@ -124,6 +160,21 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
                     &chunks,
                     vectors,
                 )?;
+                let upsert_duration = started.elapsed();
+                tracing::info!(
+                    request_id,
+                    document_id = req.document_id,
+                    content_bytes,
+                    chunks = chunks.len(),
+                    batch_size,
+                    parse_ms = milliseconds(parse_duration),
+                    chunk_ms = milliseconds(chunk_duration),
+                    delete_ms = milliseconds(delete_duration),
+                    embed_ms = milliseconds(embed_duration),
+                    upsert_ms = milliseconds(upsert_duration),
+                    total_ms = milliseconds(total_started.elapsed()),
+                    "ingest pipeline complete"
+                );
                 Ok(chunks.len() as u32)
             })
             .await?;
@@ -135,7 +186,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         &self,
         request: Request<pb::DeleteDocumentRequest>,
     ) -> Result<Response<pb::DeleteDocumentResponse>, Status> {
-        log_request(&request, "DeleteDocument");
+        let _ = log_request(&request, "DeleteDocument");
         let req = request.into_inner();
         self.run_blocking(move |p| p.store.delete_document(&req.document_id, req.chunk_count))
             .await?;
@@ -146,7 +197,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         &self,
         request: Request<pb::SearchRequest>,
     ) -> Result<Response<pb::SearchResponse>, Status> {
-        log_request(&request, "Search");
+        let _ = log_request(&request, "Search");
         let req = request.into_inner();
         if req.query.trim().is_empty() {
             return Err(Status::invalid_argument("query must not be empty"));
