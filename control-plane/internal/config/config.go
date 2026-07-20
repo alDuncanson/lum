@@ -17,6 +17,9 @@ const (
 	DefaultHTTPAddr = "127.0.0.1:7420"
 	// DefaultGRPCAddr is where the data plane (lumen) serves gRPC.
 	DefaultGRPCAddr = "127.0.0.1:7421"
+	// DefaultEmbeddingModel preserves the original full-precision model.
+	// "quantized" is available as an opt-in CPU-throughput tradeoff.
+	DefaultEmbeddingModel = "standard"
 )
 
 // Config holds the resolved settings for a lumd process.
@@ -33,15 +36,19 @@ type Config struct {
 	// LumenPath optionally pins the lumen binary location. Empty means
 	// auto-discover (next to the lum executable, then $PATH).
 	LumenPath string
+	// EmbeddingModel selects the standard or quantized bge-small model.
+	// Changing it requires clearing the existing catalog and vector index.
+	EmbeddingModel string
 }
 
 // Load builds a Config from environment variables and defaults.
 func Load() Config {
 	return Config{
-		DataDir:   envOr("LUM_DATA_DIR", filepath.Join(homeDir(), ".lum")),
-		HTTPAddr:  envOr("LUM_HTTP_ADDR", DefaultHTTPAddr),
-		GRPCAddr:  envOr("LUM_GRPC_ADDR", DefaultGRPCAddr),
-		LumenPath: os.Getenv("LUM_LUMEN_PATH"),
+		DataDir:        envOr("LUM_DATA_DIR", filepath.Join(homeDir(), ".lum")),
+		HTTPAddr:       envOr("LUM_HTTP_ADDR", DefaultHTTPAddr),
+		GRPCAddr:       envOr("LUM_GRPC_ADDR", DefaultGRPCAddr),
+		LumenPath:      os.Getenv("LUM_LUMEN_PATH"),
+		EmbeddingModel: envOr("LUM_EMBEDDING_MODEL", DefaultEmbeddingModel),
 	}
 }
 

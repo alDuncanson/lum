@@ -30,7 +30,7 @@ type Supervisor struct {
 // SIGKILLs the child the moment the context cancels, which on shutdown
 // would race (and beat) our graceful Stop() and cost qdrant-edge its
 // final flush. Lifetime is managed explicitly by Stop() instead.
-func Spawn(explicitPath, dataDir, grpcAddr string) (*Supervisor, error) {
+func Spawn(explicitPath, dataDir, grpcAddr, embeddingModel string) (*Supervisor, error) {
 	bin, err := findLumen(explicitPath)
 	if err != nil {
 		return nil, err
@@ -39,6 +39,7 @@ func Spawn(explicitPath, dataDir, grpcAddr string) (*Supervisor, error) {
 	cmd := exec.Command(bin,
 		"--grpc-addr", grpcAddr,
 		"--data-dir", dataDir,
+		"--embedding-model", embeddingModel,
 	)
 	// lumen logs to stderr; surface it through our own stderr so
 	// `lum serve` shows one merged, timestamped stream.
@@ -48,7 +49,7 @@ func Spawn(explicitPath, dataDir, grpcAddr string) (*Supervisor, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting lumen (%s): %w", bin, err)
 	}
-	slog.Info("data plane spawned", "binary", bin, "pid", cmd.Process.Pid)
+	slog.Info("data plane spawned", "binary", bin, "pid", cmd.Process.Pid, "embedding_model", embeddingModel)
 
 	s := &Supervisor{cmd: cmd, done: make(chan struct{})}
 	go func() {

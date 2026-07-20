@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 use tonic::{Request, Response, Status};
 
 use crate::pb;
-use crate::pipeline::{Chunk, Chunker, Embedder, FastEmbedder, ParserRegistry, WordWindowChunker};
+use crate::pipeline::{
+    Chunk, Chunker, Embedder, EmbeddingModelChoice, FastEmbedder, ParserRegistry, WordWindowChunker,
+};
 use crate::store::{edge::EdgeStore, DocumentMeta, VectorStore};
 
 /// Must match the control plane's dataplane.ContractVersion.
@@ -87,8 +89,11 @@ pub struct DataPlaneService {
 impl DataPlaneService {
     /// Build the default pipeline. Blocking: downloads the embedding
     /// model on first run and opens/creates the vector index.
-    pub fn initialize(data_dir: &Path) -> anyhow::Result<Self> {
-        let embedder = FastEmbedder::initialize(&data_dir.join("models"))?;
+    pub fn initialize(
+        data_dir: &Path,
+        embedding_model: EmbeddingModelChoice,
+    ) -> anyhow::Result<Self> {
+        let embedder = FastEmbedder::initialize(&data_dir.join("models"), embedding_model)?;
         let store = EdgeStore::open(
             &data_dir.join("vectors"),
             embedder.model_name(),

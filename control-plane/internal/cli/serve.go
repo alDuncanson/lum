@@ -25,6 +25,7 @@ import (
 // ingest worker → HTTP API. Shutdown happens in reverse via defers.
 func serveCmd() *cobra.Command {
 	var lumenPath string
+	var embeddingModel string
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -34,16 +35,24 @@ func serveCmd() *cobra.Command {
 			if lumenPath != "" {
 				cfg.LumenPath = lumenPath
 			}
+			if cmd.Flags().Changed("embedding-model") {
+				cfg.EmbeddingModel = embeddingModel
+			}
 			return run(cmd.Context(), cfg)
 		},
 	}
 	cmd.Flags().StringVar(&lumenPath, "lumen", "",
 		"path to the lumen binary (default: auto-discover)")
+	cmd.Flags().StringVar(&embeddingModel, "embedding-model", config.DefaultEmbeddingModel,
+		"embedding model: standard or quantized (changing requires re-ingest)")
 	return cmd
 }
 
 func run(ctx context.Context, cfg config.Config) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if cfg.EmbeddingModel != "standard" && cfg.EmbeddingModel != "quantized" {
+		return fmt.Errorf("invalid embedding model %q: must be standard or quantized", cfg.EmbeddingModel)
+	}
 
 	// Root context cancelled by SIGINT/SIGTERM; everything hangs off it.
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
@@ -62,7 +71,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	// The data plane is a child process, not a service the user runs:
 	// spawn it, then block until its gRPC port answers. First run can
 	// take a while (embedding model download), hence the long timeout.
-	sup, err := dataplane.Spawn(cfg.LumenPath, cfg.DataDir, cfg.GRPCAddr)
+	sup, err := dataplane.Spawn(cfg.LumenPath, cfg.DataDir, cfg.GRPCAddr, cfg.EmbeddingModel)
 	if err != nil {
 		return err
 	}

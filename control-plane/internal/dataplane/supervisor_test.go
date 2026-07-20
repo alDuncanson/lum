@@ -87,9 +87,12 @@ func TestSupervisorReapsUnexpectedExit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup, err := Spawn(bin, t.TempDir(), "127.0.0.1:0")
+	sup, err := Spawn(bin, t.TempDir(), "127.0.0.1:0", "quantized")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := strings.Join(sup.cmd.Args, " "); !strings.Contains(got, "--embedding-model quantized") {
+		t.Fatalf("child args %q do not include selected embedding model", got)
 	}
 	select {
 	case <-sup.done:

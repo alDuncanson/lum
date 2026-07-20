@@ -9,11 +9,38 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 
 /// Bounds one passage inference call so a waiting interactive query gets
 /// an opportunity to acquire the model between bulk-ingest batches.
 pub const PASSAGE_BATCH_SIZE: usize = 64;
+
+/// Supported bge-small variants. The quantized model keeps the same
+/// dimensions but produces different vectors, so each has a distinct
+/// manifest identity.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum EmbeddingModelChoice {
+    #[default]
+    Standard,
+    Quantized,
+}
+
+impl EmbeddingModelChoice {
+    fn fastembed_model(self) -> EmbeddingModel {
+        match self {
+            Self::Standard => EmbeddingModel::BGESmallENV15,
+            Self::Quantized => EmbeddingModel::BGESmallENV15Q,
+        }
+    }
+
+    fn model_name(self) -> &'static str {
+        match self {
+            Self::Standard => "BAAI/bge-small-en-v1.5",
+            Self::Quantized => "Qdrant/bge-small-en-v1.5-onnx-Q",
+        }
+    }
+}
 
 /// Text-to-vector interface.
 ///
@@ -47,18 +74,20 @@ pub struct FastEmbedder {
     /// CPU-bound anyway; parallel calls would fight over cores, not
     /// help. Requests already run on the blocking thread pool.
     model: Mutex<TextEmbedding>,
+    model_name: &'static str,
 }
 
 impl FastEmbedder {
-    pub fn initialize(cache_dir: &Path) -> Result<Self> {
+    pub fn initialize(cache_dir: &Path, choice: EmbeddingModelChoice) -> Result<Self> {
         let model = TextEmbedding::try_new(
-            TextInitOptions::new(EmbeddingModel::BGESmallENV15)
+            TextInitOptions::new(choice.fastembed_model())
                 .with_cache_dir(cache_dir.to_path_buf())
                 .with_show_download_progress(true),
         )
-        .context("initializing embedding model (first run downloads ~70 MB)")?;
+        .with_context(|| format!("initializing embedding model {}", choice.model_name()))?;
         Ok(Self {
             model: Mutex::new(model),
+            model_name: choice.model_name(),
         })
     }
 }
@@ -113,6 +142,27 @@ impl Embedder for FastEmbedder {
     }
 
     fn model_name(&self) -> &'static str {
-        "BAAI/bge-small-en-v1.5"
+        self.model_name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_choices_have_distinct_manifest_identities() {
+        assert_eq!(
+            EmbeddingModelChoice::Standard.fastembed_model(),
+            EmbeddingModel::BGESmallENV15
+        );
+        assert_eq!(
+            EmbeddingModelChoice::Quantized.fastembed_model(),
+            EmbeddingModel::BGESmallENV15Q
+        );
+        assert_ne!(
+            EmbeddingModelChoice::Standard.model_name(),
+            EmbeddingModelChoice::Quantized.model_name()
+        );
     }
 }

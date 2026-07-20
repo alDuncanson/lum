@@ -39,6 +39,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use crate::pb::data_plane_server::DataPlaneServer;
+use crate::pipeline::EmbeddingModelChoice;
 use crate::service::DataPlaneService;
 
 #[derive(Parser, Debug)]
@@ -54,6 +55,11 @@ struct Args {
     /// cache and <data-dir>/vectors for the qdrant-edge index.
     #[arg(long)]
     data_dir: PathBuf,
+
+    /// Embedding model variant. Quantized is faster on CPU with a small
+    /// retrieval-quality tradeoff and requires a separate vector index.
+    #[arg(long, value_enum, default_value_t)]
+    embedding_model: EmbeddingModelChoice,
 }
 
 #[tokio::main]
@@ -72,8 +78,12 @@ async fn main() -> anyhow::Result<()> {
     // (~70 MB) and creates the vector index. The control plane treats
     // "gRPC port accepting connections" as readiness, so by the time a
     // request can arrive, everything is loaded.
-    tracing::info!(data_dir = %args.data_dir.display(), "initializing pipeline");
-    let service = DataPlaneService::initialize(&args.data_dir)?;
+    tracing::info!(
+        data_dir = %args.data_dir.display(),
+        embedding_model = ?args.embedding_model,
+        "initializing pipeline"
+    );
+    let service = DataPlaneService::initialize(&args.data_dir, args.embedding_model)?;
     tracing::info!(addr = %args.grpc_addr, "lumen ready, serving gRPC");
 
     tonic::transport::Server::builder()

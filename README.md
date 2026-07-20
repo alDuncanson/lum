@@ -125,6 +125,14 @@ Ports: HTTP API on `127.0.0.1:7420`, data plane gRPC on `127.0.0.1:7421`
 (`LUM_HTTP_ADDR` / `LUM_GRPC_ADDR` to change). Everything binds loopback
 only, by design.
 
+The full-precision embedding model remains the default. For higher CPU
+throughput with a small retrieval-quality tradeoff, start the daemon with
+`lum serve --embedding-model quantized` or `LUM_EMBEDDING_MODEL=quantized`.
+The models produce incompatible vectors: when changing models, remove
+`catalog.db`, `vectors/`, and `vectors.manifest.json` from the data directory,
+then add sources again to fully re-ingest them. Keep `models/` to avoid
+re-downloading cached model files.
+
 ## Roadmap
 
 - [x] Sources: local directories, with hash-based change detection and
