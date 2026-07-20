@@ -52,6 +52,58 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type IngestBatchFailureStage int32
+
+const (
+	IngestBatchFailureStage_INGEST_BATCH_FAILURE_STAGE_UNSPECIFIED    IngestBatchFailureStage = 0
+	IngestBatchFailureStage_INGEST_BATCH_FAILURE_STAGE_PARSE          IngestBatchFailureStage = 1
+	IngestBatchFailureStage_INGEST_BATCH_FAILURE_STAGE_RESOURCE_LIMIT IngestBatchFailureStage = 2
+	IngestBatchFailureStage_INGEST_BATCH_FAILURE_STAGE_STORE          IngestBatchFailureStage = 3
+)
+
+// Enum value maps for IngestBatchFailureStage.
+var (
+	IngestBatchFailureStage_name = map[int32]string{
+		0: "INGEST_BATCH_FAILURE_STAGE_UNSPECIFIED",
+		1: "INGEST_BATCH_FAILURE_STAGE_PARSE",
+		2: "INGEST_BATCH_FAILURE_STAGE_RESOURCE_LIMIT",
+		3: "INGEST_BATCH_FAILURE_STAGE_STORE",
+	}
+	IngestBatchFailureStage_value = map[string]int32{
+		"INGEST_BATCH_FAILURE_STAGE_UNSPECIFIED":    0,
+		"INGEST_BATCH_FAILURE_STAGE_PARSE":          1,
+		"INGEST_BATCH_FAILURE_STAGE_RESOURCE_LIMIT": 2,
+		"INGEST_BATCH_FAILURE_STAGE_STORE":          3,
+	}
+)
+
+func (x IngestBatchFailureStage) Enum() *IngestBatchFailureStage {
+	p := new(IngestBatchFailureStage)
+	*p = x
+	return p
+}
+
+func (x IngestBatchFailureStage) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (IngestBatchFailureStage) Descriptor() protoreflect.EnumDescriptor {
+	return file_lum_v1_dataplane_proto_enumTypes[0].Descriptor()
+}
+
+func (IngestBatchFailureStage) Type() protoreflect.EnumType {
+	return &file_lum_v1_dataplane_proto_enumTypes[0]
+}
+
+func (x IngestBatchFailureStage) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use IngestBatchFailureStage.Descriptor instead.
+func (IngestBatchFailureStage) EnumDescriptor() ([]byte, []int) {
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{0}
+}
+
 type HealthRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -296,6 +348,459 @@ func (x *IngestDocumentResponse) GetChunkCount() uint32 {
 	return 0
 }
 
+type IngestBatchRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Frame:
+	//
+	//	*IngestBatchRequest_Document
+	//	*IngestBatchRequest_Content
+	//	*IngestBatchRequest_EndDocument
+	Frame         isIngestBatchRequest_Frame `protobuf_oneof:"frame"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestBatchRequest) Reset() {
+	*x = IngestBatchRequest{}
+	mi := &file_lum_v1_dataplane_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestBatchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestBatchRequest) ProtoMessage() {}
+
+func (x *IngestBatchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_lum_v1_dataplane_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestBatchRequest.ProtoReflect.Descriptor instead.
+func (*IngestBatchRequest) Descriptor() ([]byte, []int) {
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *IngestBatchRequest) GetFrame() isIngestBatchRequest_Frame {
+	if x != nil {
+		return x.Frame
+	}
+	return nil
+}
+
+func (x *IngestBatchRequest) GetDocument() *IngestBatchDocumentHeader {
+	if x != nil {
+		if x, ok := x.Frame.(*IngestBatchRequest_Document); ok {
+			return x.Document
+		}
+	}
+	return nil
+}
+
+func (x *IngestBatchRequest) GetContent() []byte {
+	if x != nil {
+		if x, ok := x.Frame.(*IngestBatchRequest_Content); ok {
+			return x.Content
+		}
+	}
+	return nil
+}
+
+func (x *IngestBatchRequest) GetEndDocument() *IngestBatchEndDocument {
+	if x != nil {
+		if x, ok := x.Frame.(*IngestBatchRequest_EndDocument); ok {
+			return x.EndDocument
+		}
+	}
+	return nil
+}
+
+type isIngestBatchRequest_Frame interface {
+	isIngestBatchRequest_Frame()
+}
+
+type IngestBatchRequest_Document struct {
+	Document *IngestBatchDocumentHeader `protobuf:"bytes,1,opt,name=document,proto3,oneof"`
+}
+
+type IngestBatchRequest_Content struct {
+	// Frames are exactly 256 KiB except for the final frame, which is
+	// the exact remaining content length.
+	Content []byte `protobuf:"bytes,2,opt,name=content,proto3,oneof"`
+}
+
+type IngestBatchRequest_EndDocument struct {
+	EndDocument *IngestBatchEndDocument `protobuf:"bytes,3,opt,name=end_document,json=endDocument,proto3,oneof"`
+}
+
+func (*IngestBatchRequest_Document) isIngestBatchRequest_Frame() {}
+
+func (*IngestBatchRequest_Content) isIngestBatchRequest_Frame() {}
+
+func (*IngestBatchRequest_EndDocument) isIngestBatchRequest_Frame() {}
+
+type IngestBatchDocumentHeader struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	DocumentId         string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
+	SourceId           string                 `protobuf:"bytes,2,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
+	Uri                string                 `protobuf:"bytes,3,opt,name=uri,proto3" json:"uri,omitempty"`
+	MimeType           string                 `protobuf:"bytes,4,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	PreviousChunkCount uint32                 `protobuf:"varint,5,opt,name=previous_chunk_count,json=previousChunkCount,proto3" json:"previous_chunk_count,omitempty"`
+	// Exact number of content bytes that follow. The server rejects
+	// truncated or overlong streams before modifying the vector store.
+	ContentLength uint64 `protobuf:"varint,6,opt,name=content_length,json=contentLength,proto3" json:"content_length,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestBatchDocumentHeader) Reset() {
+	*x = IngestBatchDocumentHeader{}
+	mi := &file_lum_v1_dataplane_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestBatchDocumentHeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestBatchDocumentHeader) ProtoMessage() {}
+
+func (x *IngestBatchDocumentHeader) ProtoReflect() protoreflect.Message {
+	mi := &file_lum_v1_dataplane_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestBatchDocumentHeader.ProtoReflect.Descriptor instead.
+func (*IngestBatchDocumentHeader) Descriptor() ([]byte, []int) {
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *IngestBatchDocumentHeader) GetDocumentId() string {
+	if x != nil {
+		return x.DocumentId
+	}
+	return ""
+}
+
+func (x *IngestBatchDocumentHeader) GetSourceId() string {
+	if x != nil {
+		return x.SourceId
+	}
+	return ""
+}
+
+func (x *IngestBatchDocumentHeader) GetUri() string {
+	if x != nil {
+		return x.Uri
+	}
+	return ""
+}
+
+func (x *IngestBatchDocumentHeader) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+func (x *IngestBatchDocumentHeader) GetPreviousChunkCount() uint32 {
+	if x != nil {
+		return x.PreviousChunkCount
+	}
+	return 0
+}
+
+func (x *IngestBatchDocumentHeader) GetContentLength() uint64 {
+	if x != nil {
+		return x.ContentLength
+	}
+	return 0
+}
+
+type IngestBatchEndDocument struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestBatchEndDocument) Reset() {
+	*x = IngestBatchEndDocument{}
+	mi := &file_lum_v1_dataplane_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestBatchEndDocument) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestBatchEndDocument) ProtoMessage() {}
+
+func (x *IngestBatchEndDocument) ProtoReflect() protoreflect.Message {
+	mi := &file_lum_v1_dataplane_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestBatchEndDocument.ProtoReflect.Descriptor instead.
+func (*IngestBatchEndDocument) Descriptor() ([]byte, []int) {
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{6}
+}
+
+type IngestBatchResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Exactly one result per document header, in request order.
+	Documents     []*IngestBatchDocumentResult `protobuf:"bytes,1,rep,name=documents,proto3" json:"documents,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestBatchResponse) Reset() {
+	*x = IngestBatchResponse{}
+	mi := &file_lum_v1_dataplane_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestBatchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestBatchResponse) ProtoMessage() {}
+
+func (x *IngestBatchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_lum_v1_dataplane_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestBatchResponse.ProtoReflect.Descriptor instead.
+func (*IngestBatchResponse) Descriptor() ([]byte, []int) {
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *IngestBatchResponse) GetDocuments() []*IngestBatchDocumentResult {
+	if x != nil {
+		return x.Documents
+	}
+	return nil
+}
+
+type IngestBatchDocumentResult struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	DocumentId string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
+	// Types that are valid to be assigned to Outcome:
+	//
+	//	*IngestBatchDocumentResult_Success
+	//	*IngestBatchDocumentResult_Failure
+	Outcome       isIngestBatchDocumentResult_Outcome `protobuf_oneof:"outcome"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestBatchDocumentResult) Reset() {
+	*x = IngestBatchDocumentResult{}
+	mi := &file_lum_v1_dataplane_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestBatchDocumentResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestBatchDocumentResult) ProtoMessage() {}
+
+func (x *IngestBatchDocumentResult) ProtoReflect() protoreflect.Message {
+	mi := &file_lum_v1_dataplane_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestBatchDocumentResult.ProtoReflect.Descriptor instead.
+func (*IngestBatchDocumentResult) Descriptor() ([]byte, []int) {
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *IngestBatchDocumentResult) GetDocumentId() string {
+	if x != nil {
+		return x.DocumentId
+	}
+	return ""
+}
+
+func (x *IngestBatchDocumentResult) GetOutcome() isIngestBatchDocumentResult_Outcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return nil
+}
+
+func (x *IngestBatchDocumentResult) GetSuccess() *IngestBatchDocumentSuccess {
+	if x != nil {
+		if x, ok := x.Outcome.(*IngestBatchDocumentResult_Success); ok {
+			return x.Success
+		}
+	}
+	return nil
+}
+
+func (x *IngestBatchDocumentResult) GetFailure() *IngestBatchDocumentFailure {
+	if x != nil {
+		if x, ok := x.Outcome.(*IngestBatchDocumentResult_Failure); ok {
+			return x.Failure
+		}
+	}
+	return nil
+}
+
+type isIngestBatchDocumentResult_Outcome interface {
+	isIngestBatchDocumentResult_Outcome()
+}
+
+type IngestBatchDocumentResult_Success struct {
+	Success *IngestBatchDocumentSuccess `protobuf:"bytes,2,opt,name=success,proto3,oneof"`
+}
+
+type IngestBatchDocumentResult_Failure struct {
+	Failure *IngestBatchDocumentFailure `protobuf:"bytes,3,opt,name=failure,proto3,oneof"`
+}
+
+func (*IngestBatchDocumentResult_Success) isIngestBatchDocumentResult_Outcome() {}
+
+func (*IngestBatchDocumentResult_Failure) isIngestBatchDocumentResult_Outcome() {}
+
+type IngestBatchDocumentSuccess struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChunkCount    uint32                 `protobuf:"varint,1,opt,name=chunk_count,json=chunkCount,proto3" json:"chunk_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestBatchDocumentSuccess) Reset() {
+	*x = IngestBatchDocumentSuccess{}
+	mi := &file_lum_v1_dataplane_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestBatchDocumentSuccess) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestBatchDocumentSuccess) ProtoMessage() {}
+
+func (x *IngestBatchDocumentSuccess) ProtoReflect() protoreflect.Message {
+	mi := &file_lum_v1_dataplane_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestBatchDocumentSuccess.ProtoReflect.Descriptor instead.
+func (*IngestBatchDocumentSuccess) Descriptor() ([]byte, []int) {
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *IngestBatchDocumentSuccess) GetChunkCount() uint32 {
+	if x != nil {
+		return x.ChunkCount
+	}
+	return 0
+}
+
+type IngestBatchDocumentFailure struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	Stage         IngestBatchFailureStage `protobuf:"varint,1,opt,name=stage,proto3,enum=lum.v1.IngestBatchFailureStage" json:"stage,omitempty"`
+	Message       string                  `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestBatchDocumentFailure) Reset() {
+	*x = IngestBatchDocumentFailure{}
+	mi := &file_lum_v1_dataplane_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestBatchDocumentFailure) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestBatchDocumentFailure) ProtoMessage() {}
+
+func (x *IngestBatchDocumentFailure) ProtoReflect() protoreflect.Message {
+	mi := &file_lum_v1_dataplane_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestBatchDocumentFailure.ProtoReflect.Descriptor instead.
+func (*IngestBatchDocumentFailure) Descriptor() ([]byte, []int) {
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *IngestBatchDocumentFailure) GetStage() IngestBatchFailureStage {
+	if x != nil {
+		return x.Stage
+	}
+	return IngestBatchFailureStage_INGEST_BATCH_FAILURE_STAGE_UNSPECIFIED
+}
+
+func (x *IngestBatchDocumentFailure) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 type DeleteDocumentRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	DocumentId string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
@@ -308,7 +813,7 @@ type DeleteDocumentRequest struct {
 
 func (x *DeleteDocumentRequest) Reset() {
 	*x = DeleteDocumentRequest{}
-	mi := &file_lum_v1_dataplane_proto_msgTypes[4]
+	mi := &file_lum_v1_dataplane_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -320,7 +825,7 @@ func (x *DeleteDocumentRequest) String() string {
 func (*DeleteDocumentRequest) ProtoMessage() {}
 
 func (x *DeleteDocumentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_dataplane_proto_msgTypes[4]
+	mi := &file_lum_v1_dataplane_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -333,7 +838,7 @@ func (x *DeleteDocumentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDocumentRequest.ProtoReflect.Descriptor instead.
 func (*DeleteDocumentRequest) Descriptor() ([]byte, []int) {
-	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{4}
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DeleteDocumentRequest) GetDocumentId() string {
@@ -358,7 +863,7 @@ type DeleteDocumentResponse struct {
 
 func (x *DeleteDocumentResponse) Reset() {
 	*x = DeleteDocumentResponse{}
-	mi := &file_lum_v1_dataplane_proto_msgTypes[5]
+	mi := &file_lum_v1_dataplane_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -370,7 +875,7 @@ func (x *DeleteDocumentResponse) String() string {
 func (*DeleteDocumentResponse) ProtoMessage() {}
 
 func (x *DeleteDocumentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_dataplane_proto_msgTypes[5]
+	mi := &file_lum_v1_dataplane_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -383,7 +888,7 @@ func (x *DeleteDocumentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDocumentResponse.ProtoReflect.Descriptor instead.
 func (*DeleteDocumentResponse) Descriptor() ([]byte, []int) {
-	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{5}
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{12}
 }
 
 type SearchRequest struct {
@@ -398,7 +903,7 @@ type SearchRequest struct {
 
 func (x *SearchRequest) Reset() {
 	*x = SearchRequest{}
-	mi := &file_lum_v1_dataplane_proto_msgTypes[6]
+	mi := &file_lum_v1_dataplane_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -410,7 +915,7 @@ func (x *SearchRequest) String() string {
 func (*SearchRequest) ProtoMessage() {}
 
 func (x *SearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_dataplane_proto_msgTypes[6]
+	mi := &file_lum_v1_dataplane_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -423,7 +928,7 @@ func (x *SearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
 func (*SearchRequest) Descriptor() ([]byte, []int) {
-	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{6}
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SearchRequest) GetQuery() string {
@@ -449,7 +954,7 @@ type SearchResponse struct {
 
 func (x *SearchResponse) Reset() {
 	*x = SearchResponse{}
-	mi := &file_lum_v1_dataplane_proto_msgTypes[7]
+	mi := &file_lum_v1_dataplane_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -461,7 +966,7 @@ func (x *SearchResponse) String() string {
 func (*SearchResponse) ProtoMessage() {}
 
 func (x *SearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_dataplane_proto_msgTypes[7]
+	mi := &file_lum_v1_dataplane_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -474,7 +979,7 @@ func (x *SearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResponse.ProtoReflect.Descriptor instead.
 func (*SearchResponse) Descriptor() ([]byte, []int) {
-	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{7}
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SearchResponse) GetResults() []*SearchResult {
@@ -503,7 +1008,7 @@ type SearchResult struct {
 
 func (x *SearchResult) Reset() {
 	*x = SearchResult{}
-	mi := &file_lum_v1_dataplane_proto_msgTypes[8]
+	mi := &file_lum_v1_dataplane_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -515,7 +1020,7 @@ func (x *SearchResult) String() string {
 func (*SearchResult) ProtoMessage() {}
 
 func (x *SearchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_dataplane_proto_msgTypes[8]
+	mi := &file_lum_v1_dataplane_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -528,7 +1033,7 @@ func (x *SearchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResult.ProtoReflect.Descriptor instead.
 func (*SearchResult) Descriptor() ([]byte, []int) {
-	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{8}
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SearchResult) GetDocumentId() string {
@@ -593,7 +1098,35 @@ const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"\x14previous_chunk_count\x18\x06 \x01(\rR\x12previousChunkCount\"9\n" +
 	"\x16IngestDocumentResponse\x12\x1f\n" +
 	"\vchunk_count\x18\x01 \x01(\rR\n" +
-	"chunkCount\"Y\n" +
+	"chunkCount\"\xbf\x01\n" +
+	"\x12IngestBatchRequest\x12?\n" +
+	"\bdocument\x18\x01 \x01(\v2!.lum.v1.IngestBatchDocumentHeaderH\x00R\bdocument\x12\x1a\n" +
+	"\acontent\x18\x02 \x01(\fH\x00R\acontent\x12C\n" +
+	"\fend_document\x18\x03 \x01(\v2\x1e.lum.v1.IngestBatchEndDocumentH\x00R\vendDocumentB\a\n" +
+	"\x05frame\"\xe1\x01\n" +
+	"\x19IngestBatchDocumentHeader\x12\x1f\n" +
+	"\vdocument_id\x18\x01 \x01(\tR\n" +
+	"documentId\x12\x1b\n" +
+	"\tsource_id\x18\x02 \x01(\tR\bsourceId\x12\x10\n" +
+	"\x03uri\x18\x03 \x01(\tR\x03uri\x12\x1b\n" +
+	"\tmime_type\x18\x04 \x01(\tR\bmimeType\x120\n" +
+	"\x14previous_chunk_count\x18\x05 \x01(\rR\x12previousChunkCount\x12%\n" +
+	"\x0econtent_length\x18\x06 \x01(\x04R\rcontentLength\"\x18\n" +
+	"\x16IngestBatchEndDocument\"V\n" +
+	"\x13IngestBatchResponse\x12?\n" +
+	"\tdocuments\x18\x01 \x03(\v2!.lum.v1.IngestBatchDocumentResultR\tdocuments\"\xc7\x01\n" +
+	"\x19IngestBatchDocumentResult\x12\x1f\n" +
+	"\vdocument_id\x18\x01 \x01(\tR\n" +
+	"documentId\x12>\n" +
+	"\asuccess\x18\x02 \x01(\v2\".lum.v1.IngestBatchDocumentSuccessH\x00R\asuccess\x12>\n" +
+	"\afailure\x18\x03 \x01(\v2\".lum.v1.IngestBatchDocumentFailureH\x00R\afailureB\t\n" +
+	"\aoutcome\"=\n" +
+	"\x1aIngestBatchDocumentSuccess\x12\x1f\n" +
+	"\vchunk_count\x18\x01 \x01(\rR\n" +
+	"chunkCount\"m\n" +
+	"\x1aIngestBatchDocumentFailure\x125\n" +
+	"\x05stage\x18\x01 \x01(\x0e2\x1f.lum.v1.IngestBatchFailureStageR\x05stage\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"Y\n" +
 	"\x15DeleteDocumentRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1f\n" +
@@ -613,10 +1146,16 @@ const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"\vchunk_index\x18\x04 \x01(\rR\n" +
 	"chunkIndex\x12\x14\n" +
 	"\x05score\x18\x05 \x01(\x02R\x05score\x12\x12\n" +
-	"\x04text\x18\x06 \x01(\tR\x04text2\x9f\x02\n" +
+	"\x04text\x18\x06 \x01(\tR\x04text*\xc0\x01\n" +
+	"\x17IngestBatchFailureStage\x12*\n" +
+	"&INGEST_BATCH_FAILURE_STAGE_UNSPECIFIED\x10\x00\x12$\n" +
+	" INGEST_BATCH_FAILURE_STAGE_PARSE\x10\x01\x12-\n" +
+	")INGEST_BATCH_FAILURE_STAGE_RESOURCE_LIMIT\x10\x02\x12$\n" +
+	" INGEST_BATCH_FAILURE_STAGE_STORE\x10\x032\xe9\x02\n" +
 	"\tDataPlane\x127\n" +
 	"\x06Health\x12\x15.lum.v1.HealthRequest\x1a\x16.lum.v1.HealthResponse\x12O\n" +
-	"\x0eIngestDocument\x12\x1d.lum.v1.IngestDocumentRequest\x1a\x1e.lum.v1.IngestDocumentResponse\x12O\n" +
+	"\x0eIngestDocument\x12\x1d.lum.v1.IngestDocumentRequest\x1a\x1e.lum.v1.IngestDocumentResponse\x12H\n" +
+	"\vIngestBatch\x12\x1a.lum.v1.IngestBatchRequest\x1a\x1b.lum.v1.IngestBatchResponse(\x01\x12O\n" +
 	"\x0eDeleteDocument\x12\x1d.lum.v1.DeleteDocumentRequest\x1a\x1e.lum.v1.DeleteDocumentResponse\x127\n" +
 	"\x06Search\x12\x15.lum.v1.SearchRequest\x1a\x16.lum.v1.SearchResponseBDZBgithub.com/alDuncanson/lum/control-plane/internal/gen/lum/v1;lumv1b\x06proto3"
 
@@ -632,33 +1171,50 @@ func file_lum_v1_dataplane_proto_rawDescGZIP() []byte {
 	return file_lum_v1_dataplane_proto_rawDescData
 }
 
-var file_lum_v1_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_lum_v1_dataplane_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_lum_v1_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_lum_v1_dataplane_proto_goTypes = []any{
-	(*HealthRequest)(nil),          // 0: lum.v1.HealthRequest
-	(*HealthResponse)(nil),         // 1: lum.v1.HealthResponse
-	(*IngestDocumentRequest)(nil),  // 2: lum.v1.IngestDocumentRequest
-	(*IngestDocumentResponse)(nil), // 3: lum.v1.IngestDocumentResponse
-	(*DeleteDocumentRequest)(nil),  // 4: lum.v1.DeleteDocumentRequest
-	(*DeleteDocumentResponse)(nil), // 5: lum.v1.DeleteDocumentResponse
-	(*SearchRequest)(nil),          // 6: lum.v1.SearchRequest
-	(*SearchResponse)(nil),         // 7: lum.v1.SearchResponse
-	(*SearchResult)(nil),           // 8: lum.v1.SearchResult
+	(IngestBatchFailureStage)(0),       // 0: lum.v1.IngestBatchFailureStage
+	(*HealthRequest)(nil),              // 1: lum.v1.HealthRequest
+	(*HealthResponse)(nil),             // 2: lum.v1.HealthResponse
+	(*IngestDocumentRequest)(nil),      // 3: lum.v1.IngestDocumentRequest
+	(*IngestDocumentResponse)(nil),     // 4: lum.v1.IngestDocumentResponse
+	(*IngestBatchRequest)(nil),         // 5: lum.v1.IngestBatchRequest
+	(*IngestBatchDocumentHeader)(nil),  // 6: lum.v1.IngestBatchDocumentHeader
+	(*IngestBatchEndDocument)(nil),     // 7: lum.v1.IngestBatchEndDocument
+	(*IngestBatchResponse)(nil),        // 8: lum.v1.IngestBatchResponse
+	(*IngestBatchDocumentResult)(nil),  // 9: lum.v1.IngestBatchDocumentResult
+	(*IngestBatchDocumentSuccess)(nil), // 10: lum.v1.IngestBatchDocumentSuccess
+	(*IngestBatchDocumentFailure)(nil), // 11: lum.v1.IngestBatchDocumentFailure
+	(*DeleteDocumentRequest)(nil),      // 12: lum.v1.DeleteDocumentRequest
+	(*DeleteDocumentResponse)(nil),     // 13: lum.v1.DeleteDocumentResponse
+	(*SearchRequest)(nil),              // 14: lum.v1.SearchRequest
+	(*SearchResponse)(nil),             // 15: lum.v1.SearchResponse
+	(*SearchResult)(nil),               // 16: lum.v1.SearchResult
 }
 var file_lum_v1_dataplane_proto_depIdxs = []int32{
-	8, // 0: lum.v1.SearchResponse.results:type_name -> lum.v1.SearchResult
-	0, // 1: lum.v1.DataPlane.Health:input_type -> lum.v1.HealthRequest
-	2, // 2: lum.v1.DataPlane.IngestDocument:input_type -> lum.v1.IngestDocumentRequest
-	4, // 3: lum.v1.DataPlane.DeleteDocument:input_type -> lum.v1.DeleteDocumentRequest
-	6, // 4: lum.v1.DataPlane.Search:input_type -> lum.v1.SearchRequest
-	1, // 5: lum.v1.DataPlane.Health:output_type -> lum.v1.HealthResponse
-	3, // 6: lum.v1.DataPlane.IngestDocument:output_type -> lum.v1.IngestDocumentResponse
-	5, // 7: lum.v1.DataPlane.DeleteDocument:output_type -> lum.v1.DeleteDocumentResponse
-	7, // 8: lum.v1.DataPlane.Search:output_type -> lum.v1.SearchResponse
-	5, // [5:9] is the sub-list for method output_type
-	1, // [1:5] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	6,  // 0: lum.v1.IngestBatchRequest.document:type_name -> lum.v1.IngestBatchDocumentHeader
+	7,  // 1: lum.v1.IngestBatchRequest.end_document:type_name -> lum.v1.IngestBatchEndDocument
+	9,  // 2: lum.v1.IngestBatchResponse.documents:type_name -> lum.v1.IngestBatchDocumentResult
+	10, // 3: lum.v1.IngestBatchDocumentResult.success:type_name -> lum.v1.IngestBatchDocumentSuccess
+	11, // 4: lum.v1.IngestBatchDocumentResult.failure:type_name -> lum.v1.IngestBatchDocumentFailure
+	0,  // 5: lum.v1.IngestBatchDocumentFailure.stage:type_name -> lum.v1.IngestBatchFailureStage
+	16, // 6: lum.v1.SearchResponse.results:type_name -> lum.v1.SearchResult
+	1,  // 7: lum.v1.DataPlane.Health:input_type -> lum.v1.HealthRequest
+	3,  // 8: lum.v1.DataPlane.IngestDocument:input_type -> lum.v1.IngestDocumentRequest
+	5,  // 9: lum.v1.DataPlane.IngestBatch:input_type -> lum.v1.IngestBatchRequest
+	12, // 10: lum.v1.DataPlane.DeleteDocument:input_type -> lum.v1.DeleteDocumentRequest
+	14, // 11: lum.v1.DataPlane.Search:input_type -> lum.v1.SearchRequest
+	2,  // 12: lum.v1.DataPlane.Health:output_type -> lum.v1.HealthResponse
+	4,  // 13: lum.v1.DataPlane.IngestDocument:output_type -> lum.v1.IngestDocumentResponse
+	8,  // 14: lum.v1.DataPlane.IngestBatch:output_type -> lum.v1.IngestBatchResponse
+	13, // 15: lum.v1.DataPlane.DeleteDocument:output_type -> lum.v1.DeleteDocumentResponse
+	15, // 16: lum.v1.DataPlane.Search:output_type -> lum.v1.SearchResponse
+	12, // [12:17] is the sub-list for method output_type
+	7,  // [7:12] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_lum_v1_dataplane_proto_init() }
@@ -666,18 +1222,28 @@ func file_lum_v1_dataplane_proto_init() {
 	if File_lum_v1_dataplane_proto != nil {
 		return
 	}
+	file_lum_v1_dataplane_proto_msgTypes[4].OneofWrappers = []any{
+		(*IngestBatchRequest_Document)(nil),
+		(*IngestBatchRequest_Content)(nil),
+		(*IngestBatchRequest_EndDocument)(nil),
+	}
+	file_lum_v1_dataplane_proto_msgTypes[8].OneofWrappers = []any{
+		(*IngestBatchDocumentResult_Success)(nil),
+		(*IngestBatchDocumentResult_Failure)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_lum_v1_dataplane_proto_rawDesc), len(file_lum_v1_dataplane_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   9,
+			NumEnums:      1,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_lum_v1_dataplane_proto_goTypes,
 		DependencyIndexes: file_lum_v1_dataplane_proto_depIdxs,
+		EnumInfos:         file_lum_v1_dataplane_proto_enumTypes,
 		MessageInfos:      file_lum_v1_dataplane_proto_msgTypes,
 	}.Build()
 	File_lum_v1_dataplane_proto = out.File

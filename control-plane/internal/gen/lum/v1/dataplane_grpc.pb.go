@@ -52,6 +52,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	DataPlane_Health_FullMethodName         = "/lum.v1.DataPlane/Health"
 	DataPlane_IngestDocument_FullMethodName = "/lum.v1.DataPlane/IngestDocument"
+	DataPlane_IngestBatch_FullMethodName    = "/lum.v1.DataPlane/IngestBatch"
 	DataPlane_DeleteDocument_FullMethodName = "/lum.v1.DataPlane/DeleteDocument"
 	DataPlane_Search_FullMethodName         = "/lum.v1.DataPlane/Search"
 )
@@ -62,7 +63,7 @@ const (
 //
 // DataPlane is the ingestion + retrieval engine.
 //
-// It is deliberately a *narrow* interface (four RPCs). New source types,
+// It is deliberately a *narrow* interface (five RPCs). New source types,
 // schedulers, watchers, etc. live entirely in the control plane and reuse
 // these same RPCs — adding an RSS source requires zero changes here.
 // New *file formats* live entirely in the data plane behind its Parser
@@ -78,6 +79,10 @@ type DataPlaneClient interface {
 	//
 	// Idempotent: re-ingesting the same document_id replaces its chunks.
 	IngestDocument(ctx context.Context, in *IngestDocumentRequest, opts ...grpc.CallOption) (*IngestDocumentResponse, error)
+	// IngestBatch streams bounded content frames for multiple documents,
+	// then embeds their chunks together. This avoids gRPC's per-message
+	// size ceiling while making short documents efficient to ingest.
+	IngestBatch(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[IngestBatchRequest, IngestBatchResponse], error)
 	// DeleteDocument removes all vector points belonging to a document.
 	DeleteDocument(ctx context.Context, in *DeleteDocumentRequest, opts ...grpc.CallOption) (*DeleteDocumentResponse, error)
 	// Search embeds the query text and returns the nearest chunks.
@@ -112,6 +117,19 @@ func (c *dataPlaneClient) IngestDocument(ctx context.Context, in *IngestDocument
 	return out, nil
 }
 
+func (c *dataPlaneClient) IngestBatch(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[IngestBatchRequest, IngestBatchResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &DataPlane_ServiceDesc.Streams[0], DataPlane_IngestBatch_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[IngestBatchRequest, IngestBatchResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DataPlane_IngestBatchClient = grpc.ClientStreamingClient[IngestBatchRequest, IngestBatchResponse]
+
 func (c *dataPlaneClient) DeleteDocument(ctx context.Context, in *DeleteDocumentRequest, opts ...grpc.CallOption) (*DeleteDocumentResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DeleteDocumentResponse)
@@ -138,7 +156,7 @@ func (c *dataPlaneClient) Search(ctx context.Context, in *SearchRequest, opts ..
 //
 // DataPlane is the ingestion + retrieval engine.
 //
-// It is deliberately a *narrow* interface (four RPCs). New source types,
+// It is deliberately a *narrow* interface (five RPCs). New source types,
 // schedulers, watchers, etc. live entirely in the control plane and reuse
 // these same RPCs — adding an RSS source requires zero changes here.
 // New *file formats* live entirely in the data plane behind its Parser
@@ -154,6 +172,10 @@ type DataPlaneServer interface {
 	//
 	// Idempotent: re-ingesting the same document_id replaces its chunks.
 	IngestDocument(context.Context, *IngestDocumentRequest) (*IngestDocumentResponse, error)
+	// IngestBatch streams bounded content frames for multiple documents,
+	// then embeds their chunks together. This avoids gRPC's per-message
+	// size ceiling while making short documents efficient to ingest.
+	IngestBatch(grpc.ClientStreamingServer[IngestBatchRequest, IngestBatchResponse]) error
 	// DeleteDocument removes all vector points belonging to a document.
 	DeleteDocument(context.Context, *DeleteDocumentRequest) (*DeleteDocumentResponse, error)
 	// Search embeds the query text and returns the nearest chunks.
@@ -173,6 +195,9 @@ func (UnimplementedDataPlaneServer) Health(context.Context, *HealthRequest) (*He
 }
 func (UnimplementedDataPlaneServer) IngestDocument(context.Context, *IngestDocumentRequest) (*IngestDocumentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method IngestDocument not implemented")
+}
+func (UnimplementedDataPlaneServer) IngestBatch(grpc.ClientStreamingServer[IngestBatchRequest, IngestBatchResponse]) error {
+	return status.Error(codes.Unimplemented, "method IngestBatch not implemented")
 }
 func (UnimplementedDataPlaneServer) DeleteDocument(context.Context, *DeleteDocumentRequest) (*DeleteDocumentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteDocument not implemented")
@@ -237,6 +262,13 @@ func _DataPlane_IngestDocument_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DataPlane_IngestBatch_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(DataPlaneServer).IngestBatch(&grpc.GenericServerStream[IngestBatchRequest, IngestBatchResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DataPlane_IngestBatchServer = grpc.ClientStreamingServer[IngestBatchRequest, IngestBatchResponse]
+
 func _DataPlane_DeleteDocument_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DeleteDocumentRequest)
 	if err := dec(in); err != nil {
@@ -297,6 +329,12 @@ var DataPlane_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _DataPlane_Search_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "IngestBatch",
+			Handler:       _DataPlane_IngestBatch_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "lum/v1/dataplane.proto",
 }

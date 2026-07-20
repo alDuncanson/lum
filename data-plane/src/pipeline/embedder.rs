@@ -6,9 +6,14 @@
 
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
+
+/// Bounds one passage inference call so a waiting interactive query gets
+/// an opportunity to acquire the model between bulk-ingest batches.
+pub const PASSAGE_BATCH_SIZE: usize = 64;
 
 /// Text-to-vector interface.
 ///
@@ -60,17 +65,44 @@ impl FastEmbedder {
 
 impl Embedder for FastEmbedder {
     fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        // bge models are trained with "passage: "/"query: " prefixes;
-        // using them measurably improves retrieval quality.
-        let prefixed: Vec<String> = texts.iter().map(|t| format!("passage: {t}")).collect();
-        let mut model = self.model.lock().expect("embedder mutex poisoned");
-        let embeddings = model.embed(prefixed, None)?;
+        let mut embeddings = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(PASSAGE_BATCH_SIZE) {
+            // bge models are trained with "passage: "/"query: " prefixes;
+            // using them measurably improves retrieval quality.
+            let prefixed: Vec<String> = batch
+                .iter()
+                .map(|text| format!("passage: {text}"))
+                .collect();
+            let waiting = Instant::now();
+            let mut model = self.model.lock().expect("embedder mutex poisoned");
+            let lock_wait = waiting.elapsed();
+            let started = Instant::now();
+            let batch_embeddings = model.embed(prefixed, Some(batch.len()))?;
+            let embed_duration = started.elapsed();
+            drop(model); // let queries interleave before the next sub-batch
+            tracing::info!(
+                batch_size = batch.len(),
+                embed_lock_wait_ms = lock_wait.as_secs_f64() * 1_000.0,
+                embed_ms = embed_duration.as_secs_f64() * 1_000.0,
+                "embedding passage batch complete"
+            );
+            embeddings.extend(batch_embeddings);
+        }
         Ok(embeddings)
     }
 
     fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        let waiting = Instant::now();
         let mut model = self.model.lock().expect("embedder mutex poisoned");
-        let mut embeddings = model.embed(vec![format!("query: {query}")], None)?;
+        let lock_wait = waiting.elapsed();
+        let started = Instant::now();
+        let mut embeddings = model.embed(vec![format!("query: {query}")], Some(1))?;
+        let embed_duration = started.elapsed();
+        tracing::info!(
+            embed_lock_wait_ms = lock_wait.as_secs_f64() * 1_000.0,
+            embed_ms = embed_duration.as_secs_f64() * 1_000.0,
+            "embedding query complete"
+        );
         embeddings
             .pop()
             .context("embedding model returned no vector for query")

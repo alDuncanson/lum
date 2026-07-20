@@ -36,6 +36,20 @@ type scanRequest struct {
 	requestID string
 }
 
+type pendingDocument struct {
+	document    catalog.Document
+	contentHash string
+	input       dataplane.IngestBatchDocument
+}
+
+const (
+	batchDocumentLimit = 128
+	batchContentTarget = 4 * 1024 * 1024
+	batchContentLimit  = 32 * 1024 * 1024
+)
+
+var documentIDNamespace = uuid.MustParse("9c4064c4-672b-4aa6-b3ba-bf18f0b94670")
+
 // Ingestor owns the scan queue and executes scans.
 type Ingestor struct {
 	catalog *catalog.Catalog
@@ -104,6 +118,45 @@ func (i *Ingestor) scanSource(ctx context.Context, sourceID string) error {
 
 	var ingested, unchanged, removed, failed int
 	seen := make(map[string]bool, len(refs))
+	var pending []pendingDocument
+	pendingBytes := 0
+	flushBatch := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		inputs := make([]dataplane.IngestBatchDocument, len(pending))
+		for index := range pending {
+			inputs[index] = pending[index].input
+		}
+		results, err := i.dp.IngestBatch(ctx, inputs)
+		if err != nil {
+			slog.Warn("ingest batch failed, skipping documents",
+				"request_id", requestID, "documents", len(pending), "error", err)
+			failed += len(pending)
+			pending = pending[:0]
+			pendingBytes = 0
+			return nil
+		}
+		for index, result := range results {
+			item := pending[index]
+			if result.Err != nil {
+				slog.Warn("ingest failed, skipping",
+					"request_id", requestID, "uri", item.document.URI, "error", result.Err)
+				failed++
+				continue
+			}
+			item.document.ContentHash = item.contentHash
+			item.document.ChunkCount = result.ChunkCount
+			item.document.IngestedAt = time.Now().UTC()
+			if err := i.catalog.UpsertDocument(ctx, item.document); err != nil {
+				return err
+			}
+			ingested++
+		}
+		pending = pending[:0]
+		pendingBytes = 0
+		return nil
+	}
 
 	for _, ref := range refs {
 		seen[ref.URI] = true
@@ -122,7 +175,11 @@ func (i *Ingestor) scanSource(ctx context.Context, sourceID string) error {
 		// IDs stay stable in the vector index.
 		doc := existing
 		if errors.Is(err, sql.ErrNoRows) {
-			doc = catalog.Document{ID: uuid.NewString(), SourceID: sourceID, URI: ref.URI}
+			doc = catalog.Document{
+				ID:       uuid.NewSHA1(documentIDNamespace, []byte(sourceID+"\x00"+ref.URI)).String(),
+				SourceID: sourceID,
+				URI:      ref.URI,
+			}
 		}
 
 		content, err := src.Read(ctx, ref)
@@ -133,22 +190,40 @@ func (i *Ingestor) scanSource(ctx context.Context, sourceID string) error {
 			continue
 		}
 
-		chunkCount, err := i.dp.IngestDocument(ctx,
-			doc.ID, sourceID, ref.URI, ref.MimeType, content, doc.ChunkCount)
-		if err != nil {
-			slog.Warn("ingest failed, skipping",
-				"request_id", requestID, "uri", ref.URI, "error", err)
+		if len(content) > batchContentLimit {
+			slog.Warn("document exceeds 32 MiB ingest limit, skipping",
+				"request_id", requestID, "uri", ref.URI, "bytes", len(content))
 			failed++
 			continue
 		}
-
-		doc.ContentHash = ref.ContentHash
-		doc.ChunkCount = chunkCount
-		doc.IngestedAt = time.Now().UTC()
-		if err := i.catalog.UpsertDocument(ctx, doc); err != nil {
-			return err
+		if len(pending) > 0 && (len(pending) >= batchDocumentLimit || pendingBytes+len(content) > batchContentTarget) {
+			if err := flushBatch(); err != nil {
+				return err
+			}
 		}
-		ingested++
+		pending = append(pending, pendingDocument{
+			document:    doc,
+			contentHash: ref.ContentHash,
+			input: dataplane.IngestBatchDocument{
+				DocumentID:         doc.ID,
+				SourceID:           sourceID,
+				URI:                ref.URI,
+				MimeType:           ref.MimeType,
+				Content:            content,
+				PreviousChunkCount: doc.ChunkCount,
+			},
+		})
+		pendingBytes += len(content)
+		if pendingBytes > batchContentTarget {
+			// Oversized-but-supported documents travel alone rather than
+			// preventing the following small documents from batching.
+			if err := flushBatch(); err != nil {
+				return err
+			}
+		}
+	}
+	if err := flushBatch(); err != nil {
+		return err
 	}
 
 	// Anything in the catalog that the scan no longer sees was deleted
