@@ -18,6 +18,18 @@ use crate::pb;
 use crate::pipeline::{Chunker, Embedder, FastEmbedder, ParserRegistry, WordWindowChunker};
 use crate::store::{edge::EdgeStore, DocumentMeta, VectorStore};
 
+/// Must match the control plane's dataplane.ContractVersion.
+const CONTRACT_VERSION: &str = "1";
+
+fn log_request<T>(request: &Request<T>, rpc: &'static str) {
+    let request_id = request
+        .metadata()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("missing");
+    tracing::info!(request_id, rpc, "gRPC request");
+}
+
 /// Shared, immutable pipeline. Wrapped in `Arc` so request handlers can
 /// move a cheap clone onto blocking threads.
 struct Pipeline {
@@ -36,7 +48,11 @@ impl DataPlaneService {
     /// model on first run and opens/creates the vector index.
     pub fn initialize(data_dir: &Path) -> anyhow::Result<Self> {
         let embedder = FastEmbedder::initialize(&data_dir.join("models"))?;
-        let store = EdgeStore::open(&data_dir.join("vectors"), embedder.dimension())?;
+        let store = EdgeStore::open(
+            &data_dir.join("vectors"),
+            embedder.model_name(),
+            embedder.dimension(),
+        )?;
         Ok(Self {
             pipeline: Arc::new(Pipeline {
                 parsers: ParserRegistry::with_defaults(),
@@ -65,13 +81,15 @@ impl DataPlaneService {
 impl pb::data_plane_server::DataPlane for DataPlaneService {
     async fn health(
         &self,
-        _request: Request<pb::HealthRequest>,
+        request: Request<pb::HealthRequest>,
     ) -> Result<Response<pb::HealthResponse>, Status> {
+        log_request(&request, "Health");
         // Initialization completes before the server starts listening,
         // so reachable implies ready.
         Ok(Response::new(pb::HealthResponse {
             ready: true,
             detail: format!("model={}", self.pipeline.embedder.model_name()),
+            contract_version: CONTRACT_VERSION.to_owned(),
         }))
     }
 
@@ -79,6 +97,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         &self,
         request: Request<pb::IngestDocumentRequest>,
     ) -> Result<Response<pb::IngestDocumentResponse>, Status> {
+        log_request(&request, "IngestDocument");
         let req = request.into_inner();
         let chunk_count = self
             .run_blocking(move |p| {
@@ -116,6 +135,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         &self,
         request: Request<pb::DeleteDocumentRequest>,
     ) -> Result<Response<pb::DeleteDocumentResponse>, Status> {
+        log_request(&request, "DeleteDocument");
         let req = request.into_inner();
         self.run_blocking(move |p| p.store.delete_document(&req.document_id, req.chunk_count))
             .await?;
@@ -126,6 +146,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         &self,
         request: Request<pb::SearchRequest>,
     ) -> Result<Response<pb::SearchResponse>, Status> {
+        log_request(&request, "Search");
         let req = request.into_inner();
         if req.query.trim().is_empty() {
             return Err(Status::invalid_argument("query must not be empty"));

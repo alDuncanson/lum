@@ -69,6 +69,9 @@ message HealthResponse {
   bool ready = 1;
   // Human-readable detail, e.g. the embedding model name.
   string detail = 2;
+  // Version of this gRPC contract implemented by the binary. The
+  // control plane refuses to start if its expected version differs.
+  string contract_version = 3;
 }
 
 message IngestDocumentRequest {

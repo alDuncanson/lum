@@ -15,11 +15,11 @@ import (
 //
 // This is what makes `lum serve` the only command a user ever starts:
 // the data plane is an implementation detail, not a second service to
-// operate. Kept intentionally minimal for now — if lumen crashes, lumd
-// reports errors until restarted. Automatic respawn with backoff is a
-// planned improvement (see docs/architecture.md).
+// operate. Unexpected exits are reaped and logged; automatic respawn
+// with backoff is a planned improvement (see docs/architecture.md).
 type Supervisor struct {
-	cmd *exec.Cmd
+	cmd  *exec.Cmd
+	done chan struct{}
 }
 
 // Spawn locates the lumen binary, starts it pointed at our data dir and
@@ -49,7 +49,18 @@ func Spawn(explicitPath, dataDir, grpcAddr string) (*Supervisor, error) {
 		return nil, fmt.Errorf("starting lumen (%s): %w", bin, err)
 	}
 	slog.Info("data plane spawned", "binary", bin, "pid", cmd.Process.Pid)
-	return &Supervisor{cmd: cmd}, nil
+
+	s := &Supervisor{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			slog.Error("data plane exited", "pid", cmd.Process.Pid, "error", err)
+		} else {
+			slog.Info("data plane exited", "pid", cmd.Process.Pid)
+		}
+		close(s.done)
+	}()
+	return s, nil
 }
 
 // Stop terminates lumen gracefully (SIGINT lets qdrant-edge flush),
@@ -58,16 +69,19 @@ func (s *Supervisor) Stop() {
 	if s.cmd.Process == nil {
 		return
 	}
-	_ = s.cmd.Process.Signal(os.Interrupt)
-
-	done := make(chan struct{})
-	go func() { _ = s.cmd.Wait(); close(done) }()
 	select {
-	case <-done:
+	case <-s.done:
+		return
+	default:
+	}
+
+	_ = s.cmd.Process.Signal(os.Interrupt)
+	select {
+	case <-s.done:
 	case <-time.After(10 * time.Second):
 		slog.Warn("data plane did not exit in time; killing")
 		_ = s.cmd.Process.Kill()
-		<-done
+		<-s.done
 	}
 	slog.Info("data plane stopped")
 }

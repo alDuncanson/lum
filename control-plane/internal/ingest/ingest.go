@@ -27,14 +27,20 @@ import (
 
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
 	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
+	"github.com/alDuncanson/lum/control-plane/internal/requestid"
 	"github.com/alDuncanson/lum/control-plane/internal/source"
 )
+
+type scanRequest struct {
+	sourceID  string
+	requestID string
+}
 
 // Ingestor owns the scan queue and executes scans.
 type Ingestor struct {
 	catalog *catalog.Catalog
 	dp      *dataplane.Client
-	queue   chan string // source IDs awaiting a scan
+	queue   chan scanRequest
 }
 
 // New creates an Ingestor and starts its worker; cancel ctx to stop.
@@ -42,7 +48,7 @@ func New(ctx context.Context, cat *catalog.Catalog, dp *dataplane.Client) *Inges
 	ing := &Ingestor{
 		catalog: cat,
 		dp:      dp,
-		queue:   make(chan string, 64),
+		queue:   make(chan scanRequest, 64),
 	}
 	go ing.worker(ctx)
 	return ing
@@ -51,11 +57,16 @@ func New(ctx context.Context, cat *catalog.Catalog, dp *dataplane.Client) *Inges
 // EnqueueScan schedules a scan of the given source. Non-blocking; if
 // the queue is full the scan is dropped with a warning (the next manual
 // or startup scan will catch up — scans are idempotent).
-func (i *Ingestor) EnqueueScan(sourceID string) {
+func (i *Ingestor) EnqueueScan(ctx context.Context, sourceID string) {
+	requestID := requestid.FromContext(ctx)
+	if requestID == "" {
+		_, requestID = requestid.New(ctx)
+	}
 	select {
-	case i.queue <- sourceID:
+	case i.queue <- scanRequest{sourceID: sourceID, requestID: requestID}:
 	default:
-		slog.Warn("scan queue full, dropping scan request", "source", sourceID)
+		slog.Warn("scan queue full, dropping scan request",
+			"request_id", requestID, "source", sourceID)
 	}
 }
 
@@ -64,9 +75,11 @@ func (i *Ingestor) worker(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case sourceID := <-i.queue:
-			if err := i.scanSource(ctx, sourceID); err != nil {
-				slog.Error("scan failed", "source", sourceID, "error", err)
+		case req := <-i.queue:
+			scanCtx := requestid.WithValue(ctx, req.requestID)
+			if err := i.scanSource(scanCtx, req.sourceID); err != nil {
+				slog.Error("scan failed", "request_id", req.requestID,
+					"source", req.sourceID, "error", err)
 			}
 		}
 	}
@@ -77,6 +90,7 @@ func (i *Ingestor) worker(ctx context.Context) {
 // no extra work the second time (hashes match, everything is skipped).
 func (i *Ingestor) scanSource(ctx context.Context, sourceID string) error {
 	started := time.Now()
+	requestID := requestid.FromContext(ctx)
 
 	src, err := i.resolveSource(ctx, sourceID)
 	if err != nil {
@@ -113,7 +127,8 @@ func (i *Ingestor) scanSource(ctx context.Context, sourceID string) error {
 
 		content, err := src.Read(ctx, ref)
 		if err != nil {
-			slog.Warn("read failed, skipping", "uri", ref.URI, "error", err)
+			slog.Warn("read failed, skipping",
+				"request_id", requestID, "uri", ref.URI, "error", err)
 			failed++
 			continue
 		}
@@ -121,7 +136,8 @@ func (i *Ingestor) scanSource(ctx context.Context, sourceID string) error {
 		chunkCount, err := i.dp.IngestDocument(ctx,
 			doc.ID, sourceID, ref.URI, ref.MimeType, content, doc.ChunkCount)
 		if err != nil {
-			slog.Warn("ingest failed, skipping", "uri", ref.URI, "error", err)
+			slog.Warn("ingest failed, skipping",
+				"request_id", requestID, "uri", ref.URI, "error", err)
 			failed++
 			continue
 		}
@@ -146,7 +162,8 @@ func (i *Ingestor) scanSource(ctx context.Context, sourceID string) error {
 			continue
 		}
 		if err := i.dp.DeleteDocument(ctx, doc.ID, doc.ChunkCount); err != nil {
-			slog.Warn("vector delete failed", "uri", doc.URI, "error", err)
+			slog.Warn("vector delete failed",
+				"request_id", requestID, "uri", doc.URI, "error", err)
 			continue // keep the row; next scan retries the delete
 		}
 		if err := i.catalog.DeleteDocument(ctx, doc.ID); err != nil {
@@ -156,6 +173,7 @@ func (i *Ingestor) scanSource(ctx context.Context, sourceID string) error {
 	}
 
 	slog.Info("scan complete",
+		"request_id", requestID,
 		"source", sourceID,
 		"ingested", ingested,
 		"unchanged", unchanged,

@@ -93,9 +93,12 @@ type HealthResponse struct {
 	// True once the embedding model and vector store are initialized.
 	Ready bool `protobuf:"varint,1,opt,name=ready,proto3" json:"ready,omitempty"`
 	// Human-readable detail, e.g. the embedding model name.
-	Detail        string `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Detail string `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"`
+	// Version of this gRPC contract implemented by the binary. The
+	// control plane refuses to start if its expected version differs.
+	ContractVersion string `protobuf:"bytes,3,opt,name=contract_version,json=contractVersion,proto3" json:"contract_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *HealthResponse) Reset() {
@@ -138,6 +141,13 @@ func (x *HealthResponse) GetReady() bool {
 func (x *HealthResponse) GetDetail() string {
 	if x != nil {
 		return x.Detail
+	}
+	return ""
+}
+
+func (x *HealthResponse) GetContractVersion() string {
+	if x != nil {
+		return x.ContractVersion
 	}
 	return ""
 }
@@ -568,10 +578,11 @@ var File_lum_v1_dataplane_proto protoreflect.FileDescriptor
 const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"\n" +
 	"\x16lum/v1/dataplane.proto\x12\x06lum.v1\"\x0f\n" +
-	"\rHealthRequest\">\n" +
+	"\rHealthRequest\"i\n" +
 	"\x0eHealthResponse\x12\x14\n" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12\x16\n" +
-	"\x06detail\x18\x02 \x01(\tR\x06detail\"\xd0\x01\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail\x12)\n" +
+	"\x10contract_version\x18\x03 \x01(\tR\x0fcontractVersion\"\xd0\x01\n" +
 	"\x15IngestDocumentRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1b\n" +

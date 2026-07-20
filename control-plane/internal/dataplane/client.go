@@ -3,13 +3,22 @@ package dataplane
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	lumv1 "github.com/alDuncanson/lum/control-plane/internal/gen/lum/v1"
+	"github.com/alDuncanson/lum/control-plane/internal/requestid"
 )
+
+// ContractVersion changes only when the two binaries can no longer safely
+// communicate using the shared proto contract.
+const ContractVersion = "1"
 
 // Client is a thin, typed wrapper over the generated gRPC stub. It
 // exists so the rest of the control plane imports one small package
@@ -25,11 +34,45 @@ type Client struct {
 func Dial(addr string) (*Client, error) {
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(requestIDInterceptor),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating data plane client: %w", err)
 	}
 	return &Client{conn: conn, rpc: lumv1.NewDataPlaneClient(conn)}, nil
+}
+
+func requestIDInterceptor(
+	ctx context.Context,
+	method string,
+	req, reply any,
+	cc *grpc.ClientConn,
+	invoker grpc.UnaryInvoker,
+	opts ...grpc.CallOption,
+) error {
+	id := requestid.FromContext(ctx)
+	if id == "" {
+		ctx, id = requestid.New(ctx)
+	}
+	ctx = metadata.AppendToOutgoingContext(ctx, requestid.Header, id)
+	started := time.Now()
+	err := invoker(ctx, method, req, reply, cc, opts...)
+	code := codes.OK
+	level := slog.LevelInfo
+	if err != nil {
+		code = status.Code(err)
+		level = slog.LevelWarn
+		if method == "/lum.v1.DataPlane/Health" && code == codes.Unavailable {
+			level = slog.LevelDebug
+		}
+	}
+	slog.Log(ctx, level, "data plane RPC",
+		"request_id", id,
+		"method", method,
+		"code", code.String(),
+		"took", time.Since(started).Round(time.Millisecond),
+	)
+	return err
 }
 
 func (c *Client) Close() error { return c.conn.Close() }
@@ -38,16 +81,26 @@ func (c *Client) Close() error { return c.conn.Close() }
 // passes. The generous default matters: on first run lumen downloads
 // the embedding model (~70 MB) before it starts listening.
 func (c *Client) WaitReady(ctx context.Context, timeout time.Duration) error {
+	if requestid.FromContext(ctx) == "" {
+		ctx, _ = requestid.New(ctx)
+	}
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		resp, err := c.rpc.Health(callCtx, &lumv1.HealthRequest{})
 		cancel()
-		if err == nil && resp.GetReady() {
-			return nil
+		if err == nil {
+			if got := resp.GetContractVersion(); got != ContractVersion {
+				return fmt.Errorf("data plane contract version mismatch: lum expects %q, lumen reports %q; rebuild both binaries together", ContractVersion, got)
+			}
+			if resp.GetReady() {
+				return nil
+			}
+			lastErr = fmt.Errorf("data plane reports not ready: %s", resp.GetDetail())
+		} else {
+			lastErr = err
 		}
-		lastErr = err
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

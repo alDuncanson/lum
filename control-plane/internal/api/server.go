@@ -23,6 +23,7 @@ import (
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
 	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
 	"github.com/alDuncanson/lum/control-plane/internal/ingest"
+	"github.com/alDuncanson/lum/control-plane/internal/requestid"
 	"github.com/alDuncanson/lum/control-plane/internal/source"
 )
 
@@ -45,7 +46,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/sources/{id}/scan", s.handleScanSource)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
-	return mux
+	return withRequestID(mux)
+}
+
+func withRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, id := requestid.New(r.Context())
+		w.Header().Set(requestid.Header, id)
+		started := time.Now()
+		next.ServeHTTP(w, r.WithContext(ctx))
+		slog.Info("HTTP request",
+			"request_id", id,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"took", time.Since(started).Round(time.Millisecond),
+		)
+	})
 }
 
 // ---- handlers ----
@@ -88,7 +104,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 	// Scan asynchronously: registering a big directory shouldn't hold
 	// the HTTP request open. 202 tells the client work is in progress;
 	// progress is observable via `lum status`.
-	s.ingestor.EnqueueScan(row.ID)
+	s.ingestor.EnqueueScan(r.Context(), row.ID)
 
 	writeJSON(w, http.StatusAccepted, addSourceResponse{Source: row, Created: created})
 }
@@ -111,7 +127,7 @@ func (s *Server) handleScanSource(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, "no source with id "+id)
 		return
 	}
-	s.ingestor.EnqueueScan(id)
+	s.ingestor.EnqueueScan(r.Context(), id)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "scan queued"})
 }
 
