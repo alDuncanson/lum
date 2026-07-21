@@ -70,6 +70,15 @@ The same API the CLI uses is available to anything else:
 curl 'localhost:7420/v1/search?q=wild+yeast&limit=3'
 ```
 
+Watch the pipeline as it works via Server-Sent Events — scans, per-document
+lifecycle, data-plane readiness, and a periodic snapshot (queue depth,
+current document, index totals):
+
+```sh
+curl -N localhost:7420/v1/events                    # everything, live
+curl -N 'localhost:7420/v1/events?types=document_ingested,document_failed'
+```
+
 Indexed file types: `.txt`, `.md` (see `internal/source/localdir.go` and
 `data-plane/src/pipeline/parser.rs` for how to add more).
 

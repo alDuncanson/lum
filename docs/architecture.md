@@ -265,8 +265,21 @@ control plane doesn't reach into lumen for finer-grained visibility: it
 knows when it sent an IngestBatch RPC and when it returned, and treats
 that duration as the "embedding" phase from outside, the same opaque
 treatment of the gRPC boundary described above. This bus is a
-prerequisite for the SSE endpoint and `lum top`, not yet exposed outside
-the process.
+prerequisite for `lum top`.
+
+## Events endpoint (SSE)
+
+`GET /v1/events` exposes the bus above the process boundary as
+Server-Sent Events: one-directional, plain HTTP, so `curl -N
+localhost:7420/v1/events` works with zero client-side dependencies — the
+same API-first rule that keeps every other endpoint curl-able. On
+connect, the handler replays the ring buffer, publishes one fresh
+snapshot (so a new subscriber doesn't wait up to 2s for the next tick),
+then streams live; an optional `?types=k1,k2` filter narrows which
+`Kind`s are sent. A `: heartbeat` comment every 15s keeps the connection
+alive through idle proxies and, deliberately, counts as activity against
+lumd's own idle timer (#13) — a connected observability client is real
+activity, not just the request that opened the stream.
 
 ## Key dependency choices
 
