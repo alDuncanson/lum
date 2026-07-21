@@ -107,6 +107,7 @@ Everything lives under `~/.lum` (override with `LUM_DATA_DIR`):
 ```
 ~/.lum/
 ├── catalog.db   # SQLite: sources, documents, hashes, chunk counts, ingest failures
+├── lumen.sock   # private gRPC hop to the supervised data plane
 ├── models/      # embedding model cache (auto-downloaded)
 └── vectors/     # qdrant-edge index (embeddings + chunk payloads)
 ```
@@ -115,15 +116,18 @@ Delete the directory to reset lum completely.
 
 ## Development
 
+lum targets Unix-like systems because its private inter-process transport is a
+Unix domain socket.
+
 ```sh
 make test         # Go + Rust unit tests
 make proto        # regenerate Go code after editing proto/ (output is committed)
 make run          # build + serve
 ```
 
-Ports: HTTP API on `127.0.0.1:7420`, data plane gRPC on `127.0.0.1:7421`
-(`LUM_HTTP_ADDR` / `LUM_GRPC_ADDR` to change). Everything binds loopback
-only, by design.
+The HTTP API listens on `127.0.0.1:7420` (`LUM_HTTP_ADDR` to change). The
+private data-plane gRPC hop uses `lumen.sock` under the owner-only data
+directory; it does not open a TCP port.
 
 The full-precision embedding model remains the default. For higher CPU
 throughput with a small retrieval-quality tradeoff, start the daemon with

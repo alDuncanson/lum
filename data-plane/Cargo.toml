@@ -20,7 +20,8 @@ description = "lum data plane: parse, chunk, embed, and search documents"
 tonic = "0.14"        # gRPC over HTTP/2
 tonic-prost = "0.14"  # prost (protobuf) codec for tonic
 prost = "0.14"        # protobuf runtime (generated message types)
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["io-std", "macros", "net", "rt-multi-thread", "signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 
 # --- The pipeline ---
 # Local embedding inference via ONNX Runtime. Models are downloaded to

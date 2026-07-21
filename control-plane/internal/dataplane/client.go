@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
+	"path/filepath"
 	"time"
 
 	"google.golang.org/grpc"
@@ -55,10 +57,14 @@ type Client struct {
 	rpc  lumv1.DataPlaneClient
 }
 
-// Dial creates the (lazy) gRPC connection. Plaintext is fine here and
-// only here: the connection never leaves loopback.
-func Dial(addr string) (*Client, error) {
-	conn, err := grpc.NewClient(addr,
+// Dial creates the lazy gRPC connection over the private Unix socket.
+func Dial(socketPath string) (*Client, error) {
+	absolutePath, err := filepath.Abs(socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving data plane socket path: %w", err)
+	}
+	target := (&url.URL{Scheme: "unix", Path: absolutePath}).String()
+	conn, err := grpc.NewClient(target,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithUnaryInterceptor(requestIDInterceptor),
 	)

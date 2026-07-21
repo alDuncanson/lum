@@ -33,11 +33,12 @@ pub mod pb {
     tonic::include_proto!("lum.v1");
 }
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
-use tonic::transport::server::TcpIncoming;
+use tokio::io::AsyncReadExt;
+use tokio::net::{UnixListener, UnixStream};
+use tokio_stream::wrappers::UnixListenerStream;
 
 use crate::pb::data_plane_server::DataPlaneServer;
 use crate::pipeline::EmbeddingModelChoice;
@@ -46,10 +47,9 @@ use crate::service::DataPlaneService;
 #[derive(Parser, Debug)]
 #[command(name = "lumen", about = "lum data plane (spawned by `lum serve`)")]
 struct Args {
-    /// Address to serve gRPC on. Localhost only — lum is local-only by
-    /// design; nothing here should ever bind a public interface.
-    #[arg(long, default_value = "127.0.0.1:7421")]
-    grpc_addr: SocketAddr,
+    /// Unix socket used for the private gRPC connection from lum.
+    #[arg(long)]
+    grpc_socket: PathBuf,
 
     /// Root data directory (the control plane passes its own, typically
     /// ~/.lum). lumen uses <data-dir>/models for the embedding model
@@ -83,7 +83,8 @@ async fn main() -> anyhow::Result<()> {
     );
     // Bind before scheduling any blocking initialization so Health is
     // reachable even when a first-run model download takes minutes.
-    let incoming = TcpIncoming::bind(args.grpc_addr)?;
+    let (listener, _socket_guard) = bind_socket(&args.grpc_socket).await?;
+    let incoming = UnixListenerStream::new(listener);
     let service = DataPlaneService::starting();
     let initializer = service.clone();
     let data_dir = args.data_dir.clone();
@@ -94,17 +95,164 @@ async fn main() -> anyhow::Result<()> {
     std::thread::spawn(move || {
         initializer.initialize(data_dir, embedding_model);
     });
-    tracing::info!(addr = %args.grpc_addr, "lumen serving gRPC");
+    tracing::info!(socket = %args.grpc_socket.display(), "lumen serving gRPC");
 
     tonic::transport::Server::builder()
         .add_service(DataPlaneServer::new(service))
         .serve_with_incoming_shutdown(incoming, async {
-            // Shut down cleanly on ctrl-c or when the control plane
-            // terminates us; qdrant-edge flushes on drop.
-            let _ = tokio::signal::ctrl_c().await;
+            // The stdin pipe closes if the control plane is SIGKILLed, while
+            // ctrl-c covers its normal supervised shutdown path.
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = wait_for_parent_exit() => {}
+            }
             tracing::info!("shutdown signal received");
         })
         .await?;
 
     Ok(())
+}
+
+struct SocketGuard {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        use std::os::unix::fs::MetadataExt;
+
+        if let Ok(metadata) = std::fs::symlink_metadata(&self.path) {
+            if metadata.dev() == self.device && metadata.ino() == self.inode {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
+async fn bind_socket(path: &std::path::Path) -> anyhow::Result<(UnixListener, SocketGuard)> {
+    loop {
+        match UnixListener::bind(path) {
+            Ok(listener) => return secure_socket(path, listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                match UnixStream::connect(path).await {
+                    Ok(_) => {
+                        anyhow::bail!("data plane socket {} is already in use", path.display())
+                    }
+                    Err(connect_error)
+                        if connect_error.kind() == std::io::ErrorKind::ConnectionRefused =>
+                    {
+                        use std::os::unix::fs::FileTypeExt;
+
+                        if !std::fs::symlink_metadata(path)?.file_type().is_socket() {
+                            return Err(error.into());
+                        }
+                        let stale_path = path.with_extension(format!(
+                            "stale-{}-{}",
+                            std::process::id(),
+                            uuid::Uuid::new_v4()
+                        ));
+                        match std::fs::rename(path, &stale_path) {
+                            Ok(()) => {
+                                let result = UnixListener::bind(path)
+                                    .map_err(anyhow::Error::from)
+                                    .and_then(|listener| secure_socket(path, listener));
+                                let _ = std::fs::remove_file(stale_path);
+                                return result;
+                            }
+                            Err(rename_error)
+                                if rename_error.kind() == std::io::ErrorKind::NotFound =>
+                            {
+                                continue;
+                            }
+                            Err(rename_error) => return Err(rename_error.into()),
+                        }
+                    }
+                    Err(connect_error) => return Err(connect_error.into()),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn secure_socket(
+    path: &std::path::Path,
+    listener: UnixListener,
+) -> anyhow::Result<(UnixListener, SocketGuard)> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    Ok((
+        listener,
+        SocketGuard {
+            path: path.to_owned(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+    ))
+}
+
+async fn wait_for_parent_exit() {
+    let mut input = Vec::new();
+    let _ = tokio::io::stdin().read_to_end(&mut input).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn socket_path() -> PathBuf {
+        PathBuf::from("/tmp").join(format!("lumen-{}.sock", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn socket_is_private_and_replaces_only_stale_socket() {
+        let path = socket_path();
+        let (listener, guard) = bind_socket(&path).await.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        assert!(
+            bind_socket(&path).await.is_err(),
+            "active socket was replaced"
+        );
+        drop(listener);
+        std::mem::forget(guard); // Simulate SIGKILL leaving the socket path.
+
+        let (replacement, _replacement_guard) = bind_socket(&path).await.unwrap();
+        drop(replacement);
+    }
+
+    #[tokio::test]
+    async fn existing_regular_file_is_not_removed() {
+        let path = socket_path();
+        std::fs::write(&path, "keep").unwrap();
+
+        assert!(bind_socket(&path).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_stale_recovery_has_one_winner() {
+        let path = socket_path();
+        let (listener, guard) = bind_socket(&path).await.unwrap();
+        drop(listener);
+        std::mem::forget(guard);
+
+        let (first, second) = tokio::join!(bind_socket(&path), bind_socket(&path));
+        let (winner, loser) = if first.is_ok() {
+            (first.unwrap(), second)
+        } else {
+            (second.unwrap(), first)
+        };
+        assert!(loser.is_err());
+        UnixStream::connect(&path).await.unwrap();
+        drop(winner);
+    }
 }

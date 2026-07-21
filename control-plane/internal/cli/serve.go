@@ -61,8 +61,11 @@ func run(ctx context.Context, cfg config.Config) error {
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)
 	defer cancelDaemon()
 
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return fmt.Errorf("creating data dir: %w", err)
+	}
+	if err := os.Chmod(cfg.DataDir, 0o700); err != nil {
+		return fmt.Errorf("securing data dir: %w", err)
 	}
 
 	cat, err := catalog.Open(cfg.CatalogPath())
@@ -72,13 +75,14 @@ func run(ctx context.Context, cfg config.Config) error {
 	defer cat.Close()
 
 	// The data plane is a child process, not a service the user runs.
-	sup, err := dataplane.Spawn(cfg.LumenPath, cfg.DataDir, cfg.GRPCAddr, cfg.EmbeddingModel)
+	socketPath := cfg.GRPCSocketPath()
+	sup, err := dataplane.Spawn(cfg.LumenPath, cfg.DataDir, socketPath, cfg.EmbeddingModel)
 	if err != nil {
 		return err
 	}
 	defer sup.Stop()
 
-	dp, err := dataplane.Dial(cfg.GRPCAddr)
+	dp, err := dataplane.Dial(socketPath)
 	if err != nil {
 		return err
 	}
@@ -107,7 +111,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	}()
 	readyErrCh := make(chan error, 1)
 	go func() {
-		slog.Info("waiting for data plane", "addr", cfg.GRPCAddr)
+		slog.Info("waiting for data plane", "socket", socketPath)
 		if err := dp.WaitReady(daemonCtx); err != nil {
 			select {
 			case readyErrCh <- err:

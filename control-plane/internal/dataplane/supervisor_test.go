@@ -55,6 +55,23 @@ type legacyDataPlane struct {
 	lumv1.UnimplementedDataPlaneServer
 }
 
+func listenUnix(t *testing.T) net.Listener {
+	t.Helper()
+	file, err := os.CreateTemp("/tmp", "lum-*.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := file.Name()
+	_ = file.Close()
+	_ = os.Remove(path)
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	return listener
+}
+
 func (legacyDataPlane) IngestDocument(context.Context, *lumv1.IngestDocumentRequest) (*lumv1.IngestDocumentResponse, error) {
 	return &lumv1.IngestDocumentResponse{ChunkCount: 7}, nil
 }
@@ -112,6 +129,9 @@ func TestSupervisorReapsUnexpectedExit(t *testing.T) {
 	if got := strings.Join(sup.cmd.Args, " "); !strings.Contains(got, "--embedding-model quantized") {
 		t.Fatalf("child args %q do not include selected embedding model", got)
 	}
+	if got := strings.Join(sup.cmd.Args, " "); !strings.Contains(got, "--grpc-socket 127.0.0.1:0") {
+		t.Fatalf("child args %q do not include selected gRPC socket", got)
+	}
 	select {
 	case <-sup.done:
 	case <-time.After(5 * time.Second):
@@ -125,11 +145,42 @@ func TestSupervisorReapsUnexpectedExit(t *testing.T) {
 	sup.Stop()
 }
 
-func TestWaitReadyRejectsContractMismatch(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+func TestSupervisorStopClosesParentLivenessPipe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper is a shell script")
+	}
+
+	dataDir := t.TempDir()
+	bin := filepath.Join(t.TempDir(), "lumen")
+	script := "#!/bin/sh\ntrap '' INT\ntouch \"$4/ready\"\ncat >/dev/null\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sup, err := Spawn(bin, dataDir, filepath.Join(dataDir, "lumen.sock"), "standard")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(sup.Stop)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dataDir, "ready")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	started := time.Now()
+	sup.Stop()
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Stop took %v; stdin EOF did not stop child promptly", elapsed)
+	}
+}
+
+func TestWaitReadyRejectsContractMismatch(t *testing.T) {
+	listener := listenUnix(t)
 	server := grpc.NewServer()
 	lumv1.RegisterDataPlaneServer(server, mismatchedDataPlane{})
 	go func() { _ = server.Serve(listener) }()
@@ -151,6 +202,49 @@ func TestWaitReadyRejectsContractMismatch(t *testing.T) {
 	err = client.WaitReady(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "contract version mismatch") {
 		t.Fatalf("WaitReady error = %v, want contract version mismatch", err)
+	}
+}
+
+func TestDialEscapesSocketPath(t *testing.T) {
+	file, err := os.CreateTemp("/tmp", "lum-*.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := file.Name() + "#?.sock"
+	_ = file.Close()
+	_ = os.Remove(file.Name())
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(path)
+	})
+	server := grpc.NewServer()
+	lumv1.RegisterDataPlaneServer(server, &healthDataPlane{response: &lumv1.HealthResponse{
+		Ready: true, ContractVersion: ContractVersion, State: lumv1.ReadinessState_READINESS_STATE_READY,
+	}})
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(workingDir, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := client.Health(ctx); err != nil {
+		t.Fatalf("dialing escaped relative socket path: %v", err)
 	}
 }
 
@@ -177,10 +271,7 @@ func TestReadinessStateAndLegacyFallback(t *testing.T) {
 }
 
 func TestWaitReadyMonitorsUnavailableUntilReady(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := listenUnix(t)
 	server := grpc.NewServer()
 	fake := &healthDataPlane{response: &lumv1.HealthResponse{
 		ContractVersion: ContractVersion,
@@ -208,10 +299,7 @@ func TestWaitReadyMonitorsUnavailableUntilReady(t *testing.T) {
 
 func TestIngestBatchStreamsBoundedFramesAcrossDocuments(t *testing.T) {
 	service := &batchDataPlane{}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := listenUnix(t)
 	server := grpc.NewServer()
 	lumv1.RegisterDataPlaneServer(server, service)
 	go func() { _ = server.Serve(listener) }()
@@ -248,10 +336,7 @@ func TestIngestBatchStreamsBoundedFramesAcrossDocuments(t *testing.T) {
 }
 
 func TestIngestBatchFallsBackToLegacyUnaryRPC(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := listenUnix(t)
 	server := grpc.NewServer()
 	lumv1.RegisterDataPlaneServer(server, legacyDataPlane{})
 	go func() { _ = server.Serve(listener) }()

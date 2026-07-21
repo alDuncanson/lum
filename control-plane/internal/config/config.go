@@ -1,9 +1,9 @@
 // Package config centralizes every tunable of the control plane.
 //
-// lum is local-only: both listen addresses default to loopback and
-// nothing in the codebase should ever bind 0.0.0.0. Configuration comes
-// from environment variables (LUM_*) with sensible defaults; `lum serve`
-// also exposes the important ones as flags.
+// lum is local-only: the HTTP API defaults to loopback and the private
+// data-plane hop uses a Unix socket under the data directory. Configuration
+// comes from environment variables (LUM_*) with sensible defaults; `lum
+// serve` also exposes the important ones as flags.
 package config
 
 import (
@@ -15,8 +15,6 @@ const (
 	// DefaultHTTPAddr is where lumd serves its REST API and where the
 	// CLI expects to find it.
 	DefaultHTTPAddr = "127.0.0.1:7420"
-	// DefaultGRPCAddr is where the data plane (lumen) serves gRPC.
-	DefaultGRPCAddr = "127.0.0.1:7421"
 	// DefaultEmbeddingModel preserves the original full-precision model.
 	// "quantized" is available as an opt-in CPU-throughput tradeoff.
 	DefaultEmbeddingModel = "standard"
@@ -30,9 +28,6 @@ type Config struct {
 	DataDir string
 	// HTTPAddr is the REST API listen address.
 	HTTPAddr string
-	// GRPCAddr is the address lumen is told to listen on and lumd
-	// connects to.
-	GRPCAddr string
 	// LumenPath optionally pins the lumen binary location. Empty means
 	// auto-discover (next to the lum executable, then $PATH).
 	LumenPath string
@@ -46,7 +41,6 @@ func Load() Config {
 	return Config{
 		DataDir:        envOr("LUM_DATA_DIR", filepath.Join(homeDir(), ".lum")),
 		HTTPAddr:       envOr("LUM_HTTP_ADDR", DefaultHTTPAddr),
-		GRPCAddr:       envOr("LUM_GRPC_ADDR", DefaultGRPCAddr),
 		LumenPath:      os.Getenv("LUM_LUMEN_PATH"),
 		EmbeddingModel: envOr("LUM_EMBEDDING_MODEL", DefaultEmbeddingModel),
 	}
@@ -60,6 +54,13 @@ func (c Config) BaseURL() string {
 // CatalogPath is the SQLite database file.
 func (c Config) CatalogPath() string {
 	return filepath.Join(c.DataDir, "catalog.db")
+}
+
+// GRPCSocketPath is the private inter-plane transport. Keeping it under the
+// data directory gives each lum instance its own endpoint and relies on the
+// directory's owner-only permissions for access control.
+func (c Config) GRPCSocketPath() string {
+	return filepath.Join(c.DataDir, "lumen.sock")
 }
 
 func envOr(key, fallback string) string {

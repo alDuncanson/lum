@@ -4,6 +4,7 @@ package dataplane
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -18,26 +19,27 @@ import (
 // operate. Unexpected exits are reaped and logged; automatic respawn
 // with backoff is a planned improvement (see docs/architecture.md).
 type Supervisor struct {
-	cmd  *exec.Cmd
-	done chan struct{}
+	cmd   *exec.Cmd
+	stdin io.WriteCloser
+	done  chan struct{}
 }
 
 // Spawn locates the lumen binary, starts it pointed at our data dir and
-// gRPC address, and returns once the process is running (readiness is
+// gRPC socket, and returns once the process is running (readiness is
 // verified separately by dialing gRPC; see Client.WaitReady).
 //
 // Deliberately exec.Command, NOT exec.CommandContext: CommandContext
 // SIGKILLs the child the moment the context cancels, which on shutdown
 // would race (and beat) our graceful Stop() and cost qdrant-edge its
 // final flush. Lifetime is managed explicitly by Stop() instead.
-func Spawn(explicitPath, dataDir, grpcAddr, embeddingModel string) (*Supervisor, error) {
+func Spawn(explicitPath, dataDir, grpcSocket, embeddingModel string) (*Supervisor, error) {
 	bin, err := findLumen(explicitPath)
 	if err != nil {
 		return nil, err
 	}
 
 	cmd := exec.Command(bin,
-		"--grpc-addr", grpcAddr,
+		"--grpc-socket", grpcSocket,
 		"--data-dir", dataDir,
 		"--embedding-model", embeddingModel,
 	)
@@ -45,13 +47,18 @@ func Spawn(explicitPath, dataDir, grpcAddr, embeddingModel string) (*Supervisor,
 	// `lum serve` shows one merged, timestamped stream.
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("creating lumen parent-liveness pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
 		return nil, fmt.Errorf("starting lumen (%s): %w", bin, err)
 	}
 	slog.Info("data plane spawned", "binary", bin, "pid", cmd.Process.Pid, "embedding_model", embeddingModel)
 
-	s := &Supervisor{cmd: cmd, done: make(chan struct{})}
+	s := &Supervisor{cmd: cmd, stdin: stdin, done: make(chan struct{})}
 	go func() {
 		err := cmd.Wait()
 		if err != nil {
@@ -72,10 +79,14 @@ func (s *Supervisor) Stop() {
 	}
 	select {
 	case <-s.done:
+		_ = s.stdin.Close()
 		return
 	default:
 	}
 
+	// EOF is lumen's parent-liveness signal. Close the pipe before waiting so
+	// its blocking stdin reader cannot hold Tokio runtime shutdown open.
+	_ = s.stdin.Close()
 	_ = s.cmd.Process.Signal(os.Interrupt)
 	select {
 	case <-s.done:

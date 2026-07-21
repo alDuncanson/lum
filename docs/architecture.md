@@ -9,8 +9,9 @@ the files it describes.
 These were chosen up front and drive everything else:
 
 1. **Local-only.** Not "local-first with a cloud story" — local, period.
-   Every listener binds loopback. This deletes entire problem classes
-   (auth, TLS, multi-tenancy) and buys a zero-dependency UX.
+   The public API binds loopback and the private inter-plane hop uses an
+   owner-only Unix socket. This deletes entire problem classes (auth, TLS,
+   multi-tenancy) and buys a zero-dependency UX.
 2. **Two planes, two languages.** A Go control plane for orchestration
    (concurrency, servers, tooling — Go's home turf) and a Rust data
    plane for compute (parsing, embedding, vector search — where
@@ -160,6 +161,11 @@ model and vector store. `/v1/status` reports `data_plane` as `starting`,
 `downloading-model`, `ready`, or `unavailable`. Startup watches and scans begin
 only after readiness; scan-triggering API calls return 503 while loading, so a
 temporary startup state is not persisted as an ingestion failure.
+
+The control plane and lumen communicate over `lumen.sock` inside the 0700 data
+directory, avoiding a fixed private port and preventing other local users from
+bypassing the HTTP API. lumen also watches a pipe on stdin and shuts down when
+the control plane disappears, including after an ungraceful parent exit.
 
 ## Search flow
 
