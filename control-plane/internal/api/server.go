@@ -7,6 +7,7 @@
 //	POST   /v1/sources        {"uri": "~/Documents"}     register + scan
 //	GET    /v1/sources                                   list sources
 //	POST   /v1/sources/{id}/scan                         trigger rescan
+//	DELETE /v1/sources/{id}                              remove source + its vectors
 //	GET    /v1/search?q=...&limit=10                     semantic search
 //	GET    /v1/status                                    daemon + data plane health
 //	GET    /v1/events[?types=k1,k2]                       SSE event stream
@@ -58,6 +59,7 @@ func (s *Server) Handler(onRequest func()) http.Handler {
 	mux.HandleFunc("POST /v1/sources", s.handleAddSource)
 	mux.HandleFunc("GET /v1/sources", s.handleListSources)
 	mux.HandleFunc("POST /v1/sources/{id}/scan", s.handleScanSource)
+	mux.HandleFunc("DELETE /v1/sources/{id}", s.handleDeleteSource)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
@@ -185,6 +187,27 @@ func (s *Server) handleScanSource(w http.ResponseWriter, r *http.Request) {
 	}
 	s.ingestor.EnqueueScan(r.Context(), id)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "scan queued"})
+}
+
+// handleDeleteSource removes a source and every vector it produced.
+// Synchronous, unlike add/scan: a client that gets 200 back knows
+// cleanup actually finished, and a partial failure (data plane
+// temporarily unavailable) leaves the source in place with a clear
+// error rather than reporting success while vectors linger (#4).
+func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDataPlaneReady(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := s.catalog.GetSource(r.Context(), id); err != nil {
+		httpError(w, http.StatusNotFound, "no source with id "+id)
+		return
+	}
+	if err := s.ingestor.DeleteSource(r.Context(), id); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {

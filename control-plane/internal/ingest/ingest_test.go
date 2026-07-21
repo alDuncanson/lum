@@ -2,6 +2,8 @@ package ingest
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +18,8 @@ import (
 // stubDataPlane is a minimal dataplane.DataPlane for exercising the
 // ingest pipeline's event publishing without a real lumen process.
 type stubDataPlane struct {
-	failURIs map[string]bool
+	failURIs      map[string]bool
+	failDeleteIDs map[string]bool
 }
 
 func (stubDataPlane) Health(context.Context) (dataplane.HealthResult, error) {
@@ -37,7 +40,12 @@ func (s stubDataPlane) IngestBatch(_ context.Context, documents []dataplane.Inge
 	return results, nil
 }
 
-func (stubDataPlane) DeleteDocument(context.Context, string) error { return nil }
+func (s stubDataPlane) DeleteDocument(_ context.Context, documentID string) error {
+	if s.failDeleteIDs[documentID] {
+		return fmt.Errorf("stub: forced delete failure for %s", documentID)
+	}
+	return nil
+}
 
 func (stubDataPlane) Search(context.Context, string, uint32) ([]dataplane.SearchResult, error) {
 	return nil, nil
@@ -336,5 +344,130 @@ func TestScanPublishesFailedAndDeletedEvents(t *testing.T) {
 		if seen[kind] == 0 {
 			t.Errorf("expected at least one %q event, saw none (all seen: %v)", kind, seen)
 		}
+	}
+}
+
+func TestCancelQueuedScanRemovesPendingRetryAndDebounce(t *testing.T) {
+	ing := queueOnlyIngestor(context.Background())
+	ing.EnqueueScan(context.Background(), "source")
+	if len(ing.scanOrder) != 1 {
+		t.Fatalf("pending scans = %d, want 1", len(ing.scanOrder))
+	}
+
+	ing.cancelQueuedScan("source")
+	if len(ing.scanOrder) != 0 || len(ing.pending) != 0 {
+		t.Fatalf("scanOrder=%v pending=%v, want both empty after cancelQueuedScan", ing.scanOrder, ing.pending)
+	}
+}
+
+func newDeleteSourceTestCatalog(t *testing.T, sourceID string, documentIDs ...string) *catalog.Catalog {
+	t.Helper()
+	cat, err := catalog.Open(filepath.Join(t.TempDir(), "catalog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+	ctx := context.Background()
+	if _, _, err := cat.AddSource(ctx, catalog.Source{
+		ID: sourceID, Type: "localdir", URI: t.TempDir(), CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range documentIDs {
+		if err := cat.UpsertDocument(ctx, catalog.Document{
+			ID: id, SourceID: sourceID, URI: "/docs/" + id, ContentHash: "h", ChunkCount: 1, IngestedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return cat
+}
+
+func TestDeleteSourceRemovesVectorsCatalogRowsAndSource(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cat := newDeleteSourceTestCatalog(t, "source", "doc-1", "doc-2")
+
+	bus := events.NewBus(32)
+	ch, _, unsubscribe := bus.Subscribe(32)
+	defer unsubscribe()
+
+	ing := New(ctx, cat, stubDataPlane{}, bus)
+	if err := ing.DeleteSource(context.Background(), "source"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cat.GetSource(context.Background(), "source"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("source after delete: got %v, want sql.ErrNoRows", err)
+	}
+	docs, err := cat.DocumentsBySource(context.Background(), "source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 0 {
+		t.Fatalf("documents after DeleteSource = %+v, want none", docs)
+	}
+
+	deleted := 0
+drain:
+	for {
+		select {
+		case e := <-ch:
+			if e.Kind == events.KindDocumentDeleted {
+				deleted++
+			}
+		default:
+			break drain
+		}
+	}
+	if deleted != 2 {
+		t.Fatalf("document_deleted events published = %d, want 2", deleted)
+	}
+}
+
+func TestDeleteSourceLeavesSourceInPlaceOnPartialFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cat := newDeleteSourceTestCatalog(t, "source", "doc-ok", "doc-bad")
+
+	ing := New(ctx, cat, stubDataPlane{failDeleteIDs: map[string]bool{"doc-bad": true}}, nil)
+	if err := ing.DeleteSource(context.Background(), "source"); err == nil {
+		t.Fatal("expected an error when one document fails to delete")
+	}
+
+	if _, err := cat.GetSource(context.Background(), "source"); err != nil {
+		t.Fatalf("source should remain after a partial failure, got %v", err)
+	}
+	docs, err := cat.DocumentsBySource(context.Background(), "source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 || docs[0].ID != "doc-bad" {
+		t.Fatalf("documents after partial failure = %+v, want only doc-bad remaining", docs)
+	}
+}
+
+func TestDeleteSourceStopsWatching(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cat := newDeleteSourceTestCatalog(t, "source")
+
+	ing := New(ctx, cat, stubDataPlane{}, nil)
+	ing.WatchSource("source")
+	ing.mu.Lock()
+	_, watching := ing.watching["source"]
+	ing.mu.Unlock()
+	if !watching {
+		t.Fatal("WatchSource did not register a watch")
+	}
+
+	if err := ing.DeleteSource(context.Background(), "source"); err != nil {
+		t.Fatal(err)
+	}
+	ing.mu.Lock()
+	_, stillWatching := ing.watching["source"]
+	ing.mu.Unlock()
+	if stillWatching {
+		t.Fatal("DeleteSource did not stop watching the deleted source")
 	}
 }

@@ -57,7 +57,7 @@ func TestDocumentLifecycle(t *testing.T) {
 
 	// Never-ingested documents report sql.ErrNoRows; the ingest worker
 	// relies on this to distinguish "new" from "changed".
-	if _, err := c.DocumentByURI(ctx, "/tmp/docs/a.md"); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := c.DocumentByURI(ctx, "src-1", "/tmp/docs/a.md"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("unknown document: got %v, want sql.ErrNoRows", err)
 	}
 
@@ -74,7 +74,7 @@ func TestDocumentLifecycle(t *testing.T) {
 	if err := c.UpsertDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	got, err := c.DocumentByURI(ctx, "/tmp/docs/a.md")
+	got, err := c.DocumentByURI(ctx, "src-1", "/tmp/docs/a.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +93,99 @@ func TestDocumentLifecycle(t *testing.T) {
 	if err := c.DeleteDocument(ctx, "doc-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.DocumentByURI(ctx, "/tmp/docs/a.md"); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := c.DocumentByURI(ctx, "src-1", "/tmp/docs/a.md"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("after delete: got %v, want sql.ErrNoRows", err)
+	}
+}
+
+// TestDocumentIdentityIsScopedBySourceNotGloballyUnique guards against the
+// #4 regression: an overlapping/nested source (e.g. ~/Documents and
+// ~/Documents/notes registered separately) must not have its scan find
+// and silently adopt another source's document row just because the URI
+// happens to match.
+func TestDocumentIdentityIsScopedBySourceNotGloballyUnique(t *testing.T) {
+	c := openTestCatalog(t)
+	ctx := context.Background()
+
+	for _, id := range []string{"src-a", "src-b"} {
+		if _, _, err := c.AddSource(ctx, Source{ID: id, Type: "localdir", URI: "/tmp/" + id, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const sharedURI = "/tmp/docs/shared.md"
+	docA := Document{ID: "doc-a", SourceID: "src-a", URI: sharedURI, ContentHash: "hash-a", ChunkCount: 1, IngestedAt: time.Now().UTC()}
+	docB := Document{ID: "doc-b", SourceID: "src-b", URI: sharedURI, ContentHash: "hash-b", ChunkCount: 2, IngestedAt: time.Now().UTC()}
+	if err := c.UpsertDocument(ctx, docA); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UpsertDocument(ctx, docB); err != nil {
+		t.Fatal(err)
+	}
+
+	gotA, err := c.DocumentByURI(ctx, "src-a", sharedURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotA.ID != "doc-a" || gotA.ContentHash != "hash-a" {
+		t.Fatalf("DocumentByURI(src-a, ...) = %+v, want doc-a/hash-a untouched by src-b's row", gotA)
+	}
+	gotB, err := c.DocumentByURI(ctx, "src-b", sharedURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotB.ID != "doc-b" || gotB.ContentHash != "hash-b" {
+		t.Fatalf("DocumentByURI(src-b, ...) = %+v, want doc-b/hash-b untouched by src-a's row", gotB)
+	}
+
+	// Re-ingesting src-a's document must update only its own row.
+	docA.ContentHash = "hash-a-v2"
+	if err := c.UpsertDocument(ctx, docA); err != nil {
+		t.Fatal(err)
+	}
+	if gotB, err := c.DocumentByURI(ctx, "src-b", sharedURI); err != nil || gotB.ContentHash != "hash-b" {
+		t.Fatalf("src-b's document changed after src-a's re-ingest: %+v, err=%v", gotB, err)
+	}
+
+	stats, err := c.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Documents != 2 {
+		t.Fatalf("stats.Documents = %d, want 2 distinct rows for the shared URI", stats.Documents)
+	}
+}
+
+func TestDeleteSourceRemovesRowAndCascadesDocuments(t *testing.T) {
+	c := openTestCatalog(t)
+	ctx := context.Background()
+
+	if _, _, err := c.AddSource(ctx, Source{ID: "src-1", Type: "localdir", URI: "/tmp/docs", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	doc := Document{ID: "doc-1", SourceID: "src-1", URI: "/tmp/docs/a.md", ContentHash: "h", ChunkCount: 1, IngestedAt: time.Now().UTC()}
+	if err := c.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.RecordIngestFailure(ctx, IngestFailure{SourceID: "src-1", URI: "/tmp/docs/b.md", Error: "boom", FailedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.DeleteSource(ctx, "src-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetSource(ctx, "src-1"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetSource after delete: got %v, want sql.ErrNoRows", err)
+	}
+	if _, err := c.DocumentByURI(ctx, "src-1", "/tmp/docs/a.md"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("document after source delete: got %v, want sql.ErrNoRows (cascade)", err)
+	}
+	failures, err := c.IngestFailuresBySource(ctx, "src-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("ingest failures after source delete = %+v, want none (cascade)", failures)
 	}
 }
 

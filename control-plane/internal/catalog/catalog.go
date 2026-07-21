@@ -38,10 +38,15 @@ CREATE TABLE IF NOT EXISTS sources (
 CREATE TABLE IF NOT EXISTS documents (
 	id           TEXT PRIMARY KEY,           -- UUID; stable across re-ingests
 	source_id    TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-	uri          TEXT NOT NULL UNIQUE,       -- e.g. absolute file path
+	uri          TEXT NOT NULL,              -- e.g. absolute file path
 	content_hash TEXT NOT NULL,              -- sha256 of content at last ingest
 	chunk_count  INTEGER NOT NULL DEFAULT 0, -- points stored in the vector index
-	ingested_at  TEXT NOT NULL               -- RFC 3339
+	ingested_at  TEXT NOT NULL,              -- RFC 3339
+	-- Scoped to source, not globally unique: a URI is only ever
+	-- ambiguous within the source that produced it. A globally-unique
+	-- URI let a nested/overlapping source's scan find and silently
+	-- adopt another source's document rows (#4).
+	UNIQUE (source_id, uri)
 );
 
 CREATE TABLE IF NOT EXISTS ingest_failures (
@@ -148,6 +153,17 @@ func (c *Catalog) GetSource(ctx context.Context, id string) (Source, error) {
 	return scanSource(row)
 }
 
+// DeleteSource removes a source row. ON DELETE CASCADE cleans up any
+// remaining documents/ingest_failures rows, but callers must remove every
+// document's vectors from the data plane *before* calling this — the
+// cascade only ever touches catalog rows, never the vector store, so
+// calling this first would orphan vectors as unreachable-but-still-
+// searchable ghosts (#4).
+func (c *Catalog) DeleteSource(ctx context.Context, id string) error {
+	_, err := c.db.ExecContext(ctx, `DELETE FROM sources WHERE id = ?`, id)
+	return err
+}
+
 // ListSources returns all registered sources, oldest first.
 func (c *Catalog) ListSources(ctx context.Context) ([]Source, error) {
 	rows, err := c.db.QueryContext(ctx,
@@ -169,12 +185,15 @@ func (c *Catalog) ListSources(ctx context.Context) ([]Source, error) {
 
 // ---- documents ----
 
-// DocumentByURI returns the bookkeeping row for a document, or
-// sql.ErrNoRows if it has never been ingested.
-func (c *Catalog) DocumentByURI(ctx context.Context, uri string) (Document, error) {
+// DocumentByURI returns the bookkeeping row for a document within a
+// source, or sql.ErrNoRows if it has never been ingested there. Scoped to
+// source_id: the same URI can be a distinct, unrelated document under a
+// different source (e.g. two overlapping directory sources), and must
+// never be attributed to the wrong one (#4).
+func (c *Catalog) DocumentByURI(ctx context.Context, sourceID, uri string) (Document, error) {
 	row := c.db.QueryRowContext(ctx,
 		`SELECT id, source_id, uri, content_hash, chunk_count, ingested_at
-		 FROM documents WHERE uri = ?`, uri)
+		 FROM documents WHERE source_id = ? AND uri = ?`, sourceID, uri)
 	return scanDocument(row)
 }
 
@@ -203,7 +222,7 @@ func (c *Catalog) UpsertDocument(ctx context.Context, d Document) error {
 	_, err := c.db.ExecContext(ctx,
 		`INSERT INTO documents (id, source_id, uri, content_hash, chunk_count, ingested_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(uri) DO UPDATE SET
+		 ON CONFLICT(source_id, uri) DO UPDATE SET
 		   content_hash = excluded.content_hash,
 		   chunk_count  = excluded.chunk_count,
 		   ingested_at  = excluded.ingested_at`,

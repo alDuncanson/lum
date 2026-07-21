@@ -105,6 +105,28 @@ must exactly match points on disk") that could drift after a hard
 crash. The filtered delete removes that invariant entirely: the control
 plane no longer tracks or echoes back a count for this to work (#3).
 
+### Document identity and source deletion
+
+Documents are keyed on `(source_id, uri)`, not `uri` alone: nothing
+prevents registering two sources whose scans see the same path (an
+overlapping directory, or later a source type that reuses another's
+URI space), and a globally-unique `uri` let the second source's scan
+find and silently adopt the first source's document row —
+misattributed provenance with no error raised. Scoping identity to the
+source that produced it makes that impossible; each source's rows are
+independent even at an identical URI (#4).
+
+`DELETE /v1/sources/{id}` walks every document the source owns, deletes
+its vectors from the data plane, *then* deletes its catalog row —
+deliberately in that order and synchronously, unlike the fire-and-forget
+`POST /v1/sources`. The schema's `ON DELETE CASCADE` only ever cleans up
+catalog rows; deleting the source row first, before vectors are
+confirmed gone, would orphan them as unreachable-but-still-searchable
+ghosts. If any document fails to delete, the source and its remaining
+documents are left in place (not partially cleaned up) so the client
+gets a clear error and can retry, rather than a 200 papering over
+lingering vectors.
+
 ### Durability ordering
 
 `EdgeStore` flushes qdrant-edge **before** acking an ingest, because the

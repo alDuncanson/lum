@@ -103,7 +103,7 @@ type Ingestor struct {
 	scanOrder      []string
 	debounced      map[string]*debounceRequest
 	retries        map[string]*retryRequest
-	watching       map[string]struct{}
+	watching       map[string]context.CancelFunc
 	debounce       time.Duration
 	retryBase      time.Duration
 	watchFallback  time.Duration
@@ -124,7 +124,7 @@ func New(ctx context.Context, cat *catalog.Catalog, dp dataplane.DataPlane, bus 
 		pending:       make(map[string]scanRequest),
 		debounced:     make(map[string]*debounceRequest),
 		retries:       make(map[string]*retryRequest),
-		watching:      make(map[string]struct{}),
+		watching:      make(map[string]context.CancelFunc),
 		debounce:      debounceWindow,
 		retryBase:     retryBaseDelay,
 		watchFallback: 5 * time.Minute,
@@ -166,33 +166,117 @@ func (i *Ingestor) setActiveWork(document, stage string) {
 }
 
 // WatchSource starts live change detection when the source supports it.
-// Watch failures fall back to periodic authoritative scans.
+// Watch failures fall back to periodic authoritative scans. The watch
+// runs under its own cancelable context (child of the Ingestor's) so
+// StopWatching can end it independently of the other sources — in
+// particular, so DeleteSource doesn't leave a goroutine behind spamming
+// failed-scan logs for a source_id that no longer exists.
 func (i *Ingestor) WatchSource(sourceID string) {
 	i.mu.Lock()
 	if _, exists := i.watching[sourceID]; exists {
 		i.mu.Unlock()
 		return
 	}
-	i.watching[sourceID] = struct{}{}
+	ctx, cancel := context.WithCancel(i.ctx)
+	i.watching[sourceID] = cancel
 	i.mu.Unlock()
-	go i.watchSource(sourceID)
+	go i.watchSource(ctx, sourceID)
 }
 
-func (i *Ingestor) watchSource(sourceID string) {
-	src, err := i.resolveSource(i.ctx, sourceID)
+// StopWatching ends a source's live-watch goroutine (and any periodic
+// fallback scans it fell back to), if one is running. Safe to call even
+// if none is.
+func (i *Ingestor) StopWatching(sourceID string) {
+	i.mu.Lock()
+	cancel, exists := i.watching[sourceID]
+	delete(i.watching, sourceID)
+	i.mu.Unlock()
+	if exists {
+		cancel()
+	}
+}
+
+// DeleteSource removes every document belonging to a source — its
+// vectors via the data plane, then its catalog row — before removing the
+// source itself, so ON DELETE CASCADE never races ahead of vector
+// cleanup and orphans them as unreachable-but-still-searchable ghosts
+// (#4). Blocks until every document is gone or ctx ends. If any document
+// fails to delete, the source (and its remaining documents) are left in
+// place for a retry, rather than leaving a half-deleted source with no
+// way to finish cleanup.
+func (i *Ingestor) DeleteSource(ctx context.Context, sourceID string) error {
+	i.StopWatching(sourceID)
+	i.cancelQueuedScan(sourceID)
+
+	documents, err := i.catalog.DocumentsBySource(ctx, sourceID)
+	if err != nil {
+		return err
+	}
+
+	run := &scanRun{sourceID: sourceID, requestID: requestIDFrom(ctx), started: time.Now(), done: make(chan struct{})}
+	for _, document := range documents {
+		if !i.sendJob(ctx, documentJob{kind: jobDelete, run: run, document: document}) {
+			return ctx.Err()
+		}
+	}
+	if !i.sendJob(ctx, documentJob{kind: jobScanComplete, run: run}) {
+		return ctx.Err()
+	}
+	select {
+	case <-run.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	if run.err != nil {
+		return run.err
+	}
+	if run.failed > 0 {
+		return fmt.Errorf("%d of %d document(s) failed to delete; source not removed, retry the delete",
+			run.failed, len(documents))
+	}
+	return i.catalog.DeleteSource(ctx, sourceID)
+}
+
+// cancelQueuedScan removes a source from the scan queue, its retry timer,
+// and any pending debounce, so a delete doesn't race a scan that's about
+// to start reconciling (and re-creating) the documents being removed. A
+// scan already in progress is left to finish; it's a narrow, harmless
+// race (see DeleteSource's doc comment).
+func (i *Ingestor) cancelQueuedScan(sourceID string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.cancelRetryLocked(sourceID)
+	if _, pending := i.pending[sourceID]; pending {
+		delete(i.pending, sourceID)
+		for index, id := range i.scanOrder {
+			if id == sourceID {
+				i.scanOrder = append(i.scanOrder[:index], i.scanOrder[index+1:]...)
+				break
+			}
+		}
+	}
+	if request := i.debounced[sourceID]; request != nil {
+		request.timer.Stop()
+		delete(i.debounced, sourceID)
+	}
+}
+
+func (i *Ingestor) watchSource(ctx context.Context, sourceID string) {
+	src, err := i.resolveSource(ctx, sourceID)
 	if err != nil {
 		slog.Warn("cannot watch source; using periodic scans", "source", sourceID, "error", err)
-		i.periodicScans(sourceID)
+		i.periodicScans(ctx, sourceID)
 		return
 	}
 	watcher, ok := src.(source.Watcher)
 	if !ok {
 		return
 	}
-	changes, failures, err := watcher.Watch(i.ctx)
+	changes, failures, err := watcher.Watch(ctx)
 	if err != nil {
 		slog.Warn("cannot watch source; using periodic scans", "source", sourceID, "error", err)
-		i.periodicScans(sourceID)
+		i.periodicScans(ctx, sourceID)
 		return
 	}
 	var fallback *time.Ticker
@@ -204,7 +288,7 @@ func (i *Ingestor) watchSource(sourceID string) {
 	}()
 	startFallback := func(err error) {
 		slog.Warn("filesystem watch degraded; using periodic scans", "source", sourceID, "error", err)
-		i.EnqueueScan(i.ctx, sourceID)
+		i.EnqueueScan(ctx, sourceID)
 		if fallback == nil {
 			fallback = time.NewTicker(i.watchFallback)
 			fallbackC = fallback.C
@@ -212,7 +296,7 @@ func (i *Ingestor) watchSource(sourceID string) {
 	}
 	for {
 		select {
-		case <-i.ctx.Done():
+		case <-ctx.Done():
 			return
 		case _, ok := <-changes:
 			if !ok {
@@ -220,7 +304,7 @@ func (i *Ingestor) watchSource(sourceID string) {
 				startFallback(errors.New("filesystem watcher stopped"))
 				continue
 			}
-			i.EnqueueDebouncedScan(i.ctx, sourceID)
+			i.EnqueueDebouncedScan(ctx, sourceID)
 		case err, ok := <-failures:
 			if !ok {
 				failures = nil
@@ -228,20 +312,20 @@ func (i *Ingestor) watchSource(sourceID string) {
 			}
 			startFallback(err)
 		case <-fallbackC:
-			i.EnqueueScan(i.ctx, sourceID)
+			i.EnqueueScan(ctx, sourceID)
 		}
 	}
 }
 
-func (i *Ingestor) periodicScans(sourceID string) {
+func (i *Ingestor) periodicScans(ctx context.Context, sourceID string) {
 	ticker := time.NewTicker(i.watchFallback)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-i.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			i.EnqueueScan(i.ctx, sourceID)
+			i.EnqueueScan(ctx, sourceID)
 		}
 	}
 }
@@ -382,7 +466,7 @@ func (i *Ingestor) planScan(ctx context.Context, run *scanRun) error {
 	seen := make(map[string]bool, len(refs))
 	for _, ref := range refs {
 		seen[ref.URI] = true
-		existing, err := i.catalog.DocumentByURI(ctx, ref.URI)
+		existing, err := i.catalog.DocumentByURI(ctx, run.sourceID, ref.URI)
 		switch {
 		case err == nil && existing.ContentHash == ref.ContentHash:
 			if err := i.catalog.ClearIngestFailure(ctx, run.sourceID, ref.URI); err != nil {

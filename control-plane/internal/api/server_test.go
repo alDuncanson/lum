@@ -37,6 +37,12 @@ func (stubDataPlane) Search(context.Context, string, uint32) ([]dataplane.Search
 
 func newTestServer(t *testing.T, bus *events.Bus) *Server {
 	t.Helper()
+	server, _ := newTestServerWithCatalog(t, bus)
+	return server
+}
+
+func newTestServerWithCatalog(t *testing.T, bus *events.Bus) (*Server, *catalog.Catalog) {
+	t.Helper()
 	cat, err := catalog.Open(filepath.Join(t.TempDir(), "catalog.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +51,7 @@ func newTestServer(t *testing.T, bus *events.Bus) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	ing := ingest.New(ctx, cat, stubDataPlane{}, bus)
-	return New(cat, stubDataPlane{}, ing, bus)
+	return New(cat, stubDataPlane{}, ing, bus), cat
 }
 
 // lineChannel streams body's lines to a channel so tests can bound each
@@ -204,5 +210,53 @@ func TestEventsStreamReportsServiceUnavailableWithoutBus(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestDeleteSourceRemovesSourceAndReturns200(t *testing.T) {
+	server, cat := newTestServerWithCatalog(t, nil)
+	ctx := context.Background()
+	if _, _, err := cat.AddSource(ctx, catalog.Source{
+		ID: "source-1", Type: "localdir", URI: t.TempDir(), CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	httpServer := httptest.NewServer(server.Handler(nil))
+	t.Cleanup(httpServer.Close)
+
+	req, err := http.NewRequest(http.MethodDelete, httpServer.URL+"/v1/sources/source-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if _, err := cat.GetSource(ctx, "source-1"); err == nil {
+		t.Fatal("source still present in catalog after DELETE")
+	}
+}
+
+func TestDeleteSourceReturns404ForUnknownID(t *testing.T) {
+	server := newTestServer(t, nil)
+	httpServer := httptest.NewServer(server.Handler(nil))
+	t.Cleanup(httpServer.Close)
+
+	req, err := http.NewRequest(http.MethodDelete, httpServer.URL+"/v1/sources/does-not-exist", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
 }
