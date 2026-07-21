@@ -95,6 +95,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	// the daemon was down. Cheap when nothing changed (hash skips).
 	if sources, err := cat.ListSources(ctx); err == nil {
 		for _, s := range sources {
+			ingestor.WatchSource(s.ID)
 			ingestor.EnqueueScan(ctx, s.ID)
 		}
 	}

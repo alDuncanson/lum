@@ -138,6 +138,6 @@ re-downloading cached model files.
 - [x] Sources: local directories, with hash-based change detection and
       delete reconciliation on rescan
 - [x] MCP server (`lum mcp`) so local agents can search and add sources
-- [ ] Live watching (fsnotify) instead of manual rescans
+- [x] Live watching (fsnotify), with manual/startup rescans as a correctness backstop
 - [ ] Second parser (PDF or HTML) to exercise the parser seam
 - [ ] RSS source to exercise the source seam

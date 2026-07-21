@@ -43,3 +43,9 @@ type Source interface {
 	// Read fetches the raw bytes of a document reported by Scan.
 	Read(ctx context.Context, ref DocumentRef) ([]byte, error)
 }
+
+// Watcher is an optional capability for sources that can report live changes.
+// Notifications are hints only: consumers still run a full authoritative Scan.
+type Watcher interface {
+	Watch(ctx context.Context) (changes <-chan struct{}, failures <-chan error, err error)
+}

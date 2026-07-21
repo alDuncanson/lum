@@ -96,34 +96,119 @@ type Ingestor struct {
 	scanReady chan struct{}
 	jobs      chan documentJob
 
-	mu        sync.Mutex
-	pending   map[string]scanRequest
-	scanOrder []string
-	debounced map[string]*debounceRequest
-	retries   map[string]*retryRequest
-	debounce  time.Duration
-	retryBase time.Duration
+	mu            sync.Mutex
+	pending       map[string]scanRequest
+	scanOrder     []string
+	debounced     map[string]*debounceRequest
+	retries       map[string]*retryRequest
+	watching      map[string]struct{}
+	debounce      time.Duration
+	retryBase     time.Duration
+	watchFallback time.Duration
 }
 
 // New creates an Ingestor and starts its planner and document worker; cancel
 // ctx to stop both.
 func New(ctx context.Context, cat *catalog.Catalog, dp *dataplane.Client) *Ingestor {
 	ing := &Ingestor{
-		ctx:       ctx,
-		catalog:   cat,
-		dp:        dp,
-		scanReady: make(chan struct{}, 1),
-		jobs:      make(chan documentJob, 256),
-		pending:   make(map[string]scanRequest),
-		debounced: make(map[string]*debounceRequest),
-		retries:   make(map[string]*retryRequest),
-		debounce:  debounceWindow,
-		retryBase: retryBaseDelay,
+		ctx:           ctx,
+		catalog:       cat,
+		dp:            dp,
+		scanReady:     make(chan struct{}, 1),
+		jobs:          make(chan documentJob, 256),
+		pending:       make(map[string]scanRequest),
+		debounced:     make(map[string]*debounceRequest),
+		retries:       make(map[string]*retryRequest),
+		watching:      make(map[string]struct{}),
+		debounce:      debounceWindow,
+		retryBase:     retryBaseDelay,
+		watchFallback: 5 * time.Minute,
 	}
 	go ing.planner(ctx)
 	go ing.documentWorker(ctx)
 	go ing.stopDebouncers(ctx)
 	return ing
+}
+
+// WatchSource starts live change detection when the source supports it.
+// Watch failures fall back to periodic authoritative scans.
+func (i *Ingestor) WatchSource(sourceID string) {
+	i.mu.Lock()
+	if _, exists := i.watching[sourceID]; exists {
+		i.mu.Unlock()
+		return
+	}
+	i.watching[sourceID] = struct{}{}
+	i.mu.Unlock()
+	go i.watchSource(sourceID)
+}
+
+func (i *Ingestor) watchSource(sourceID string) {
+	src, err := i.resolveSource(i.ctx, sourceID)
+	if err != nil {
+		slog.Warn("cannot watch source; using periodic scans", "source", sourceID, "error", err)
+		i.periodicScans(sourceID)
+		return
+	}
+	watcher, ok := src.(source.Watcher)
+	if !ok {
+		return
+	}
+	changes, failures, err := watcher.Watch(i.ctx)
+	if err != nil {
+		slog.Warn("cannot watch source; using periodic scans", "source", sourceID, "error", err)
+		i.periodicScans(sourceID)
+		return
+	}
+	var fallback *time.Ticker
+	var fallbackC <-chan time.Time
+	defer func() {
+		if fallback != nil {
+			fallback.Stop()
+		}
+	}()
+	startFallback := func(err error) {
+		slog.Warn("filesystem watch degraded; using periodic scans", "source", sourceID, "error", err)
+		i.EnqueueScan(i.ctx, sourceID)
+		if fallback == nil {
+			fallback = time.NewTicker(i.watchFallback)
+			fallbackC = fallback.C
+		}
+	}
+	for {
+		select {
+		case <-i.ctx.Done():
+			return
+		case _, ok := <-changes:
+			if !ok {
+				changes = nil
+				startFallback(errors.New("filesystem watcher stopped"))
+				continue
+			}
+			i.EnqueueDebouncedScan(i.ctx, sourceID)
+		case err, ok := <-failures:
+			if !ok {
+				failures = nil
+				continue
+			}
+			startFallback(err)
+		case <-fallbackC:
+			i.EnqueueScan(i.ctx, sourceID)
+		}
+	}
+}
+
+func (i *Ingestor) periodicScans(sourceID string) {
+	ticker := time.NewTicker(i.watchFallback)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-i.ctx.Done():
+			return
+		case <-ticker.C:
+			i.EnqueueScan(i.ctx, sourceID)
+		}
+	}
 }
 
 // EnqueueScan schedules an immediate authoritative scan. A source already

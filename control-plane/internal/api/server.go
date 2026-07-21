@@ -104,6 +104,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 	// Scan asynchronously: registering a big directory shouldn't hold
 	// the HTTP request open. 202 tells the client work is in progress;
 	// progress is observable via `lum status`.
+	s.ingestor.WatchSource(row.ID)
 	s.ingestor.EnqueueScan(r.Context(), row.ID)
 
 	writeJSON(w, http.StatusAccepted, addSourceResponse{Source: row, Created: created})

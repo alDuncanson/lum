@@ -139,9 +139,11 @@ Scans are idempotent and cheap when nothing changed, which makes the
 recovery story trivial: rescan everything on daemon startup.
 
 Pending scans are deduplicated by source. Explicit and startup scans run
-immediately; noisy change notifications have a one-second debounce path for
-live file watching. A planner turns each authoritative source snapshot into
-document upsert/delete jobs. Those jobs are consumed by one worker — single
+immediately; fsnotify change notifications have a one-second debounce path.
+Local directory watches are recursive (new directories are added dynamically),
+skip the same hidden trees as scans, and degrade to five-minute full rescans if
+OS watch limits or event delivery fail. A planner turns each authoritative
+source snapshot into document upsert/delete jobs. Those jobs are consumed by one worker — single
 because ingestion throughput is bounded by the embedding model anyway — and
 small documents are combined into cross-document batches. The job channel is
 the "event bus" in miniature; a real broker could replace it without changing
@@ -202,12 +204,10 @@ protocol channel); diagnostics go to stderr.
 
 ## Known gaps (deliberate, ordered)
 
-1. **No live watching** — rescans are manual (`POST /v1/sources/{id}/scan`)
-   or on startup. fsnotify is next.
-2. **Supervisor doesn't respawn** — if lumen crashes, requests fail until
+1. **Supervisor doesn't respawn** — if lumen crashes, requests fail until
    `lum serve` is restarted. Restart-with-backoff is a contained exercise
    in `supervisor.go`.
-3. **Catalog/vector drift after a hard crash** is prevented by flush
+2. **Catalog/vector drift after a hard crash** is prevented by flush
    ordering, but there's no `lum verify` to audit/repair the invariant.
-4. **Scan status is coarse** — `lum status` shows counts, not per-scan
+3. **Scan status is coarse** — `lum status` shows counts, not per-scan
    progress. A jobs table in the catalog would fix this.
