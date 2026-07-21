@@ -1,19 +1,11 @@
 // Package ingest is the event-driven heart of the control plane: it
 // turns "a source changed" into catalog updates and data plane calls.
 //
-// Flow for one scan:
-//
-//	Source.Scan ──▶ diff vs catalog ──▶ per document:
-//	                                      unchanged → skip
-//	                                      new/changed → Read → dataplane.Ingest → catalog upsert
-//	                                      vanished → dataplane.Delete → catalog delete
-//
-// Scans are queued on a channel and executed by a single background
-// worker goroutine. Single, deliberately: ingestion is bottlenecked by
-// the embedding model (CPU-bound in the data plane), so source-level
-// parallelism would add contention and complexity for no throughput.
-// The channel is the system's event bus in miniature — a broker like
-// NATS could replace it someday without changing what flows through it.
+// A source scan is only the producer: it takes an authoritative snapshot,
+// diffs it against the catalog, and emits document jobs. A single document
+// worker reads, batches, embeds, and commits those jobs. Keeping documents as
+// the execution unit gives retries and file watching a natural seam without
+// introducing competing embedding workers.
 package ingest
 
 import (
@@ -21,6 +13,7 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,227 +29,391 @@ type scanRequest struct {
 	requestID string
 }
 
+type documentJobKind uint8
+
+const (
+	jobUpsert documentJobKind = iota
+	jobDelete
+	jobScanComplete
+)
+
+type documentJob struct {
+	kind     documentJobKind
+	run      *scanRun
+	source   source.Source
+	ref      source.DocumentRef
+	document catalog.Document
+	err      error
+}
+
+type scanRun struct {
+	sourceID  string
+	requestID string
+	started   time.Time
+	done      chan struct{}
+
+	ingested  int
+	unchanged int
+	removed   int
+	failed    int
+	err       error
+}
+
 type pendingDocument struct {
-	document    catalog.Document
+	job         documentJob
 	contentHash string
 	input       dataplane.IngestBatchDocument
+}
+
+type debounceRequest struct {
+	requestID string
+	timer     *time.Timer
 }
 
 const (
 	batchDocumentLimit = 128
 	batchContentTarget = 4 * 1024 * 1024
 	batchContentLimit  = 32 * 1024 * 1024
+	debounceWindow     = time.Second
 )
 
 var documentIDNamespace = uuid.MustParse("9c4064c4-672b-4aa6-b3ba-bf18f0b94670")
 
-// Ingestor owns the scan queue and executes scans.
+// Ingestor owns source reconciliation and document execution queues.
 type Ingestor struct {
+	ctx     context.Context
 	catalog *catalog.Catalog
 	dp      *dataplane.Client
-	queue   chan scanRequest
+
+	scanReady chan struct{}
+	jobs      chan documentJob
+
+	mu        sync.Mutex
+	pending   map[string]scanRequest
+	scanOrder []string
+	debounced map[string]*debounceRequest
+	debounce  time.Duration
 }
 
-// New creates an Ingestor and starts its worker; cancel ctx to stop.
+// New creates an Ingestor and starts its planner and document worker; cancel
+// ctx to stop both.
 func New(ctx context.Context, cat *catalog.Catalog, dp *dataplane.Client) *Ingestor {
 	ing := &Ingestor{
-		catalog: cat,
-		dp:      dp,
-		queue:   make(chan scanRequest, 64),
+		ctx:       ctx,
+		catalog:   cat,
+		dp:        dp,
+		scanReady: make(chan struct{}, 1),
+		jobs:      make(chan documentJob, 256),
+		pending:   make(map[string]scanRequest),
+		debounced: make(map[string]*debounceRequest),
+		debounce:  debounceWindow,
 	}
-	go ing.worker(ctx)
+	go ing.planner(ctx)
+	go ing.documentWorker(ctx)
+	go ing.stopDebouncers(ctx)
 	return ing
 }
 
-// EnqueueScan schedules a scan of the given source. Non-blocking; if
-// the queue is full the scan is dropped with a warning (the next manual
-// or startup scan will catch up — scans are idempotent).
+// EnqueueScan schedules an immediate authoritative scan. A source already
+// waiting in the queue is coalesced into the pending request. Once planning
+// starts it leaves the pending set, so a change arriving during a scan queues
+// one follow-up reconciliation rather than being lost.
 func (i *Ingestor) EnqueueScan(ctx context.Context, sourceID string) {
+	requestID := requestIDFrom(ctx)
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if _, exists := i.pending[sourceID]; exists {
+		return
+	}
+	i.pending[sourceID] = scanRequest{sourceID: sourceID, requestID: requestID}
+	i.scanOrder = append(i.scanOrder, sourceID)
+	select {
+	case i.scanReady <- struct{}{}:
+	default:
+	}
+}
+
+// EnqueueDebouncedScan coalesces noisy source-change notifications over a
+// one-second quiet window. File watchers use this path; explicit API and
+// startup scans remain immediate through EnqueueScan.
+func (i *Ingestor) EnqueueDebouncedScan(ctx context.Context, sourceID string) {
+	requestID := requestIDFrom(ctx)
+	i.mu.Lock()
+	if current := i.debounced[sourceID]; current != nil {
+		current.timer.Stop()
+	}
+	request := &debounceRequest{requestID: requestID}
+	request.timer = time.AfterFunc(i.debounce, func() {
+		i.fireDebounced(sourceID, request)
+	})
+	i.debounced[sourceID] = request
+	i.mu.Unlock()
+}
+
+func requestIDFrom(ctx context.Context) string {
 	requestID := requestid.FromContext(ctx)
 	if requestID == "" {
 		_, requestID = requestid.New(ctx)
 	}
-	select {
-	case i.queue <- scanRequest{sourceID: sourceID, requestID: requestID}:
-	default:
-		slog.Warn("scan queue full, dropping scan request",
-			"request_id", requestID, "source", sourceID)
+	return requestID
+}
+
+func (i *Ingestor) fireDebounced(sourceID string, request *debounceRequest) {
+	i.mu.Lock()
+	if i.debounced[sourceID] != request {
+		i.mu.Unlock()
+		return
+	}
+	delete(i.debounced, sourceID)
+	requestID := request.requestID
+	i.mu.Unlock()
+
+	if i.ctx.Err() == nil {
+		i.EnqueueScan(requestid.WithValue(i.ctx, requestID), sourceID)
 	}
 }
 
-func (i *Ingestor) worker(ctx context.Context) {
+func (i *Ingestor) stopDebouncers(ctx context.Context) {
+	<-ctx.Done()
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for sourceID, request := range i.debounced {
+		request.timer.Stop()
+		delete(i.debounced, sourceID)
+	}
+}
+
+func (i *Ingestor) planner(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case req := <-i.queue:
+		case <-i.scanReady:
+		}
+
+		for req, ok := i.nextScan(); ok; req, ok = i.nextScan() {
+			run := &scanRun{
+				sourceID: req.sourceID, requestID: req.requestID,
+				started: time.Now(), done: make(chan struct{}),
+			}
 			scanCtx := requestid.WithValue(ctx, req.requestID)
-			if err := i.scanSource(scanCtx, req.sourceID); err != nil {
-				slog.Error("scan failed", "request_id", req.requestID,
-					"source", req.sourceID, "error", err)
+			planErr := i.planScan(scanCtx, run)
+			if !i.sendJob(ctx, documentJob{kind: jobScanComplete, run: run, err: planErr}) {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-run.done:
 			}
 		}
 	}
 }
 
-// scanSource performs one full reconciliation of a source against the
-// catalog and vector index. Idempotent: running it twice in a row does
-// no extra work the second time (hashes match, everything is skipped).
-func (i *Ingestor) scanSource(ctx context.Context, sourceID string) error {
-	started := time.Now()
-	requestID := requestid.FromContext(ctx)
+func (i *Ingestor) nextScan() (scanRequest, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if len(i.scanOrder) == 0 {
+		return scanRequest{}, false
+	}
+	sourceID := i.scanOrder[0]
+	i.scanOrder = i.scanOrder[1:]
+	req := i.pending[sourceID]
+	delete(i.pending, sourceID)
+	return req, true
+}
 
-	src, err := i.resolveSource(ctx, sourceID)
+// planScan turns one authoritative source snapshot into document jobs. It
+// queues deletes only after the complete snapshot has been obtained.
+func (i *Ingestor) planScan(ctx context.Context, run *scanRun) error {
+	src, err := i.resolveSource(ctx, run.sourceID)
 	if err != nil {
 		return err
 	}
-
 	refs, err := src.Scan(ctx)
 	if err != nil {
 		return err
 	}
 
-	var ingested, unchanged, removed, failed int
 	seen := make(map[string]bool, len(refs))
-	var pending []pendingDocument
-	pendingBytes := 0
-	flushBatch := func() error {
-		if len(pending) == 0 {
-			return nil
-		}
-		inputs := make([]dataplane.IngestBatchDocument, len(pending))
-		for index := range pending {
-			inputs[index] = pending[index].input
-		}
-		results, err := i.dp.IngestBatch(ctx, inputs)
-		if err != nil {
-			slog.Warn("ingest batch failed, skipping documents",
-				"request_id", requestID, "documents", len(pending), "error", err)
-			failed += len(pending)
-			pending = pending[:0]
-			pendingBytes = 0
-			return nil
-		}
-		for index, result := range results {
-			item := pending[index]
-			if result.Err != nil {
-				slog.Warn("ingest failed, skipping",
-					"request_id", requestID, "uri", item.document.URI, "error", result.Err)
-				failed++
-				continue
-			}
-			item.document.ContentHash = item.contentHash
-			item.document.ChunkCount = result.ChunkCount
-			item.document.IngestedAt = time.Now().UTC()
-			if err := i.catalog.UpsertDocument(ctx, item.document); err != nil {
-				return err
-			}
-			ingested++
-		}
-		pending = pending[:0]
-		pendingBytes = 0
-		return nil
-	}
-
 	for _, ref := range refs {
 		seen[ref.URI] = true
-
 		existing, err := i.catalog.DocumentByURI(ctx, ref.URI)
 		switch {
 		case err == nil && existing.ContentHash == ref.ContentHash:
-			unchanged++ // change detection: hash match ⇒ skip entirely
+			run.unchanged++
 			continue
 		case err != nil && !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
 
-		// New document or changed content: run the pipeline. The
-		// document keeps its UUID across re-ingests so its chunk point
-		// IDs stay stable in the vector index.
 		doc := existing
 		if errors.Is(err, sql.ErrNoRows) {
 			doc = catalog.Document{
-				ID:       uuid.NewSHA1(documentIDNamespace, []byte(sourceID+"\x00"+ref.URI)).String(),
-				SourceID: sourceID,
+				ID:       uuid.NewSHA1(documentIDNamespace, []byte(run.sourceID+"\x00"+ref.URI)).String(),
+				SourceID: run.sourceID,
 				URI:      ref.URI,
 			}
 		}
-
-		content, err := src.Read(ctx, ref)
-		if err != nil {
-			slog.Warn("read failed, skipping",
-				"request_id", requestID, "uri", ref.URI, "error", err)
-			failed++
-			continue
-		}
-
-		if len(content) > batchContentLimit {
-			slog.Warn("document exceeds 32 MiB ingest limit, skipping",
-				"request_id", requestID, "uri", ref.URI, "bytes", len(content))
-			failed++
-			continue
-		}
-		if len(pending) > 0 && (len(pending) >= batchDocumentLimit || pendingBytes+len(content) > batchContentTarget) {
-			if err := flushBatch(); err != nil {
-				return err
-			}
-		}
-		pending = append(pending, pendingDocument{
-			document:    doc,
-			contentHash: ref.ContentHash,
-			input: dataplane.IngestBatchDocument{
-				DocumentID:         doc.ID,
-				SourceID:           sourceID,
-				URI:                ref.URI,
-				MimeType:           ref.MimeType,
-				Content:            content,
-				PreviousChunkCount: doc.ChunkCount,
-			},
-		})
-		pendingBytes += len(content)
-		if pendingBytes > batchContentTarget {
-			// Oversized-but-supported documents travel alone rather than
-			// preventing the following small documents from batching.
-			if err := flushBatch(); err != nil {
-				return err
-			}
+		if !i.sendJob(ctx, documentJob{
+			kind: jobUpsert, run: run, source: src, ref: ref, document: doc,
+		}) {
+			return ctx.Err()
 		}
 	}
-	if err := flushBatch(); err != nil {
-		return err
-	}
 
-	// Anything in the catalog that the scan no longer sees was deleted
-	// (or renamed) at the source; remove its vectors and its row.
-	known, err := i.catalog.DocumentsBySource(ctx, sourceID)
+	known, err := i.catalog.DocumentsBySource(ctx, run.sourceID)
 	if err != nil {
 		return err
 	}
 	for _, doc := range known {
-		if seen[doc.URI] {
-			continue
+		if !seen[doc.URI] && !i.sendJob(ctx, documentJob{kind: jobDelete, run: run, document: doc}) {
+			return ctx.Err()
 		}
-		if err := i.dp.DeleteDocument(ctx, doc.ID, doc.ChunkCount); err != nil {
-			slog.Warn("vector delete failed",
-				"request_id", requestID, "uri", doc.URI, "error", err)
-			continue // keep the row; next scan retries the delete
+	}
+	return nil
+}
+
+func (i *Ingestor) sendJob(ctx context.Context, job documentJob) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case i.jobs <- job:
+		return true
+	}
+}
+
+func (i *Ingestor) documentWorker(ctx context.Context) {
+	var pending []pendingDocument
+	pendingBytes := 0
+
+	flush := func() {
+		if len(pending) == 0 {
+			return
 		}
-		if err := i.catalog.DeleteDocument(ctx, doc.ID); err != nil {
-			return err
-		}
-		removed++
+		i.flushBatch(ctx, pending)
+		pending = pending[:0]
+		pendingBytes = 0
 	}
 
-	slog.Info("scan complete",
-		"request_id", requestID,
-		"source", sourceID,
-		"ingested", ingested,
-		"unchanged", unchanged,
-		"removed", removed,
-		"failed", failed,
-		"took", time.Since(started).Round(time.Millisecond),
-	)
-	return nil
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-i.jobs:
+			if job.run.err != nil && job.kind != jobScanComplete {
+				continue
+			}
+			switch job.kind {
+			case jobUpsert:
+				content, err := job.source.Read(ctx, job.ref)
+				if err != nil {
+					slog.Warn("read failed, skipping",
+						"request_id", job.run.requestID, "uri", job.ref.URI, "error", err)
+					job.run.failed++
+					continue
+				}
+				if len(content) > batchContentLimit {
+					slog.Warn("document exceeds 32 MiB ingest limit, skipping",
+						"request_id", job.run.requestID, "uri", job.ref.URI, "bytes", len(content))
+					job.run.failed++
+					continue
+				}
+				if len(pending) > 0 && (len(pending) >= batchDocumentLimit || pendingBytes+len(content) > batchContentTarget) {
+					flush()
+				}
+				pending = append(pending, pendingDocument{
+					job: job, contentHash: job.ref.ContentHash,
+					input: dataplane.IngestBatchDocument{
+						DocumentID: job.document.ID, SourceID: job.run.sourceID,
+						URI: job.ref.URI, MimeType: job.ref.MimeType, Content: content,
+						PreviousChunkCount: job.document.ChunkCount,
+					},
+				})
+				pendingBytes += len(content)
+				if pendingBytes > batchContentTarget {
+					flush()
+				}
+			case jobDelete:
+				flush()
+				i.deleteDocument(ctx, job)
+			case jobScanComplete:
+				flush()
+				if job.run.err == nil {
+					job.run.err = job.err
+				}
+				i.finishScan(job.run)
+			}
+		}
+	}
+}
+
+func (i *Ingestor) flushBatch(ctx context.Context, pending []pendingDocument) {
+	inputs := make([]dataplane.IngestBatchDocument, len(pending))
+	for index := range pending {
+		inputs[index] = pending[index].input
+	}
+	run := pending[0].job.run
+	batchCtx := requestid.WithValue(ctx, run.requestID)
+	results, err := i.dp.IngestBatch(batchCtx, inputs)
+	if err != nil {
+		slog.Warn("ingest batch failed, skipping documents",
+			"request_id", run.requestID, "documents", len(pending), "error", err)
+		run.failed += len(pending)
+		return
+	}
+	for index, result := range results {
+		item := pending[index]
+		if result.Err != nil {
+			slog.Warn("ingest failed, skipping",
+				"request_id", run.requestID, "uri", item.job.document.URI, "error", result.Err)
+			run.failed++
+			continue
+		}
+		item.job.document.ContentHash = item.contentHash
+		item.job.document.ChunkCount = result.ChunkCount
+		item.job.document.IngestedAt = time.Now().UTC()
+		if err := i.catalog.UpsertDocument(batchCtx, item.job.document); err != nil {
+			run.err = err
+			return
+		}
+		run.ingested++
+	}
+}
+
+func (i *Ingestor) deleteDocument(ctx context.Context, job documentJob) {
+	run := job.run
+	jobCtx := requestid.WithValue(ctx, run.requestID)
+	if err := i.dp.DeleteDocument(jobCtx, job.document.ID, job.document.ChunkCount); err != nil {
+		slog.Warn("vector delete failed",
+			"request_id", run.requestID, "uri", job.document.URI, "error", err)
+		run.failed++
+		return
+	}
+	if err := i.catalog.DeleteDocument(jobCtx, job.document.ID); err != nil {
+		run.err = err
+		return
+	}
+	run.removed++
+}
+
+func (i *Ingestor) finishScan(run *scanRun) {
+	if run.err != nil {
+		slog.Error("scan failed", "request_id", run.requestID,
+			"source", run.sourceID, "error", run.err)
+	} else {
+		slog.Info("scan complete",
+			"request_id", run.requestID,
+			"source", run.sourceID,
+			"ingested", run.ingested,
+			"unchanged", run.unchanged,
+			"removed", run.removed,
+			"failed", run.failed,
+			"took", time.Since(run.started).Round(time.Millisecond),
+		)
+	}
+	close(run.done)
 }
 
 // resolveSource loads a source row and reconstructs its implementation.

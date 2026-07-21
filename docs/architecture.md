@@ -119,26 +119,33 @@ the comment in `supervisor.go`.)
 lum add ~/Documents
   └▶ POST /v1/sources ──▶ catalog row ──▶ enqueue scan ──▶ 202
                                              │
-                              ingest worker (one goroutine)
+                              scan planner (deduped by source)
                                              ▼
                     Source.Scan → refs (uri, mime, content hash)
                                              │
                        diff against catalog by uri + hash
                        ├─ unchanged → skip (the common case)
-                       ├─ new/changed → Read → gRPC IngestDocument
-                       │                        └▶ parse→chunk→embed→upsert
-                       │                 → catalog upsert (hash, count)
-                       └─ vanished    → gRPC DeleteDocument → catalog delete
+                       ├─ new/changed ─┐
+                       └─ vanished ────┴▶ document job queue
+                                             │
+                                  one document worker
+                                  ├─ Read → gRPC IngestBatch
+                                  │          └▶ parse→chunk→embed→upsert
+                                  │    → catalog upsert (hash, count)
+                                  └─ gRPC DeleteDocument → catalog delete
 ```
 
 Scans are idempotent and cheap when nothing changed, which makes the
 recovery story trivial: rescan everything on daemon startup.
 
-The queue is a Go channel consumed by a single worker — single because
-ingestion throughput is bounded by the embedding model anyway. The
-channel is the "event bus" in miniature; a real broker could replace it
-without changing what flows through it. Live file watching (fsnotify)
-will feed the same queue.
+Pending scans are deduplicated by source. Explicit and startup scans run
+immediately; noisy change notifications have a one-second debounce path for
+live file watching. A planner turns each authoritative source snapshot into
+document upsert/delete jobs. Those jobs are consumed by one worker — single
+because ingestion throughput is bounded by the embedding model anyway — and
+small documents are combined into cross-document batches. The job channel is
+the "event bus" in miniature; a real broker could replace it without changing
+what flows through it.
 
 ## Search flow
 
