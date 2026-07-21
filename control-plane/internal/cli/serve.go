@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,8 +22,8 @@ import (
 )
 
 // serveCmd runs the daemon. Startup order matters and reads top to
-// bottom in run(): data dir → catalog → spawn data plane → wait ready →
-// ingest worker → HTTP API. Shutdown happens in reverse via defers.
+// bottom in run(): data dir → catalog → spawn data plane → ingest/API →
+// asynchronous readiness and startup scans. Shutdown is via defers.
 func serveCmd() *cobra.Command {
 	var lumenPath string
 	var embeddingModel string
@@ -57,6 +58,8 @@ func run(ctx context.Context, cfg config.Config) error {
 	// Root context cancelled by SIGINT/SIGTERM; everything hangs off it.
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	daemonCtx, cancelDaemon := context.WithCancel(ctx)
+	defer cancelDaemon()
 
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return fmt.Errorf("creating data dir: %w", err)
@@ -68,9 +71,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	}
 	defer cat.Close()
 
-	// The data plane is a child process, not a service the user runs:
-	// spawn it, then block until its gRPC port answers. First run can
-	// take a while (embedding model download), hence the long timeout.
+	// The data plane is a child process, not a service the user runs.
 	sup, err := dataplane.Spawn(cfg.LumenPath, cfg.DataDir, cfg.GRPCAddr, cfg.EmbeddingModel)
 	if err != nil {
 		return err
@@ -83,43 +84,68 @@ func run(ctx context.Context, cfg config.Config) error {
 	}
 	defer dp.Close()
 
-	slog.Info("waiting for data plane", "addr", cfg.GRPCAddr)
-	if err := dp.WaitReady(ctx, 5*time.Minute); err != nil {
-		return err
+	listener, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		return fmt.Errorf("binding HTTP API: %w", err)
 	}
-	slog.Info("data plane ready")
+	defer listener.Close()
 
-	ingestor := ingest.New(ctx, cat, dp)
-
-	// Rescan every known source on startup: catches changes made while
-	// the daemon was down. Cheap when nothing changed (hash skips).
-	if sources, err := cat.ListSources(ctx); err == nil {
-		for _, s := range sources {
-			ingestor.WatchSource(s.ID)
-			ingestor.EnqueueScan(ctx, s.ID)
-		}
-	}
-
+	// Do not start ingestion workers until the public API is guaranteed to
+	// have its socket. In particular, a bind failure must start no scans.
+	ingestor := ingest.New(daemonCtx, cat, dp)
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
 		Handler: api.New(cat, dp, ingestor).Handler(),
 	}
+	defer server.Close()
 	errCh := make(chan error, 1)
+	slog.Info("lum API listening", "addr", "http://"+listener.Addr().String())
 	go func() {
-		slog.Info("lum API listening", "addr", "http://"+cfg.HTTPAddr)
-		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
+	readyErrCh := make(chan error, 1)
+	go func() {
+		slog.Info("waiting for data plane", "addr", cfg.GRPCAddr)
+		if err := dp.WaitReady(daemonCtx); err != nil {
+			select {
+			case readyErrCh <- err:
+			case <-daemonCtx.Done():
+			}
+			return
+		}
+		slog.Info("data plane ready")
+		// Only readiness starts watches and startup reconciliation.
+		if sources, err := cat.ListSources(daemonCtx); err != nil {
+			select {
+			case readyErrCh <- err:
+			case <-daemonCtx.Done():
+			}
+		} else {
+			for _, source := range sources {
+				ingestor.WatchSource(source.ID)
+				ingestor.EnqueueScan(daemonCtx, source.ID)
+			}
+		}
+	}()
 
+	var runErr error
 	select {
 	case err := <-errCh:
-		return err
+		runErr = err
+	case err := <-readyErrCh:
+		if !(errors.Is(err, context.Canceled) && ctx.Err() != nil) {
+			runErr = err
+		}
 	case <-ctx.Done():
-		slog.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-		return nil
 	}
+	// Stop workers before closing the catalog or data-plane client. Every exit
+	// path shares this ordering, including HTTP and contract errors.
+	cancelDaemon()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdownCtx)
+	return runErr
 }

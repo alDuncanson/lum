@@ -52,6 +52,61 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type ReadinessState int32
+
+const (
+	ReadinessState_READINESS_STATE_UNSPECIFIED       ReadinessState = 0
+	ReadinessState_READINESS_STATE_STARTING          ReadinessState = 1
+	ReadinessState_READINESS_STATE_DOWNLOADING_MODEL ReadinessState = 2
+	ReadinessState_READINESS_STATE_READY             ReadinessState = 3
+	ReadinessState_READINESS_STATE_UNAVAILABLE       ReadinessState = 4
+)
+
+// Enum value maps for ReadinessState.
+var (
+	ReadinessState_name = map[int32]string{
+		0: "READINESS_STATE_UNSPECIFIED",
+		1: "READINESS_STATE_STARTING",
+		2: "READINESS_STATE_DOWNLOADING_MODEL",
+		3: "READINESS_STATE_READY",
+		4: "READINESS_STATE_UNAVAILABLE",
+	}
+	ReadinessState_value = map[string]int32{
+		"READINESS_STATE_UNSPECIFIED":       0,
+		"READINESS_STATE_STARTING":          1,
+		"READINESS_STATE_DOWNLOADING_MODEL": 2,
+		"READINESS_STATE_READY":             3,
+		"READINESS_STATE_UNAVAILABLE":       4,
+	}
+)
+
+func (x ReadinessState) Enum() *ReadinessState {
+	p := new(ReadinessState)
+	*p = x
+	return p
+}
+
+func (x ReadinessState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ReadinessState) Descriptor() protoreflect.EnumDescriptor {
+	return file_lum_v1_dataplane_proto_enumTypes[0].Descriptor()
+}
+
+func (ReadinessState) Type() protoreflect.EnumType {
+	return &file_lum_v1_dataplane_proto_enumTypes[0]
+}
+
+func (x ReadinessState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ReadinessState.Descriptor instead.
+func (ReadinessState) EnumDescriptor() ([]byte, []int) {
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{0}
+}
+
 type IngestBatchFailureStage int32
 
 const (
@@ -88,11 +143,11 @@ func (x IngestBatchFailureStage) String() string {
 }
 
 func (IngestBatchFailureStage) Descriptor() protoreflect.EnumDescriptor {
-	return file_lum_v1_dataplane_proto_enumTypes[0].Descriptor()
+	return file_lum_v1_dataplane_proto_enumTypes[1].Descriptor()
 }
 
 func (IngestBatchFailureStage) Type() protoreflect.EnumType {
-	return &file_lum_v1_dataplane_proto_enumTypes[0]
+	return &file_lum_v1_dataplane_proto_enumTypes[1]
 }
 
 func (x IngestBatchFailureStage) Number() protoreflect.EnumNumber {
@@ -101,7 +156,7 @@ func (x IngestBatchFailureStage) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use IngestBatchFailureStage.Descriptor instead.
 func (IngestBatchFailureStage) EnumDescriptor() ([]byte, []int) {
-	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{0}
+	return file_lum_v1_dataplane_proto_rawDescGZIP(), []int{1}
 }
 
 type HealthRequest struct {
@@ -149,8 +204,11 @@ type HealthResponse struct {
 	// Version of this gRPC contract implemented by the binary. The
 	// control plane refuses to start if its expected version differs.
 	ContractVersion string `protobuf:"bytes,3,opt,name=contract_version,json=contractVersion,proto3" json:"contract_version,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Detailed lifecycle state. Older peers may leave this unspecified;
+	// clients then fall back to ready.
+	State         ReadinessState `protobuf:"varint,4,opt,name=state,proto3,enum=lum.v1.ReadinessState" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HealthResponse) Reset() {
@@ -202,6 +260,13 @@ func (x *HealthResponse) GetContractVersion() string {
 		return x.ContractVersion
 	}
 	return ""
+}
+
+func (x *HealthResponse) GetState() ReadinessState {
+	if x != nil {
+		return x.State
+	}
+	return ReadinessState_READINESS_STATE_UNSPECIFIED
 }
 
 type IngestDocumentRequest struct {
@@ -1083,11 +1148,12 @@ var File_lum_v1_dataplane_proto protoreflect.FileDescriptor
 const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"\n" +
 	"\x16lum/v1/dataplane.proto\x12\x06lum.v1\"\x0f\n" +
-	"\rHealthRequest\"i\n" +
+	"\rHealthRequest\"\x97\x01\n" +
 	"\x0eHealthResponse\x12\x14\n" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12)\n" +
-	"\x10contract_version\x18\x03 \x01(\tR\x0fcontractVersion\"\xd0\x01\n" +
+	"\x10contract_version\x18\x03 \x01(\tR\x0fcontractVersion\x12,\n" +
+	"\x05state\x18\x04 \x01(\x0e2\x16.lum.v1.ReadinessStateR\x05state\"\xd0\x01\n" +
 	"\x15IngestDocumentRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1b\n" +
@@ -1146,7 +1212,13 @@ const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"\vchunk_index\x18\x04 \x01(\rR\n" +
 	"chunkIndex\x12\x14\n" +
 	"\x05score\x18\x05 \x01(\x02R\x05score\x12\x12\n" +
-	"\x04text\x18\x06 \x01(\tR\x04text*\xc0\x01\n" +
+	"\x04text\x18\x06 \x01(\tR\x04text*\xb2\x01\n" +
+	"\x0eReadinessState\x12\x1f\n" +
+	"\x1bREADINESS_STATE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18READINESS_STATE_STARTING\x10\x01\x12%\n" +
+	"!READINESS_STATE_DOWNLOADING_MODEL\x10\x02\x12\x19\n" +
+	"\x15READINESS_STATE_READY\x10\x03\x12\x1f\n" +
+	"\x1bREADINESS_STATE_UNAVAILABLE\x10\x04*\xc0\x01\n" +
 	"\x17IngestBatchFailureStage\x12*\n" +
 	"&INGEST_BATCH_FAILURE_STAGE_UNSPECIFIED\x10\x00\x12$\n" +
 	" INGEST_BATCH_FAILURE_STAGE_PARSE\x10\x01\x12-\n" +
@@ -1171,50 +1243,52 @@ func file_lum_v1_dataplane_proto_rawDescGZIP() []byte {
 	return file_lum_v1_dataplane_proto_rawDescData
 }
 
-var file_lum_v1_dataplane_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_lum_v1_dataplane_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_lum_v1_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_lum_v1_dataplane_proto_goTypes = []any{
-	(IngestBatchFailureStage)(0),       // 0: lum.v1.IngestBatchFailureStage
-	(*HealthRequest)(nil),              // 1: lum.v1.HealthRequest
-	(*HealthResponse)(nil),             // 2: lum.v1.HealthResponse
-	(*IngestDocumentRequest)(nil),      // 3: lum.v1.IngestDocumentRequest
-	(*IngestDocumentResponse)(nil),     // 4: lum.v1.IngestDocumentResponse
-	(*IngestBatchRequest)(nil),         // 5: lum.v1.IngestBatchRequest
-	(*IngestBatchDocumentHeader)(nil),  // 6: lum.v1.IngestBatchDocumentHeader
-	(*IngestBatchEndDocument)(nil),     // 7: lum.v1.IngestBatchEndDocument
-	(*IngestBatchResponse)(nil),        // 8: lum.v1.IngestBatchResponse
-	(*IngestBatchDocumentResult)(nil),  // 9: lum.v1.IngestBatchDocumentResult
-	(*IngestBatchDocumentSuccess)(nil), // 10: lum.v1.IngestBatchDocumentSuccess
-	(*IngestBatchDocumentFailure)(nil), // 11: lum.v1.IngestBatchDocumentFailure
-	(*DeleteDocumentRequest)(nil),      // 12: lum.v1.DeleteDocumentRequest
-	(*DeleteDocumentResponse)(nil),     // 13: lum.v1.DeleteDocumentResponse
-	(*SearchRequest)(nil),              // 14: lum.v1.SearchRequest
-	(*SearchResponse)(nil),             // 15: lum.v1.SearchResponse
-	(*SearchResult)(nil),               // 16: lum.v1.SearchResult
+	(ReadinessState)(0),                // 0: lum.v1.ReadinessState
+	(IngestBatchFailureStage)(0),       // 1: lum.v1.IngestBatchFailureStage
+	(*HealthRequest)(nil),              // 2: lum.v1.HealthRequest
+	(*HealthResponse)(nil),             // 3: lum.v1.HealthResponse
+	(*IngestDocumentRequest)(nil),      // 4: lum.v1.IngestDocumentRequest
+	(*IngestDocumentResponse)(nil),     // 5: lum.v1.IngestDocumentResponse
+	(*IngestBatchRequest)(nil),         // 6: lum.v1.IngestBatchRequest
+	(*IngestBatchDocumentHeader)(nil),  // 7: lum.v1.IngestBatchDocumentHeader
+	(*IngestBatchEndDocument)(nil),     // 8: lum.v1.IngestBatchEndDocument
+	(*IngestBatchResponse)(nil),        // 9: lum.v1.IngestBatchResponse
+	(*IngestBatchDocumentResult)(nil),  // 10: lum.v1.IngestBatchDocumentResult
+	(*IngestBatchDocumentSuccess)(nil), // 11: lum.v1.IngestBatchDocumentSuccess
+	(*IngestBatchDocumentFailure)(nil), // 12: lum.v1.IngestBatchDocumentFailure
+	(*DeleteDocumentRequest)(nil),      // 13: lum.v1.DeleteDocumentRequest
+	(*DeleteDocumentResponse)(nil),     // 14: lum.v1.DeleteDocumentResponse
+	(*SearchRequest)(nil),              // 15: lum.v1.SearchRequest
+	(*SearchResponse)(nil),             // 16: lum.v1.SearchResponse
+	(*SearchResult)(nil),               // 17: lum.v1.SearchResult
 }
 var file_lum_v1_dataplane_proto_depIdxs = []int32{
-	6,  // 0: lum.v1.IngestBatchRequest.document:type_name -> lum.v1.IngestBatchDocumentHeader
-	7,  // 1: lum.v1.IngestBatchRequest.end_document:type_name -> lum.v1.IngestBatchEndDocument
-	9,  // 2: lum.v1.IngestBatchResponse.documents:type_name -> lum.v1.IngestBatchDocumentResult
-	10, // 3: lum.v1.IngestBatchDocumentResult.success:type_name -> lum.v1.IngestBatchDocumentSuccess
-	11, // 4: lum.v1.IngestBatchDocumentResult.failure:type_name -> lum.v1.IngestBatchDocumentFailure
-	0,  // 5: lum.v1.IngestBatchDocumentFailure.stage:type_name -> lum.v1.IngestBatchFailureStage
-	16, // 6: lum.v1.SearchResponse.results:type_name -> lum.v1.SearchResult
-	1,  // 7: lum.v1.DataPlane.Health:input_type -> lum.v1.HealthRequest
-	3,  // 8: lum.v1.DataPlane.IngestDocument:input_type -> lum.v1.IngestDocumentRequest
-	5,  // 9: lum.v1.DataPlane.IngestBatch:input_type -> lum.v1.IngestBatchRequest
-	12, // 10: lum.v1.DataPlane.DeleteDocument:input_type -> lum.v1.DeleteDocumentRequest
-	14, // 11: lum.v1.DataPlane.Search:input_type -> lum.v1.SearchRequest
-	2,  // 12: lum.v1.DataPlane.Health:output_type -> lum.v1.HealthResponse
-	4,  // 13: lum.v1.DataPlane.IngestDocument:output_type -> lum.v1.IngestDocumentResponse
-	8,  // 14: lum.v1.DataPlane.IngestBatch:output_type -> lum.v1.IngestBatchResponse
-	13, // 15: lum.v1.DataPlane.DeleteDocument:output_type -> lum.v1.DeleteDocumentResponse
-	15, // 16: lum.v1.DataPlane.Search:output_type -> lum.v1.SearchResponse
-	12, // [12:17] is the sub-list for method output_type
-	7,  // [7:12] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	0,  // 0: lum.v1.HealthResponse.state:type_name -> lum.v1.ReadinessState
+	7,  // 1: lum.v1.IngestBatchRequest.document:type_name -> lum.v1.IngestBatchDocumentHeader
+	8,  // 2: lum.v1.IngestBatchRequest.end_document:type_name -> lum.v1.IngestBatchEndDocument
+	10, // 3: lum.v1.IngestBatchResponse.documents:type_name -> lum.v1.IngestBatchDocumentResult
+	11, // 4: lum.v1.IngestBatchDocumentResult.success:type_name -> lum.v1.IngestBatchDocumentSuccess
+	12, // 5: lum.v1.IngestBatchDocumentResult.failure:type_name -> lum.v1.IngestBatchDocumentFailure
+	1,  // 6: lum.v1.IngestBatchDocumentFailure.stage:type_name -> lum.v1.IngestBatchFailureStage
+	17, // 7: lum.v1.SearchResponse.results:type_name -> lum.v1.SearchResult
+	2,  // 8: lum.v1.DataPlane.Health:input_type -> lum.v1.HealthRequest
+	4,  // 9: lum.v1.DataPlane.IngestDocument:input_type -> lum.v1.IngestDocumentRequest
+	6,  // 10: lum.v1.DataPlane.IngestBatch:input_type -> lum.v1.IngestBatchRequest
+	13, // 11: lum.v1.DataPlane.DeleteDocument:input_type -> lum.v1.DeleteDocumentRequest
+	15, // 12: lum.v1.DataPlane.Search:input_type -> lum.v1.SearchRequest
+	3,  // 13: lum.v1.DataPlane.Health:output_type -> lum.v1.HealthResponse
+	5,  // 14: lum.v1.DataPlane.IngestDocument:output_type -> lum.v1.IngestDocumentResponse
+	9,  // 15: lum.v1.DataPlane.IngestBatch:output_type -> lum.v1.IngestBatchResponse
+	14, // 16: lum.v1.DataPlane.DeleteDocument:output_type -> lum.v1.DeleteDocumentResponse
+	16, // 17: lum.v1.DataPlane.Search:output_type -> lum.v1.SearchResponse
+	13, // [13:18] is the sub-list for method output_type
+	8,  // [8:13] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_lum_v1_dataplane_proto_init() }
@@ -1236,7 +1310,7 @@ func file_lum_v1_dataplane_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_lum_v1_dataplane_proto_rawDesc), len(file_lum_v1_dataplane_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,

@@ -77,6 +77,17 @@ message HealthResponse {
   // Version of this gRPC contract implemented by the binary. The
   // control plane refuses to start if its expected version differs.
   string contract_version = 3;
+  // Detailed lifecycle state. Older peers may leave this unspecified;
+  // clients then fall back to ready.
+  ReadinessState state = 4;
+}
+
+enum ReadinessState {
+  READINESS_STATE_UNSPECIFIED = 0;
+  READINESS_STATE_STARTING = 1;
+  READINESS_STATE_DOWNLOADING_MODEL = 2;
+  READINESS_STATE_READY = 3;
+  READINESS_STATE_UNAVAILABLE = 4;
 }
 
 message IngestDocumentRequest {

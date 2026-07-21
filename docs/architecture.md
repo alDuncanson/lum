@@ -155,6 +155,12 @@ Already-successful documents hash-skip during those retries. The failure is
 cleared on success (or when a never-indexed document disappears); exhausted
 failures remain visible through `/v1/status` and `lum status`.
 
+On daemon startup, lumd starts its HTTP API immediately while lumen loads its
+model and vector store. `/v1/status` reports `data_plane` as `starting`,
+`downloading-model`, `ready`, or `unavailable`. Startup watches and scans begin
+only after readiness; scan-triggering API calls return 503 while loading, so a
+temporary startup state is not persisted as an ingestion failure.
+
 ## Search flow
 
 ```

@@ -22,7 +22,29 @@ import (
 // communicate using the shared proto contract.
 const ContractVersion = "1"
 
+type ReadinessState string
+
+const (
+	StateStarting         ReadinessState = "starting"
+	StateDownloadingModel ReadinessState = "downloading-model"
+	StateReady            ReadinessState = "ready"
+	StateUnavailable      ReadinessState = "unavailable"
+)
+
 const contentFrameSize = 256 * 1024
+
+type HealthResult struct {
+	State  ReadinessState
+	Detail string
+}
+
+type ContractMismatchError struct {
+	Got string
+}
+
+func (e *ContractMismatchError) Error() string {
+	return fmt.Sprintf("data plane contract version mismatch: lum expects %q, lumen reports %q; rebuild both binaries together", ContractVersion, e.Got)
+}
 
 // Client is a thin, typed wrapper over the generated gRPC stub. It
 // exists so the rest of the control plane imports one small package
@@ -85,29 +107,23 @@ func logRPC(ctx context.Context, id, method string, started time.Time, err error
 
 func (c *Client) Close() error { return c.conn.Close() }
 
-// WaitReady polls Health until the data plane answers or the deadline
-// passes. The generous default matters: on first run lumen downloads
-// the embedding model (~70 MB) before it starts listening.
-func (c *Client) WaitReady(ctx context.Context, timeout time.Duration) error {
+// WaitReady polls Health until the data plane is ready, the context is
+// cancelled, or an incompatible peer is reached. Unreachable, transitional,
+// and self-reported unavailable states remain monitorable.
+func (c *Client) WaitReady(ctx context.Context) error {
 	if requestid.FromContext(ctx) == "" {
 		ctx, _ = requestid.New(ctx)
 	}
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for time.Now().Before(deadline) {
+	for {
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		resp, err := c.rpc.Health(callCtx, &lumv1.HealthRequest{})
+		health, err := c.Health(callCtx)
 		cancel()
 		if err == nil {
-			if got := resp.GetContractVersion(); got != ContractVersion {
-				return fmt.Errorf("data plane contract version mismatch: lum expects %q, lumen reports %q; rebuild both binaries together", ContractVersion, got)
-			}
-			if resp.GetReady() {
+			if health.State == StateReady {
 				return nil
 			}
-			lastErr = fmt.Errorf("data plane reports not ready: %s", resp.GetDetail())
-		} else {
-			lastErr = err
+		} else if _, fatal := err.(*ContractMismatchError); fatal {
+			return err
 		}
 		select {
 		case <-ctx.Done():
@@ -115,16 +131,39 @@ func (c *Client) WaitReady(ctx context.Context, timeout time.Duration) error {
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("data plane not ready after %s: %w", timeout, lastErr)
 }
 
-// Health reports data plane readiness and detail (model name).
-func (c *Client) Health(ctx context.Context) (bool, string) {
+// Health reports lifecycle state and validates the peer contract before any
+// caller may treat the data plane as ready.
+func (c *Client) Health(ctx context.Context) (HealthResult, error) {
 	resp, err := c.rpc.Health(ctx, &lumv1.HealthRequest{})
 	if err != nil {
-		return false, err.Error()
+		return HealthResult{State: StateUnavailable, Detail: err.Error()}, err
 	}
-	return resp.GetReady(), resp.GetDetail()
+	if got := resp.GetContractVersion(); got != ContractVersion {
+		err := &ContractMismatchError{Got: got}
+		return HealthResult{State: StateUnavailable, Detail: err.Error()}, err
+	}
+	return HealthResult{State: readinessState(resp), Detail: resp.GetDetail()}, nil
+}
+
+func readinessState(resp *lumv1.HealthResponse) ReadinessState {
+	switch resp.GetState() {
+	case lumv1.ReadinessState_READINESS_STATE_STARTING:
+		return StateStarting
+	case lumv1.ReadinessState_READINESS_STATE_DOWNLOADING_MODEL:
+		return StateDownloadingModel
+	case lumv1.ReadinessState_READINESS_STATE_READY:
+		return StateReady
+	case lumv1.ReadinessState_READINESS_STATE_UNAVAILABLE:
+		return StateUnavailable
+	default:
+		// Compatibility with data planes built before the additive state field.
+		if resp.GetReady() {
+			return StateReady
+		}
+		return StateStarting
+	}
 }
 
 // IngestDocument runs the full pipeline for one document and returns

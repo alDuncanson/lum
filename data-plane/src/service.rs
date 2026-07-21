@@ -10,8 +10,8 @@
 //! in the control plane.
 
 use std::collections::HashSet;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use tonic::{Request, Response, Status};
@@ -82,31 +82,70 @@ struct Pipeline {
     store: Box<dyn VectorStore>,
 }
 
+#[derive(Clone)]
 pub struct DataPlaneService {
-    pipeline: Arc<Pipeline>,
+    state: Arc<RwLock<ServiceState>>,
+}
+
+struct ServiceState {
+    phase: pb::ReadinessState,
+    detail: String,
+    pipeline: Option<Arc<Pipeline>>,
 }
 
 impl DataPlaneService {
-    /// Build the default pipeline. Blocking: downloads the embedding
-    /// model on first run and opens/creates the vector index.
-    pub fn initialize(
-        data_dir: &Path,
-        embedding_model: EmbeddingModelChoice,
-    ) -> anyhow::Result<Self> {
-        let embedder = FastEmbedder::initialize(&data_dir.join("models"), embedding_model)?;
-        let store = EdgeStore::open(
-            &data_dir.join("vectors"),
-            embedder.model_name(),
-            embedder.dimension(),
-        )?;
-        Ok(Self {
-            pipeline: Arc::new(Pipeline {
+    pub fn starting() -> Self {
+        Self {
+            state: Arc::new(RwLock::new(ServiceState {
+                phase: pb::ReadinessState::Starting,
+                detail: "starting".to_owned(),
+                pipeline: None,
+            })),
+        }
+    }
+
+    /// Initialize the pipeline without holding the shared state lock.
+    pub fn initialize(&self, data_dir: PathBuf, embedding_model: EmbeddingModelChoice) {
+        {
+            let mut state = self.state.write().expect("service state poisoned");
+            state.phase = pb::ReadinessState::DownloadingModel;
+            state.detail = "initializing embedding model and vector store".to_owned();
+        }
+        let result = (|| -> anyhow::Result<Pipeline> {
+            let embedder = FastEmbedder::initialize(&data_dir.join("models"), embedding_model)?;
+            let store = EdgeStore::open(
+                &data_dir.join("vectors"),
+                embedder.model_name(),
+                embedder.dimension(),
+            )?;
+            Ok(Pipeline {
                 parsers: ParserRegistry::with_defaults(),
                 chunker: Box::new(WordWindowChunker::default()),
                 embedder: Box::new(embedder),
                 store: Box::new(store),
-            }),
-        })
+            })
+        })();
+        let mut state = self.state.write().expect("service state poisoned");
+        match result {
+            Ok(pipeline) => {
+                state.detail = format!("model={}", pipeline.embedder.model_name());
+                state.pipeline = Some(Arc::new(pipeline));
+                state.phase = pb::ReadinessState::Ready;
+            }
+            Err(error) => {
+                state.detail = format!("{error:#}");
+                state.phase = pb::ReadinessState::Unavailable;
+            }
+        }
+    }
+
+    fn pipeline(&self) -> Result<Arc<Pipeline>, Status> {
+        self.state
+            .read()
+            .expect("service state poisoned")
+            .pipeline
+            .clone()
+            .ok_or_else(|| Status::unavailable("data plane is not ready"))
     }
 
     /// Run `f` on the blocking thread pool with a handle to the pipeline.
@@ -115,7 +154,7 @@ impl DataPlaneService {
         T: Send + 'static,
         F: FnOnce(&Pipeline) -> anyhow::Result<T> + Send + 'static,
     {
-        let pipeline = Arc::clone(&self.pipeline);
+        let pipeline = self.pipeline()?;
         tokio::task::spawn_blocking(move || f(&pipeline))
             .await
             .map_err(|e| Status::internal(format!("worker panicked: {e}")))?
@@ -130,12 +169,12 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         request: Request<pb::HealthRequest>,
     ) -> Result<Response<pb::HealthResponse>, Status> {
         let _ = log_request(&request, "Health");
-        // Initialization completes before the server starts listening,
-        // so reachable implies ready.
+        let state = self.state.read().expect("service state poisoned");
         Ok(Response::new(pb::HealthResponse {
-            ready: true,
-            detail: format!("model={}", self.pipeline.embedder.model_name()),
+            ready: state.phase == pb::ReadinessState::Ready,
+            detail: state.detail.clone(),
             contract_version: CONTRACT_VERSION.to_owned(),
+            state: state.phase.into(),
         }))
     }
 
@@ -144,6 +183,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         request: Request<pb::IngestDocumentRequest>,
     ) -> Result<Response<pb::IngestDocumentResponse>, Status> {
         let request_id = log_request(&request, "IngestDocument");
+        let _ = self.pipeline()?;
         let req = request.into_inner();
         let chunk_count = self
             .run_blocking(move |p| {
@@ -226,6 +266,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         request: Request<tonic::Streaming<pb::IngestBatchRequest>>,
     ) -> Result<Response<pb::IngestBatchResponse>, Status> {
         let request_id = log_request(&request, "IngestBatch");
+        let pipeline = self.pipeline()?;
         let mut stream = request.into_inner();
         let mut documents = Vec::new();
         let mut current: Option<BatchDocument> = None;
@@ -320,7 +361,6 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
             ));
         }
 
-        let pipeline = Arc::clone(&self.pipeline);
         let results = tokio::task::spawn_blocking(move || {
             let total_started = Instant::now();
             let mut parse_duration = Duration::ZERO;
@@ -489,6 +529,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         request: Request<pb::DeleteDocumentRequest>,
     ) -> Result<Response<pb::DeleteDocumentResponse>, Status> {
         let _ = log_request(&request, "DeleteDocument");
+        let _ = self.pipeline()?;
         let req = request.into_inner();
         self.run_blocking(move |p| p.store.delete_document(&req.document_id, req.chunk_count))
             .await?;
@@ -500,6 +541,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         request: Request<pb::SearchRequest>,
     ) -> Result<Response<pb::SearchResponse>, Status> {
         let _ = log_request(&request, "Search");
+        let _ = self.pipeline()?;
         let req = request.into_inner();
         if req.query.trim().is_empty() {
             return Err(Status::invalid_argument("query must not be empty"));
@@ -529,5 +571,33 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
             .await?;
 
         Ok(Response::new(pb::SearchResponse { results }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pb::data_plane_server::DataPlane;
+
+    #[tokio::test]
+    async fn starting_service_reports_state_and_rejects_work() {
+        let service = DataPlaneService::starting();
+        let health = service
+            .health(Request::new(pb::HealthRequest {}))
+            .await
+            .expect("health succeeds")
+            .into_inner();
+        assert!(!health.ready);
+        assert_eq!(health.state, pb::ReadinessState::Starting as i32);
+        assert_eq!(health.contract_version, CONTRACT_VERSION);
+
+        let error = service
+            .search(Request::new(pb::SearchRequest {
+                query: "test".to_owned(),
+                limit: 1,
+            }))
+            .await
+            .expect_err("search is unavailable before initialization");
+        assert_eq!(error.code(), tonic::Code::Unavailable);
     }
 }

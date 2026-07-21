@@ -37,6 +37,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
+use tonic::transport::server::TcpIncoming;
 
 use crate::pb::data_plane_server::DataPlaneServer;
 use crate::pipeline::EmbeddingModelChoice;
@@ -73,22 +74,31 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    // Initialization is deliberately synchronous and happens *before* we
-    // start listening: on first run this downloads the embedding model
-    // (~70 MB) and creates the vector index. The control plane treats
-    // "gRPC port accepting connections" as readiness, so by the time a
-    // request can arrive, everything is loaded.
+    // Expose lifecycle health immediately while initialization proceeds on
+    // the blocking pool. All other RPCs remain unavailable until ready.
     tracing::info!(
         data_dir = %args.data_dir.display(),
         embedding_model = ?args.embedding_model,
         "initializing pipeline"
     );
-    let service = DataPlaneService::initialize(&args.data_dir, args.embedding_model)?;
-    tracing::info!(addr = %args.grpc_addr, "lumen ready, serving gRPC");
+    // Bind before scheduling any blocking initialization so Health is
+    // reachable even when a first-run model download takes minutes.
+    let incoming = TcpIncoming::bind(args.grpc_addr)?;
+    let service = DataPlaneService::starting();
+    let initializer = service.clone();
+    let data_dir = args.data_dir.clone();
+    let embedding_model = args.embedding_model;
+    // fastembed does not provide cooperative cancellation. A detached OS
+    // thread lets Tokio and the server shut down promptly during a blocked
+    // download; process exit then terminates the initializer.
+    std::thread::spawn(move || {
+        initializer.initialize(data_dir, embedding_model);
+    });
+    tracing::info!(addr = %args.grpc_addr, "lumen serving gRPC");
 
     tonic::transport::Server::builder()
         .add_service(DataPlaneServer::new(service))
-        .serve_with_shutdown(args.grpc_addr, async {
+        .serve_with_incoming_shutdown(incoming, async {
             // Shut down cleanly on ctrl-c or when the control plane
             // terminates us; qdrant-edge flushes on drop.
             let _ = tokio::signal::ctrl_c().await;

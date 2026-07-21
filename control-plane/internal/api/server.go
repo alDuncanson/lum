@@ -76,6 +76,9 @@ type addSourceResponse struct {
 }
 
 func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDataPlaneReady(w, r) {
+		return
+	}
 	var req addSourceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URI == "" {
 		httpError(w, http.StatusBadRequest, "body must be JSON like {\"uri\": \"~/Documents\"}")
@@ -123,6 +126,9 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleScanSource(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDataPlaneReady(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	if _, err := s.catalog.GetSource(r.Context(), id); err != nil {
 		httpError(w, http.StatusNotFound, "no source with id "+id)
@@ -133,6 +139,9 @@ func (s *Server) handleScanSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDataPlaneReady(w, r) {
+		return
+	}
 	query := r.URL.Query().Get("q")
 	if query == "" {
 		httpError(w, http.StatusBadRequest, "missing query parameter q")
@@ -183,14 +192,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	stats.Failures = len(failures)
 	resp := statusResponse{Daemon: "ok", Stats: stats, Failures: failures}
-	if ready, detail := s.dp.Health(r.Context()); ready {
-		resp.DataPlane = "ok"
-		resp.Detail = detail
-	} else {
-		resp.DataPlane = "unavailable"
-		resp.Detail = detail
-	}
+	health, _ := s.dp.Health(r.Context())
+	resp.DataPlane = string(health.State)
+	resp.Detail = health.Detail
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) requireDataPlaneReady(w http.ResponseWriter, r *http.Request) bool {
+	health, err := s.dp.Health(r.Context())
+	if err == nil && health.State == dataplane.StateReady {
+		return true
+	}
+	httpError(w, http.StatusServiceUnavailable, "data plane is "+string(health.State)+": "+health.Detail)
+	return false
 }
 
 // ---- helpers ----

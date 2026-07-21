@@ -22,6 +22,24 @@ type mismatchedDataPlane struct {
 	lumv1.UnimplementedDataPlaneServer
 }
 
+type healthDataPlane struct {
+	lumv1.UnimplementedDataPlaneServer
+	response *lumv1.HealthResponse
+	mu       sync.Mutex
+	calls    int
+	readyOn  int
+}
+
+func (s *healthDataPlane) Health(context.Context, *lumv1.HealthRequest) (*lumv1.HealthResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	if s.readyOn > 0 && s.calls >= s.readyOn {
+		return &lumv1.HealthResponse{Ready: true, ContractVersion: ContractVersion, State: lumv1.ReadinessState_READINESS_STATE_READY}, nil
+	}
+	return s.response, nil
+}
+
 func (mismatchedDataPlane) Health(context.Context, *lumv1.HealthRequest) (*lumv1.HealthResponse, error) {
 	return &lumv1.HealthResponse{Ready: true, ContractVersion: "old"}, nil
 }
@@ -126,9 +144,65 @@ func TestWaitReadyRejectsContractMismatch(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	err = client.WaitReady(context.Background(), time.Second)
+	health, healthErr := client.Health(context.Background())
+	if healthErr == nil || health.State == StateReady {
+		t.Fatalf("Health() = (%+v, %v), mismatched ready peer must be unavailable", health, healthErr)
+	}
+	err = client.WaitReady(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "contract version mismatch") {
 		t.Fatalf("WaitReady error = %v, want contract version mismatch", err)
+	}
+}
+
+func TestReadinessStateAndLegacyFallback(t *testing.T) {
+	tests := []struct {
+		name     string
+		response *lumv1.HealthResponse
+		want     ReadinessState
+	}{
+		{"starting", &lumv1.HealthResponse{State: lumv1.ReadinessState_READINESS_STATE_STARTING}, StateStarting},
+		{"downloading", &lumv1.HealthResponse{State: lumv1.ReadinessState_READINESS_STATE_DOWNLOADING_MODEL}, StateDownloadingModel},
+		{"ready", &lumv1.HealthResponse{State: lumv1.ReadinessState_READINESS_STATE_READY}, StateReady},
+		{"unavailable", &lumv1.HealthResponse{State: lumv1.ReadinessState_READINESS_STATE_UNAVAILABLE}, StateUnavailable},
+		{"legacy ready", &lumv1.HealthResponse{Ready: true}, StateReady},
+		{"legacy loading", &lumv1.HealthResponse{Ready: false}, StateStarting},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := readinessState(test.response); got != test.want {
+				t.Fatalf("readinessState() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestWaitReadyMonitorsUnavailableUntilReady(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	fake := &healthDataPlane{response: &lumv1.HealthResponse{
+		ContractVersion: ContractVersion,
+		State:           lumv1.ReadinessState_READINESS_STATE_UNAVAILABLE,
+		Detail:          "model initialization failed",
+	}, readyOn: 2}
+	lumv1.RegisterDataPlaneServer(server, fake)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+	client, err := Dial(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err = client.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady returned on nonfatal unavailable state: %v", err)
 	}
 }
 
