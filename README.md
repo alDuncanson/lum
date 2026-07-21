@@ -62,6 +62,7 @@ make build        # builds bin/lum (Go) and bin/lumen (Rust)
 ./bin/lum status               # daemon health and index counts
 ./bin/lum sources              # list registered sources
 ./bin/lum search "..."         # semantic search
+./bin/lum top                   # htop-style live view of the pipeline
 ```
 
 The same API the CLI uses is available to anything else:

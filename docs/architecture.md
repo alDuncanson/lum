@@ -281,6 +281,21 @@ alive through idle proxies and, deliberately, counts as activity against
 lumd's own idle timer (#13) — a connected observability client is real
 activity, not just the request that opened the stream.
 
+## `lum top`
+
+A bubbletea TUI over `GET /v1/events` (`internal/cli/top.go`), added
+through `internal/apiclient` exactly like every other command — a pure
+REST client with no privileged side channel into the daemon. It starts
+the daemon on demand on connection refused, the same as any other CLI
+command (#13).
+
+The renderer is deliberately dumb: `topModel.apply` folds one `Event` at
+a time into display state with a single `switch` on `Kind`, and the
+rates it shows (docs/min, chunks/min) are `ingestedTotal / elapsed` — the
+same arithmetic a `curl -N | jq` user watching the raw stream could do.
+No semantics live in the TUI that aren't already in the event schema
+(#19).
+
 ## Key dependency choices
 
 | Choice | Over | Because |

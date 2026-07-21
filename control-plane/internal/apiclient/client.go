@@ -11,6 +11,7 @@
 package apiclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -18,10 +19,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
 	"github.com/alDuncanson/lum/control-plane/internal/config"
 	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
+	"github.com/alDuncanson/lum/control-plane/internal/events"
 )
 
 // Client talks to a running lumd over loopback HTTP.
@@ -90,6 +93,79 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	var out Status
 	err := c.call(ctx, "GET", "/v1/status", nil, &out)
 	return out, err
+}
+
+// Events opens a long-lived connection to GET /v1/events (SSE), starting
+// the daemon on demand exactly like every other command. types optionally
+// narrows the stream to specific event Kinds (server-side ?types= filter);
+// nil subscribes to everything. The returned channel is closed when ctx
+// is cancelled or the connection ends; malformed frames are dropped
+// rather than surfaced, since a stream is inherently best-effort.
+func (c *Client) Events(ctx context.Context, types []string) (<-chan events.Event, error) {
+	path := "/v1/events"
+	if len(types) > 0 {
+		path += "?types=" + url.QueryEscape(strings.Join(types, ","))
+	}
+
+	statusCode, status, body, err := c.doStream(ctx, path)
+	if isConnectionRefused(err) {
+		if err := c.ensureDaemon(ctx); err != nil {
+			return nil, err
+		}
+		statusCode, status, body, err = c.doStream(ctx, path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cannot reach the lum daemon at %s: %w", c.base, err)
+	}
+	if statusCode >= 400 {
+		defer body.Close()
+		raw, _ := io.ReadAll(io.LimitReader(body, 4096))
+		var apiErr struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(raw, &apiErr) == nil && apiErr.Error != "" {
+			return nil, fmt.Errorf("%s", apiErr.Error)
+		}
+		return nil, fmt.Errorf("events endpoint returned %s", status)
+	}
+
+	out := make(chan events.Event, 64)
+	go func() {
+		defer close(out)
+		defer body.Close()
+		scanner := bufio.NewScanner(body)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			data, ok := strings.CutPrefix(scanner.Text(), "data: ")
+			if !ok {
+				continue // event: lines, heartbeat comments, blank separators
+			}
+			var e events.Event
+			if err := json.Unmarshal([]byte(data), &e); err != nil {
+				continue
+			}
+			select {
+			case out <- e:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
+}
+
+// doStream is like do but returns the live response body for streaming
+// instead of reading it fully; the caller owns closing it.
+func (c *Client) doStream(ctx context.Context, path string) (int, string, io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	return resp.StatusCode, resp.Status, resp.Body, nil
 }
 
 // ---- transport ----

@@ -27,6 +27,7 @@ search — over a CLI, a REST API, and MCP. All data stays on your machine.`,
 		searchCmd(),
 		sourcesCmd(),
 		statusCmd(),
+		topCmd(),
 		mcpCmd(),
 	)
 	return root

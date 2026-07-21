@@ -3,9 +3,11 @@ package apiclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/alDuncanson/lum/control-plane/internal/config"
+	"github.com/alDuncanson/lum/control-plane/internal/events"
 )
 
 func TestConcurrentClientsSpawnDaemonOnce(t *testing.T) {
@@ -146,5 +149,133 @@ func TestStartupFailureTimesOutWithLogPath(t *testing.T) {
 	_, err = client.ListSources(context.Background())
 	if err == nil || !strings.Contains(err.Error(), cfg.DaemonLogPath()) {
 		t.Fatalf("error = %v, want bounded startup failure with log path", err)
+	}
+}
+
+func TestEventsParsesSSEFramesInOrderWithoutSpawning(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/events", func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "event: scan_started\ndata: {\"seq\":1,\"kind\":\"scan_started\",\"source_id\":\"abc\"}\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, ": heartbeat\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, "event: document_ingested\ndata: {\"seq\":2,\"kind\":\"document_ingested\",\"document_id\":\"doc1\"}\n\n")
+		flusher.Flush()
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	cfg := config.Config{DataDir: t.TempDir()}
+	client := &Client{
+		base: server.URL, cfg: cfg, httpClient: http.DefaultClient,
+		spawn: func(config.Config) error {
+			t.Fatal("spawn called even though the daemon was already reachable")
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ch, err := client.Events(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := <-ch
+	if first.Kind != events.KindScanStarted || first.SourceID != "abc" {
+		t.Fatalf("first event = %+v, want scan_started/abc", first)
+	}
+	second := <-ch
+	if second.Kind != events.KindDocumentIngested || second.DocumentID != "doc1" {
+		t.Fatalf("second event = %+v, want document_ingested/doc1", second)
+	}
+}
+
+func TestEventsTriggersDaemonSpawnOnConnectionRefused(t *testing.T) {
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := reserved.Addr().String()
+	_ = reserved.Close()
+
+	cfg := config.Config{DataDir: t.TempDir(), HTTPAddr: addr, StartupTimeout: 2 * time.Second}
+	var server *http.Server
+	t.Cleanup(func() {
+		if server != nil {
+			_ = server.Close()
+		}
+	})
+	spawn := func(config.Config) error {
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			return err
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]string{"data_plane": "ready"})
+		})
+		mux.HandleFunc("GET /v1/events", func(w http.ResponseWriter, _ *http.Request) {
+			flusher := w.(http.Flusher)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "event: snapshot\ndata: {\"seq\":1,\"kind\":\"snapshot\",\"sources\":3}\n\n")
+			flusher.Flush()
+		})
+		server = &http.Server{Handler: mux}
+		go func() { _ = server.Serve(listener) }()
+		return nil
+	}
+	client := &Client{base: cfg.BaseURL(), cfg: cfg, httpClient: http.DefaultClient, spawn: spawn}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ch, err := client.Events(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := <-ch
+	if e.Kind != events.KindSnapshot || e.Sources != 3 {
+		t.Fatalf("event = %+v, want a snapshot with sources=3", e)
+	}
+}
+
+func TestEventsAppliesTypesFilterAsQueryParam(t *testing.T) {
+	var gotQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/events", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	cfg := config.Config{DataDir: t.TempDir()}
+	client := &Client{
+		base: server.URL, cfg: cfg, httpClient: http.DefaultClient,
+		spawn: func(config.Config) error {
+			t.Fatal("spawn called even though the daemon was already reachable")
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ch, err := client.Events(ctx, []string{"document_ingested", "document_failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	} // drain until the (empty) stream closes
+
+	if want := "types=document_ingested%2Cdocument_failed"; gotQuery != want {
+		t.Fatalf("query = %q, want %q", gotQuery, want)
 	}
 }
