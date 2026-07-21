@@ -88,12 +88,19 @@ func run(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	defer sup.Stop()
-
-	dp, err := dataplane.Dial(socketPath)
+	rawClient, err := dataplane.Dial(socketPath)
 	if err != nil {
+		sup.Stop()
 		return err
 	}
+	// Manager takes over lumen's lifecycle from here: idle shedding to
+	// reclaim the model's memory, and lazy respawn on the next request
+	// (see dataplane/manager.go).
+	dp := dataplane.NewManager(
+		cfg.LumenPath, cfg.DataDir, socketPath, cfg.EmbeddingModel,
+		cfg.DataPlaneIdleTimeout, cfg.StartupTimeout,
+		sup, rawClient,
+	)
 	defer dp.Close()
 
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)

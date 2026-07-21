@@ -128,6 +128,14 @@ directory; it does not open a TCP port. CLI and MCP requests start the daemon
 automatically, and it exits after 15 minutes without an HTTP request. `lum
 serve` remains available for foreground debugging.
 
+lumen (the data plane) has its own, shorter idle lifetime nested inside
+lumd's: after 5 minutes without an ingest/search RPC (`LUM_DATAPLANE_IDLE_TIMEOUT`
+to change), lumd stops it to release the ONNX model and qdrant-edge's
+resident memory, and respawns it lazily on the next request that needs it
+(`lum status` reports `data plane: idle` in the meantime; polling status
+never itself wakes it). An unexpected lumen crash is treated the same way —
+the next request respawns it rather than failing forever.
+
 The full-precision embedding model remains the default. For higher CPU
 throughput with a small retrieval-quality tradeoff, start the daemon with
 `lum serve --embedding-model quantized` or `LUM_EMBEDDING_MODEL=quantized`.

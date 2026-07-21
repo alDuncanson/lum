@@ -25,6 +25,11 @@ const (
 	// DefaultEmbeddingModel preserves the original full-precision model.
 	// "quantized" is available as an opt-in CPU-throughput tradeoff.
 	DefaultEmbeddingModel = "standard"
+	// DefaultDataPlaneIdleTimeout sheds the memory-heavy lumen child after
+	// this long without an ingest/search RPC, independent of and shorter
+	// than lumd's own DefaultIdleTimeout. lumen respawns lazily on the next
+	// request that needs it.
+	DefaultDataPlaneIdleTimeout = 5 * time.Minute
 )
 
 // Config holds the resolved settings for a lumd process.
@@ -37,6 +42,11 @@ type Config struct {
 	HTTPAddr string
 	// IdleTimeout stops the daemon after this long without an HTTP request.
 	IdleTimeout time.Duration
+	// DataPlaneIdleTimeout stops the supervised lumen process after this
+	// long without an ingest/search RPC, independent of IdleTimeout. Health
+	// checks and status polling do not count as activity, so monitoring
+	// lum doesn't itself keep the data plane warm.
+	DataPlaneIdleTimeout time.Duration
 	// StartupTimeout bounds on-demand daemon readiness waits.
 	StartupTimeout time.Duration
 	// LumenPath optionally pins the lumen binary location. Empty means
@@ -50,12 +60,13 @@ type Config struct {
 // Load builds a Config from environment variables and defaults.
 func Load() Config {
 	return Config{
-		DataDir:        envOr("LUM_DATA_DIR", filepath.Join(homeDir(), ".lum")),
-		HTTPAddr:       envOr("LUM_HTTP_ADDR", DefaultHTTPAddr),
-		IdleTimeout:    DefaultIdleTimeout,
-		StartupTimeout: DefaultStartupTimeout,
-		LumenPath:      os.Getenv("LUM_LUMEN_PATH"),
-		EmbeddingModel: envOr("LUM_EMBEDDING_MODEL", DefaultEmbeddingModel),
+		DataDir:              envOr("LUM_DATA_DIR", filepath.Join(homeDir(), ".lum")),
+		HTTPAddr:             envOr("LUM_HTTP_ADDR", DefaultHTTPAddr),
+		IdleTimeout:          DefaultIdleTimeout,
+		DataPlaneIdleTimeout: envDurationOr("LUM_DATAPLANE_IDLE_TIMEOUT", DefaultDataPlaneIdleTimeout),
+		StartupTimeout:       DefaultStartupTimeout,
+		LumenPath:            os.Getenv("LUM_LUMEN_PATH"),
+		EmbeddingModel:       envOr("LUM_EMBEDDING_MODEL", DefaultEmbeddingModel),
 	}
 }
 
@@ -91,6 +102,15 @@ func (c Config) DaemonLogPath() string {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envDurationOr(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
 	return fallback
 }

@@ -91,7 +91,7 @@ var documentIDNamespace = uuid.MustParse("9c4064c4-672b-4aa6-b3ba-bf18f0b94670")
 type Ingestor struct {
 	ctx     context.Context
 	catalog *catalog.Catalog
-	dp      *dataplane.Client
+	dp      dataplane.DataPlane
 
 	scanReady chan struct{}
 	jobs      chan documentJob
@@ -109,7 +109,7 @@ type Ingestor struct {
 
 // New creates an Ingestor and starts its planner and document worker; cancel
 // ctx to stop both.
-func New(ctx context.Context, cat *catalog.Catalog, dp *dataplane.Client) *Ingestor {
+func New(ctx context.Context, cat *catalog.Catalog, dp dataplane.DataPlane) *Ingestor {
 	ing := &Ingestor{
 		ctx:           ctx,
 		catalog:       cat,

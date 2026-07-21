@@ -219,6 +219,24 @@ Every HTTP request resets a 15-minute idle timer. When it expires, the normal
 ordered shutdown path stops ingestion, drains HTTP, and gracefully terminates
 lumen. The next client request starts a fresh daemon.
 
+## Data plane idle shedding
+
+lumen carries its own, independent (and shorter) idle lifetime nested
+inside lumd's: `dataplane.Manager` tracks the last ingest/search RPC and, by
+default, gracefully stops lumen after 5 minutes without one — reclaiming the
+hundreds of MB the ONNX model and qdrant-edge hold resident, the sleeper
+benefit of splitting the two planes into separate processes in the first
+place. Deliberately excluded from "activity": `/v1/status` and other health
+checks, so monitoring lum doesn't itself keep the model warm.
+
+A request that actually needs the data plane (add source, scan, search)
+respawns it lazily and waits for readiness, exactly mirroring the on-demand
+daemon flow above one level down: `lum status` reports `data plane: idle`
+while shed, `starting`/`downloading-model` while the respawn is in flight,
+then `ready`. An unexpected lumen crash is handled identically — Manager
+treats a dead supervisor the same as a deliberate shed, so the next request
+respawns it rather than failing until `lum serve` is restarted by hand.
+
 ## Key dependency choices
 
 | Choice | Over | Because |
@@ -231,10 +249,7 @@ lumen. The next client request starts a fresh daemon.
 
 ## Known gaps (deliberate, ordered)
 
-1. **Supervisor doesn't respawn** — if lumen crashes, requests fail until
-   `lum serve` is restarted. Restart-with-backoff is a contained exercise
-   in `supervisor.go`.
-2. **Catalog/vector drift after a hard crash** is prevented by flush
+1. **Catalog/vector drift after a hard crash** is prevented by flush
    ordering, but there's no `lum verify` to audit/repair the invariant.
-3. **Scan status is coarse** — `lum status` shows counts, not per-scan
+2. **Scan status is coarse** — `lum status` shows counts, not per-scan
    progress. A jobs table in the catalog would fix this.

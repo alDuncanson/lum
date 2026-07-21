@@ -16,8 +16,9 @@ import (
 //
 // This keeps the data plane an implementation detail rather than a second
 // service to operate, whether the daemon was auto-started or run in the
-// foreground. Unexpected exits are reaped and logged; automatic respawn
-// with backoff is a planned improvement (see docs/architecture.md).
+// foreground. Unexpected exits are reaped and logged; Manager respawns
+// lumen lazily, whether it exited from a crash or from a deliberate idle
+// shed (see manager.go).
 type Supervisor struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
@@ -69,6 +70,18 @@ func Spawn(explicitPath, dataDir, grpcSocket, embeddingModel string) (*Superviso
 		close(s.done)
 	}()
 	return s, nil
+}
+
+// Exited reports whether the child has already terminated, whether from
+// Stop or an unexpected crash, so a Manager can treat both the same way:
+// respawn lazily on the next request.
+func (s *Supervisor) Exited() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
 }
 
 // Stop terminates lumen gracefully (SIGINT lets qdrant-edge flush),

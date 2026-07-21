@@ -31,6 +31,10 @@ const (
 	StateDownloadingModel ReadinessState = "downloading-model"
 	StateReady            ReadinessState = "ready"
 	StateUnavailable      ReadinessState = "unavailable"
+	// StateIdle is synthesized by Manager, never reported by lumen itself:
+	// the data plane was deliberately shed while idle and will respawn on
+	// the next request.
+	StateIdle ReadinessState = "idle"
 )
 
 const contentFrameSize = 256 * 1024
@@ -112,6 +116,11 @@ func logRPC(ctx context.Context, id, method string, started time.Time, err error
 }
 
 func (c *Client) Close() error { return c.conn.Close() }
+
+// EnsureRunning is a no-op: a bare Client always wraps an already-running
+// process managed externally. It exists so Client satisfies the same
+// DataPlane interface as Manager, which does the real work.
+func (c *Client) EnsureRunning() {}
 
 // WaitReady polls Health until the data plane is ready, the context is
 // cancelled, or an incompatible peer is reached. Unreachable, transitional,

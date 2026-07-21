@@ -30,11 +30,11 @@ import (
 // Server wires HTTP handlers to the control plane's components.
 type Server struct {
 	catalog  *catalog.Catalog
-	dp       *dataplane.Client
+	dp       dataplane.DataPlane
 	ingestor *ingest.Ingestor
 }
 
-func New(cat *catalog.Catalog, dp *dataplane.Client, ing *ingest.Ingestor) *Server {
+func New(cat *catalog.Catalog, dp dataplane.DataPlane, ing *ingest.Ingestor) *Server {
 	return &Server{catalog: cat, dp: dp, ingestor: ing}
 }
 
@@ -203,6 +203,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requireDataPlaneReady(w http.ResponseWriter, r *http.Request) bool {
+	// Health alone never wakes a shed data plane (see DataPlane's doc
+	// comment) — a real request like this one is what's supposed to.
+	s.dp.EnsureRunning()
 	health, err := s.dp.Health(r.Context())
 	if err == nil && health.State == dataplane.StateReady {
 		return true
