@@ -22,6 +22,7 @@ import (
 
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
 	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
+	"github.com/alDuncanson/lum/control-plane/internal/events"
 	"github.com/alDuncanson/lum/control-plane/internal/ingest"
 	"github.com/alDuncanson/lum/control-plane/internal/requestid"
 	"github.com/alDuncanson/lum/control-plane/internal/source"
@@ -32,10 +33,12 @@ type Server struct {
 	catalog  *catalog.Catalog
 	dp       dataplane.DataPlane
 	ingestor *ingest.Ingestor
+	bus      *events.Bus
 }
 
-func New(cat *catalog.Catalog, dp dataplane.DataPlane, ing *ingest.Ingestor) *Server {
-	return &Server{catalog: cat, dp: dp, ingestor: ing}
+// New wires a Server. bus may be nil, in which case no events are published.
+func New(cat *catalog.Catalog, dp dataplane.DataPlane, ing *ingest.Ingestor, bus *events.Bus) *Server {
+	return &Server{catalog: cat, dp: dp, ingestor: ing, bus: bus}
 }
 
 // Handler builds the route table (Go 1.22+ method-aware patterns). onRequest
@@ -47,10 +50,22 @@ func (s *Server) Handler(onRequest func()) http.Handler {
 	mux.HandleFunc("POST /v1/sources/{id}/scan", s.handleScanSource)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
-	return withRequestID(mux, onRequest)
+	return s.withRequestID(mux, onRequest)
 }
 
-func withRequestID(next http.Handler, onRequest func()) http.Handler {
+// statusRecorder captures the response status for logging and the
+// rpc_completed event; http.ResponseWriter has no accessor of its own.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (s *Server) withRequestID(next http.Handler, onRequest func()) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if onRequest != nil {
 			onRequest()
@@ -58,13 +73,22 @@ func withRequestID(next http.Handler, onRequest func()) http.Handler {
 		ctx, id := requestid.New(r.Context())
 		w.Header().Set(requestid.Header, id)
 		started := time.Now()
-		next.ServeHTTP(w, r.WithContext(ctx))
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r.WithContext(ctx))
+		took := time.Since(started)
 		slog.Info("HTTP request",
 			"request_id", id,
 			"method", r.Method,
 			"path", r.URL.Path,
-			"took", time.Since(started).Round(time.Millisecond),
+			"took", took.Round(time.Millisecond),
 		)
+		if s.bus != nil {
+			s.bus.Publish(events.Event{
+				Kind: events.KindRPCCompleted, RequestID: id, Transport: "http",
+				Method: r.Method + " " + r.URL.Path, Code: strconv.Itoa(recorder.status),
+				TookMS: took.Milliseconds(),
+			})
+		}
 	})
 }
 

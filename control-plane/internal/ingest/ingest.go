@@ -21,6 +21,7 @@ import (
 
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
 	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
+	"github.com/alDuncanson/lum/control-plane/internal/events"
 	"github.com/alDuncanson/lum/control-plane/internal/requestid"
 	"github.com/alDuncanson/lum/control-plane/internal/source"
 )
@@ -92,28 +93,32 @@ type Ingestor struct {
 	ctx     context.Context
 	catalog *catalog.Catalog
 	dp      dataplane.DataPlane
+	bus     *events.Bus
 
 	scanReady chan struct{}
 	jobs      chan documentJob
 
-	mu            sync.Mutex
-	pending       map[string]scanRequest
-	scanOrder     []string
-	debounced     map[string]*debounceRequest
-	retries       map[string]*retryRequest
-	watching      map[string]struct{}
-	debounce      time.Duration
-	retryBase     time.Duration
-	watchFallback time.Duration
+	mu             sync.Mutex
+	pending        map[string]scanRequest
+	scanOrder      []string
+	debounced      map[string]*debounceRequest
+	retries        map[string]*retryRequest
+	watching       map[string]struct{}
+	debounce       time.Duration
+	retryBase      time.Duration
+	watchFallback  time.Duration
+	activeDocument string
+	activeStage    string
 }
 
 // New creates an Ingestor and starts its planner and document worker; cancel
-// ctx to stop both.
-func New(ctx context.Context, cat *catalog.Catalog, dp dataplane.DataPlane) *Ingestor {
+// ctx to stop both. bus may be nil, in which case no events are published.
+func New(ctx context.Context, cat *catalog.Catalog, dp dataplane.DataPlane, bus *events.Bus) *Ingestor {
 	ing := &Ingestor{
 		ctx:           ctx,
 		catalog:       cat,
 		dp:            dp,
+		bus:           bus,
 		scanReady:     make(chan struct{}, 1),
 		jobs:          make(chan documentJob, 256),
 		pending:       make(map[string]scanRequest),
@@ -128,6 +133,36 @@ func New(ctx context.Context, cat *catalog.Catalog, dp dataplane.DataPlane) *Ing
 	go ing.documentWorker(ctx)
 	go ing.stopDebouncers(ctx)
 	return ing
+}
+
+// publish is a nil-safe wrapper so every call site can fire-and-forget.
+func (i *Ingestor) publish(e events.Event) {
+	if i.bus != nil {
+		i.bus.Publish(e)
+	}
+}
+
+// QueueDepth reports the source-level scan queue and the document-level
+// job queue, for the periodic snapshot.
+func (i *Ingestor) QueueDepth() (pendingScans, pendingDocuments int) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return len(i.scanOrder), len(i.jobs)
+}
+
+// ActiveWork reports the document and pipeline stage the single document
+// worker is currently handling, for the periodic snapshot. Both are empty
+// when the worker is idle.
+func (i *Ingestor) ActiveWork() (document, stage string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.activeDocument, i.activeStage
+}
+
+func (i *Ingestor) setActiveWork(document, stage string) {
+	i.mu.Lock()
+	i.activeDocument, i.activeStage = document, stage
+	i.mu.Unlock()
 }
 
 // WatchSource starts live change detection when the source supports it.
@@ -302,6 +337,9 @@ func (i *Ingestor) planner(ctx context.Context) {
 				sourceID: req.sourceID, requestID: req.requestID,
 				started: time.Now(), done: make(chan struct{}),
 			}
+			i.publish(events.Event{
+				Kind: events.KindScanStarted, RequestID: run.requestID, SourceID: run.sourceID,
+			})
 			scanCtx := requestid.WithValue(ctx, req.requestID)
 			planErr := i.planScan(scanCtx, run)
 			if !i.sendJob(ctx, documentJob{kind: jobScanComplete, run: run, err: planErr}) {
@@ -401,6 +439,12 @@ func (i *Ingestor) sendJob(ctx context.Context, job documentJob) bool {
 	case <-ctx.Done():
 		return false
 	case i.jobs <- job:
+		if job.kind == jobUpsert || job.kind == jobDelete {
+			i.publish(events.Event{
+				Kind: events.KindDocumentQueued, RequestID: job.run.requestID,
+				SourceID: job.run.sourceID, DocumentID: job.document.ID, URI: job.document.URI,
+			})
+		}
 		return true
 	}
 }
@@ -428,6 +472,11 @@ func (i *Ingestor) documentWorker(ctx context.Context) {
 			}
 			switch job.kind {
 			case jobUpsert:
+				i.setActiveWork(job.document.URI, "reading")
+				i.publish(events.Event{
+					Kind: events.KindDocumentReading, RequestID: job.run.requestID,
+					SourceID: job.run.sourceID, DocumentID: job.document.ID, URI: job.document.URI,
+				})
 				content, err := job.source.Read(ctx, job.ref)
 				if err != nil {
 					slog.Warn("read failed, skipping",
@@ -459,6 +508,7 @@ func (i *Ingestor) documentWorker(ctx context.Context) {
 				}
 			case jobDelete:
 				flush()
+				i.setActiveWork(job.document.URI, "deleting")
 				i.deleteDocument(ctx, job)
 			case jobScanComplete:
 				flush()
@@ -466,6 +516,7 @@ func (i *Ingestor) documentWorker(ctx context.Context) {
 					job.run.err = job.err
 				}
 				i.finishScan(job.run)
+				i.setActiveWork("", "")
 			}
 		}
 	}
@@ -478,6 +529,13 @@ func (i *Ingestor) flushBatch(ctx context.Context, pending []pendingDocument) {
 	}
 	run := pending[0].job.run
 	batchCtx := requestid.WithValue(ctx, run.requestID)
+	i.setActiveWork(fmt.Sprintf("%s (batch of %d)", pending[0].job.document.URI, len(pending)), "embedding")
+	for _, item := range pending {
+		i.publish(events.Event{
+			Kind: events.KindDocumentEmbedding, RequestID: run.requestID,
+			SourceID: run.sourceID, DocumentID: item.job.document.ID, URI: item.job.document.URI,
+		})
+	}
 	results, err := i.dp.IngestBatch(batchCtx, inputs)
 	if err != nil {
 		slog.Warn("ingest batch failed, skipping documents",
@@ -507,6 +565,11 @@ func (i *Ingestor) flushBatch(ctx context.Context, pending []pendingDocument) {
 			return
 		}
 		run.ingested++
+		i.publish(events.Event{
+			Kind: events.KindDocumentIngested, RequestID: run.requestID,
+			SourceID: run.sourceID, DocumentID: item.job.document.ID, URI: item.job.document.URI,
+			ChunkCount: int(result.ChunkCount),
+		})
 	}
 }
 
@@ -528,11 +591,20 @@ func (i *Ingestor) deleteDocument(ctx context.Context, job documentJob) {
 		return
 	}
 	run.removed++
+	i.publish(events.Event{
+		Kind: events.KindDocumentDeleted, RequestID: run.requestID,
+		SourceID: run.sourceID, DocumentID: job.document.ID, URI: job.document.URI,
+	})
 }
 
 func (i *Ingestor) failDocument(ctx context.Context, job documentJob, failureErr error) {
 	run := job.run
 	run.failed++
+	i.publish(events.Event{
+		Kind: events.KindDocumentFailed, RequestID: run.requestID,
+		SourceID: run.sourceID, DocumentID: job.document.ID, URI: job.document.URI,
+		Error: failureErr.Error(),
+	})
 	attempts, err := i.catalog.RecordIngestFailure(ctx, catalog.IngestFailure{
 		SourceID: run.sourceID,
 		URI:      job.document.URI,
@@ -552,7 +624,13 @@ func (i *Ingestor) failDocument(ctx context.Context, job documentJob, failureErr
 }
 
 func (i *Ingestor) finishScan(run *scanRun) {
+	event := events.Event{
+		Kind: events.KindScanFinished, RequestID: run.requestID, SourceID: run.sourceID,
+		Ingested: run.ingested, Unchanged: run.unchanged, Removed: run.removed, Failed: run.failed,
+		TookMS: time.Since(run.started).Milliseconds(),
+	}
 	if run.err != nil {
+		event.Error = run.err.Error()
 		slog.Error("scan failed", "request_id", run.requestID,
 			"source", run.sourceID, "error", run.err)
 	} else {
@@ -566,6 +644,7 @@ func (i *Ingestor) finishScan(run *scanRun) {
 			"took", time.Since(run.started).Round(time.Millisecond),
 		)
 	}
+	i.publish(event)
 	i.replaceRetry(run)
 	close(run.done)
 }

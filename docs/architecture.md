@@ -237,6 +237,37 @@ then `ready`. An unexpected lumen crash is handled identically — Manager
 treats a dead supervisor the same as a deliberate shed, so the next request
 respawns it rather than failing until `lum serve` is restarted by hand.
 
+## Internal event bus
+
+`internal/events.Bus` is lum's one observability contract: a small
+in-memory pub/sub that system components publish to and any number of
+subscribers consume from, with a ring buffer (512 events by default) so a
+late-joining subscriber gets recent context. There's no persistence —
+htop doesn't have history either.
+
+One flat `Event` schema (a tagged union discriminated by `Kind`) covers
+two kinds of message:
+
+- **Discrete events**: `scan_started`/`scan_finished` bracket a source
+  scan; `document_queued → document_reading → document_embedding →
+  document_ingested`/`document_failed` trace one document through the
+  pipeline (`document_deleted` for the delete path); `dataplane_state_changed`
+  fires on every lumen readiness transition; `rpc_completed` covers
+  whole-RPC latency for both the data-plane gRPC hop and the public HTTP
+  API.
+- **Periodic snapshots** (`kind: snapshot`, every 2s): scan queue depth,
+  the document worker's current document and stage, data plane state,
+  and index totals — a heartbeat for anything that wants a gauge reading
+  rather than tracking discrete events itself.
+
+Every event carries the request ID (#11) so it correlates with logs. The
+control plane doesn't reach into lumen for finer-grained visibility: it
+knows when it sent an IngestBatch RPC and when it returned, and treats
+that duration as the "embedding" phase from outside, the same opaque
+treatment of the gRPC boundary described above. This bus is a
+prerequisite for the SSE endpoint and `lum top`, not yet exposed outside
+the process.
+
 ## Key dependency choices
 
 | Choice | Over | Because |

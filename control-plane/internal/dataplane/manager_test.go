@@ -10,6 +10,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/alDuncanson/lum/control-plane/internal/events"
 	lumv1 "github.com/alDuncanson/lum/control-plane/internal/gen/lum/v1"
 )
 
@@ -238,6 +239,30 @@ func TestManagerCloseStopsRunningLumenAndPreventsRespawn(t *testing.T) {
 	health, _ := m.Health(context.Background())
 	if health.State != StateIdle {
 		t.Fatalf("state after Close = %q, want idle", health.State)
+	}
+}
+
+func TestManagerPublishesRPCCompletedEventsForRealOps(t *testing.T) {
+	spawn, dial, _ := managerDeps(t, searchableDataPlane{readyHealth()})
+	m := newTestManager(spawn, dial, 0)
+	bus := events.NewBus(8)
+	m.bus = bus
+	t.Cleanup(func() { _ = m.Close() })
+
+	ch, _, unsubscribe := bus.Subscribe(8)
+	defer unsubscribe()
+
+	if _, err := m.Search(context.Background(), "q", 10); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case e := <-ch:
+		if e.Kind != events.KindRPCCompleted || e.Transport != "grpc" || e.Method != "Search" || e.Code != "OK" {
+			t.Fatalf("unexpected event: %+v", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no rpc_completed event published for Search")
 	}
 }
 

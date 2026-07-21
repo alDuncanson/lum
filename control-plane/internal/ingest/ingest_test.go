@@ -2,13 +2,46 @@ package ingest
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
+	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
+	"github.com/alDuncanson/lum/control-plane/internal/events"
 )
+
+// stubDataPlane is a minimal dataplane.DataPlane for exercising the
+// ingest pipeline's event publishing without a real lumen process.
+type stubDataPlane struct {
+	failURIs map[string]bool
+}
+
+func (stubDataPlane) Health(context.Context) (dataplane.HealthResult, error) {
+	return dataplane.HealthResult{State: dataplane.StateReady}, nil
+}
+func (stubDataPlane) EnsureRunning() {}
+
+func (s stubDataPlane) IngestBatch(_ context.Context, documents []dataplane.IngestBatchDocument) ([]dataplane.IngestBatchResult, error) {
+	results := make([]dataplane.IngestBatchResult, len(documents))
+	for index, doc := range documents {
+		results[index].DocumentID = doc.DocumentID
+		if s.failURIs[doc.URI] {
+			results[index].Err = fmt.Errorf("stub: forced failure for %s", doc.URI)
+			continue
+		}
+		results[index].ChunkCount = 1
+	}
+	return results, nil
+}
+
+func (stubDataPlane) DeleteDocument(context.Context, string, uint32) error { return nil }
+
+func (stubDataPlane) Search(context.Context, string, uint32) ([]dataplane.SearchResult, error) {
+	return nil, nil
+}
 
 func TestEnqueueScanDeduplicatesPendingSource(t *testing.T) {
 	ing := queueOnlyIngestor(context.Background())
@@ -200,5 +233,108 @@ func queueOnlyIngestor(ctx context.Context) *Ingestor {
 		ctx: ctx, scanReady: make(chan struct{}, 1),
 		pending: make(map[string]scanRequest), debounced: make(map[string]*debounceRequest),
 		retries: make(map[string]*retryRequest), debounce: debounceWindow, retryBase: retryBaseDelay,
+	}
+}
+
+// drainUntil consumes events from ch until one of kind is seen (returning
+// the tally of every kind observed along the way) or the deadline passes.
+func drainUntil(t *testing.T, ch <-chan events.Event, kind events.Kind, timeout time.Duration) map[events.Kind]int {
+	t.Helper()
+	seen := make(map[events.Kind]int)
+	deadline := time.After(timeout)
+	for {
+		select {
+		case e := <-ch:
+			seen[e.Kind]++
+			if e.Kind == kind {
+				return seen
+			}
+		case <-deadline:
+			t.Fatalf("did not observe %q within %s; events seen so far: %v", kind, timeout, seen)
+			return nil
+		}
+	}
+}
+
+func TestScanPublishesFullDocumentLifecycleEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.md"), []byte("alpha"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := catalog.Open(filepath.Join(t.TempDir(), "catalog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+	if _, _, err := cat.AddSource(ctx, catalog.Source{
+		ID: "source", Type: "localdir", URI: root, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	bus := events.NewBus(64)
+	ch, _, unsubscribe := bus.Subscribe(64)
+	defer unsubscribe()
+
+	ing := New(ctx, cat, stubDataPlane{}, bus)
+	ing.EnqueueScan(context.Background(), "source")
+
+	seen := drainUntil(t, ch, events.KindScanFinished, 3*time.Second)
+	for _, kind := range []events.Kind{
+		events.KindScanStarted, events.KindDocumentQueued, events.KindDocumentReading,
+		events.KindDocumentEmbedding, events.KindDocumentIngested, events.KindScanFinished,
+	} {
+		if seen[kind] == 0 {
+			t.Errorf("expected at least one %q event, saw none (all seen: %v)", kind, seen)
+		}
+	}
+}
+
+func TestScanPublishesFailedAndDeletedEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	root := t.TempDir()
+	failing := filepath.Join(root, "bad.md")
+	deleting := filepath.Join(root, "gone.md")
+	if err := os.WriteFile(failing, []byte("alpha"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deleting, []byte("beta"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := catalog.Open(filepath.Join(t.TempDir(), "catalog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+	if _, _, err := cat.AddSource(ctx, catalog.Source{
+		ID: "source", Type: "localdir", URI: root, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	bus := events.NewBus(64)
+	ch, _, unsubscribe := bus.Subscribe(64)
+	defer unsubscribe()
+
+	ing := New(ctx, cat, stubDataPlane{failURIs: map[string]bool{failing: true}}, bus)
+	ing.EnqueueScan(context.Background(), "source")
+	drainUntil(t, ch, events.KindScanFinished, 3*time.Second)
+
+	// Remove the file that wasn't set up to fail, so the next authoritative
+	// scan reconciles it as a deletion.
+	if err := os.Remove(deleting); err != nil {
+		t.Fatal(err)
+	}
+	ing.EnqueueScan(context.Background(), "source")
+	seen := drainUntil(t, ch, events.KindScanFinished, 3*time.Second)
+	for _, kind := range []events.Kind{events.KindDocumentFailed, events.KindDocumentDeleted} {
+		if seen[kind] == 0 {
+			t.Errorf("expected at least one %q event, saw none (all seen: %v)", kind, seen)
+		}
 	}
 }

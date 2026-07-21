@@ -6,6 +6,11 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"google.golang.org/grpc/status"
+
+	"github.com/alDuncanson/lum/control-plane/internal/events"
+	"github.com/alDuncanson/lum/control-plane/internal/requestid"
 )
 
 // DataPlane is what the rest of the control plane needs from the data
@@ -33,6 +38,7 @@ type Manager struct {
 	startupTimeout time.Duration
 	spawn          func() (*Supervisor, error)
 	dial           func() (*Client, error)
+	bus            *events.Bus
 
 	mu           sync.Mutex
 	sup          *Supervisor
@@ -47,16 +53,19 @@ type Manager struct {
 
 // NewManager wraps an already-spawned, already-dialed lumen. idleTimeout
 // <= 0 disables shedding (lumen stays up for the process lifetime, as
-// before this feature).
+// before this feature). bus may be nil, in which case no events are
+// published.
 func NewManager(
 	lumenPath, dataDir, socketPath, embeddingModel string,
 	idleTimeout, startupTimeout time.Duration,
 	sup *Supervisor, client *Client,
+	bus *events.Bus,
 ) *Manager {
 	m := &Manager{
 		idleTimeout: idleTimeout, startupTimeout: startupTimeout,
 		spawn: func() (*Supervisor, error) { return Spawn(lumenPath, dataDir, socketPath, embeddingModel) },
 		dial:  func() (*Client, error) { return Dial(socketPath) },
+		bus:   bus,
 		sup:   sup, client: client, lastActivity: time.Now(),
 		done: make(chan struct{}),
 	}
@@ -133,7 +142,10 @@ func (m *Manager) IngestBatch(ctx context.Context, documents []IngestBatchDocume
 	}
 	m.beginOp()
 	defer m.endOp()
-	return client.IngestBatch(ctx, documents)
+	started := time.Now()
+	results, err := client.IngestBatch(ctx, documents)
+	m.recordRPC(ctx, "IngestBatch", started, err)
+	return results, err
 }
 
 func (m *Manager) DeleteDocument(ctx context.Context, documentID string, chunkCount uint32) error {
@@ -143,7 +155,10 @@ func (m *Manager) DeleteDocument(ctx context.Context, documentID string, chunkCo
 	}
 	m.beginOp()
 	defer m.endOp()
-	return client.DeleteDocument(ctx, documentID, chunkCount)
+	started := time.Now()
+	err = client.DeleteDocument(ctx, documentID, chunkCount)
+	m.recordRPC(ctx, "DeleteDocument", started, err)
+	return err
 }
 
 func (m *Manager) Search(ctx context.Context, query string, limit uint32) ([]SearchResult, error) {
@@ -153,7 +168,24 @@ func (m *Manager) Search(ctx context.Context, query string, limit uint32) ([]Sea
 	}
 	m.beginOp()
 	defer m.endOp()
-	return client.Search(ctx, query, limit)
+	started := time.Now()
+	results, err := client.Search(ctx, query, limit)
+	m.recordRPC(ctx, "Search", started, err)
+	return results, err
+}
+
+// recordRPC publishes whole-RPC latency for the data-plane hop. This
+// stands in for a gRPC client interceptor: from the control plane's side
+// of the hop, an IngestBatch call's duration IS the embedding phase for
+// the batch it carried (see the ingest_started/embedding events).
+func (m *Manager) recordRPC(ctx context.Context, method string, started time.Time, err error) {
+	if m.bus == nil {
+		return
+	}
+	m.bus.Publish(events.Event{
+		Kind: events.KindRPCCompleted, RequestID: requestid.FromContext(ctx),
+		Transport: "grpc", Method: method, Code: status.Code(err).String(), TookMS: time.Since(started).Milliseconds(),
+	})
 }
 
 // awaitReady is the one path real work goes through: ensure a respawn is

@@ -19,8 +19,13 @@ import (
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
 	"github.com/alDuncanson/lum/control-plane/internal/config"
 	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
+	"github.com/alDuncanson/lum/control-plane/internal/events"
 	"github.com/alDuncanson/lum/control-plane/internal/ingest"
 )
+
+// eventBusRingSize bounds how many recent events a late subscriber (a
+// fresh `lum top` or /v1/events connection) gets replayed on connect.
+const eventBusRingSize = 512
 
 // serveCmd runs the daemon. Startup order matters and reads top to
 // bottom in run(): data dir → catalog → spawn data plane → ingest/API →
@@ -93,13 +98,18 @@ func run(ctx context.Context, cfg config.Config) error {
 		sup.Stop()
 		return err
 	}
+	// The event bus is lum's one observability contract (#19): the ingest
+	// pipeline, the data-plane RPC hop, and the HTTP API all publish to it;
+	// the SSE endpoint and `lum top` are just renderers of it.
+	bus := events.NewBus(eventBusRingSize)
+
 	// Manager takes over lumen's lifecycle from here: idle shedding to
 	// reclaim the model's memory, and lazy respawn on the next request
 	// (see dataplane/manager.go).
 	dp := dataplane.NewManager(
 		cfg.LumenPath, cfg.DataDir, socketPath, cfg.EmbeddingModel,
 		cfg.DataPlaneIdleTimeout, cfg.StartupTimeout,
-		sup, rawClient,
+		sup, rawClient, bus,
 	)
 	defer dp.Close()
 
@@ -111,7 +121,8 @@ func run(ctx context.Context, cfg config.Config) error {
 
 	// Do not start ingestion workers until the public API is guaranteed to
 	// have its socket. In particular, a bind failure must start no scans.
-	ingestor := ingest.New(daemonCtx, cat, dp)
+	ingestor := ingest.New(daemonCtx, cat, dp, bus)
+	go runSnapshotLoop(daemonCtx, bus, cat, ingestor, dp)
 	activityCh := make(chan struct{}, 1)
 	recordActivity := func() {
 		select {
@@ -121,7 +132,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	}
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: api.New(cat, dp, ingestor).Handler(recordActivity),
+		Handler: api.New(cat, dp, ingestor, bus).Handler(recordActivity),
 	}
 	defer server.Close()
 	errCh := make(chan error, 1)
