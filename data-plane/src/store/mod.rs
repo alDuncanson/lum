@@ -53,6 +53,12 @@ pub trait VectorStore: Send + Sync {
     /// delete on its document_id payload field rather than a chunk count.
     fn delete_document(&self, document_id: &str) -> Result<()>;
 
-    /// Nearest-neighbor search over all stored chunks.
-    fn search(&self, query_vector: Vec<f32>, limit: usize) -> Result<Vec<Hit>>;
+    /// Nearest-neighbor search over stored chunks, optionally restricted
+    /// to one source.
+    fn search(
+        &self,
+        query_vector: Vec<f32>,
+        limit: usize,
+        source_id: Option<&str>,
+    ) -> Result<Vec<Hit>>;
 }

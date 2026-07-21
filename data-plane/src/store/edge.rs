@@ -37,6 +37,9 @@ const POINT_NAMESPACE: Uuid = Uuid::from_u128(0x9f8b_4a1e_6c75_4d2a_b03e_517f_22
 /// tracking or echoing back a chunk count (#3).
 const DOCUMENT_ID_FIELD: &str = "document_id";
 
+/// Payload field indexed so search can be restricted to one source (#7).
+const SOURCE_ID_FIELD: &str = "source_id";
+
 // Every index created before manifests were introduced used this model.
 // Keeping that legacy identity explicit makes the one-time backfill safe:
 // a future binary cannot bless old vectors as belonging to a new model.
@@ -55,15 +58,20 @@ fn point_uuid(document_id: &str, chunk_index: u32) -> Uuid {
     )
 }
 
+/// A filter matching every point whose payload field `field` equals
+/// `value` — used both for document deletion (#3) and source-scoped
+/// search (#7).
+fn field_equals_filter(field: &str, value: &str) -> Filter {
+    Filter::new_must(Condition::Field(FieldCondition::new_match(
+        field.parse().expect("field name is a valid JsonPath"),
+        Match::new_value(ValueVariants::String(value.to_owned())),
+    )))
+}
+
 /// A filter matching every point stored for one document, used for
 /// deletion instead of deriving point IDs from a chunk count.
 fn document_id_filter(document_id: &str) -> Filter {
-    Filter::new_must(Condition::Field(FieldCondition::new_match(
-        DOCUMENT_ID_FIELD
-            .parse()
-            .expect("\"document_id\" is a valid JsonPath"),
-        Match::new_value(ValueVariants::String(document_id.to_owned())),
-    )))
+    field_equals_filter(DOCUMENT_ID_FIELD, document_id)
 }
 
 pub struct EdgeStore {
@@ -99,19 +107,23 @@ impl EdgeStore {
 
         // Idempotent: creating an already-existing index is a documented
         // no-op upstream, so this runs unconditionally on every open.
-        shard
-            .update(UpdateOperation::FieldIndexOperation(
-                FieldIndexOperations::CreateIndex(CreateIndex {
-                    field_name: DOCUMENT_ID_FIELD
-                        .parse()
-                        .expect("\"document_id\" is a valid JsonPath"),
-                    field_schema: Some(PayloadFieldSchema::FieldType(PayloadSchemaType::Keyword)),
-                }),
-            ))
-            .map_err(|e| anyhow!("creating document_id payload index: {e}"))?;
+        create_keyword_index(&shard, DOCUMENT_ID_FIELD)?;
+        create_keyword_index(&shard, SOURCE_ID_FIELD)?;
 
         Ok(Self { shard })
     }
+}
+
+fn create_keyword_index(shard: &EdgeShard, field: &str) -> Result<()> {
+    shard
+        .update(UpdateOperation::FieldIndexOperation(
+            FieldIndexOperations::CreateIndex(CreateIndex {
+                field_name: field.parse().expect("field name is a valid JsonPath"),
+                field_schema: Some(PayloadFieldSchema::FieldType(PayloadSchemaType::Keyword)),
+            }),
+        ))
+        .map_err(|e| anyhow!("creating {field} payload index: {e}"))?;
+    Ok(())
 }
 
 fn manifest_path(path: &Path) -> PathBuf {
@@ -257,7 +269,13 @@ impl VectorStore for EdgeStore {
         Ok(())
     }
 
-    fn search(&self, query_vector: Vec<f32>, limit: usize) -> Result<Vec<Hit>> {
+    fn search(
+        &self,
+        query_vector: Vec<f32>,
+        limit: usize,
+        source_id: Option<&str>,
+    ) -> Result<Vec<Hit>> {
+        let filter = source_id.map(|id| field_equals_filter(SOURCE_ID_FIELD, id));
         let points = self
             .shard
             .query(QueryRequest {
@@ -266,7 +284,7 @@ impl VectorStore for EdgeStore {
                     query: query_vector.into(),
                     using: None, // the default (only) vector
                 }))),
-                filter: None,
+                filter,
                 score_threshold: None,
                 limit,
                 offset: 0,
@@ -385,7 +403,7 @@ mod tests {
             )
             .unwrap();
 
-        let before = store.search(vec![1.0, 0.0, 0.0, 0.0], 10).unwrap();
+        let before = store.search(vec![1.0, 0.0, 0.0, 0.0], 10, None).unwrap();
         assert_eq!(
             before.len(),
             3,
@@ -394,7 +412,7 @@ mod tests {
 
         store.delete_document("doc-a").unwrap();
 
-        let after = store.search(vec![1.0, 0.0, 0.0, 0.0], 10).unwrap();
+        let after = store.search(vec![1.0, 0.0, 0.0, 0.0], 10, None).unwrap();
         assert_eq!(
             after.iter().map(|hit| hit.document_id.as_str()).collect::<Vec<_>>(),
             vec!["doc-b"],
@@ -444,7 +462,13 @@ mod tests {
                 vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]],
             )
             .unwrap();
-        assert_eq!(store.search(vec![1.0, 0.0, 0.0, 0.0], 10).unwrap().len(), 2);
+        assert_eq!(
+            store
+                .search(vec![1.0, 0.0, 0.0, 0.0], 10, None)
+                .unwrap()
+                .len(),
+            2
+        );
 
         // Mirrors service.rs's ingest path: delete every existing point for
         // the document before upserting the new, shorter chunk set.
@@ -460,7 +484,7 @@ mod tests {
             )
             .unwrap();
 
-        let after = store.search(vec![1.0, 0.0, 0.0, 0.0], 10).unwrap();
+        let after = store.search(vec![1.0, 0.0, 0.0, 0.0], 10, None).unwrap();
         assert_eq!(
             after.len(),
             1,
@@ -469,6 +493,63 @@ mod tests {
         assert_eq!(after[0].text, "v2-chunk0");
 
         drop(store); // flush/close before the directory is removed
+        cleanup(&path);
+    }
+
+    #[test]
+    fn search_restricts_results_to_the_given_source_when_filtered() {
+        let path = test_index_path();
+        let store = EdgeStore::open(&path, "test-model", 4).unwrap();
+
+        store
+            .upsert_document(
+                DocumentMeta {
+                    document_id: "doc-a",
+                    source_id: "source-a",
+                    uri: "/a",
+                },
+                &[Chunk {
+                    index: 0,
+                    text: "a0".to_owned(),
+                }],
+                vec![vec![1.0, 0.0, 0.0, 0.0]],
+            )
+            .unwrap();
+        store
+            .upsert_document(
+                DocumentMeta {
+                    document_id: "doc-b",
+                    source_id: "source-b",
+                    uri: "/b",
+                },
+                &[Chunk {
+                    index: 0,
+                    text: "b0".to_owned(),
+                }],
+                vec![vec![1.0, 0.0, 0.0, 0.0]],
+            )
+            .unwrap();
+
+        let unfiltered = store.search(vec![1.0, 0.0, 0.0, 0.0], 10, None).unwrap();
+        assert_eq!(
+            unfiltered.len(),
+            2,
+            "no filter should return both sources' points"
+        );
+
+        let filtered = store
+            .search(vec![1.0, 0.0, 0.0, 0.0], 10, Some("source-a"))
+            .unwrap();
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|hit| hit.source_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["source-a"],
+            "filtered search must return only the requested source's points"
+        );
+
+        drop(store);
         cleanup(&path);
     }
 }

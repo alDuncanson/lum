@@ -185,6 +185,8 @@ message SearchRequest {
   string query = 1;
   // Maximum number of chunks to return.
   uint32 limit = 2;
+  // Optional: restrict results to one source (empty means all sources).
+  string source_id = 3;
 }
 
 message SearchResponse {

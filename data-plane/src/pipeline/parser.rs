@@ -6,7 +6,25 @@
 //! to [`ParserRegistry::with_defaults`] — nothing else in the system
 //! changes.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
+use std::fmt;
+
+/// Marks an error as the caller's fault (unsupported/invalid input), not
+/// an internal failure. `service::run_blocking` downcasts for this to
+/// return `Status::invalid_argument` instead of a blanket
+/// `Status::internal` — the first step toward a real error taxonomy so
+/// retry logic can eventually distinguish permanent from transient
+/// failures (#7).
+#[derive(Debug)]
+pub struct InvalidArgument(pub String);
+
+impl fmt::Display for InvalidArgument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidArgument {}
 
 /// One document format handler.
 ///
@@ -38,7 +56,10 @@ impl ParserRegistry {
     /// Parse `content` using the first parser that supports `mime_type`.
     pub fn parse(&self, mime_type: &str, content: &[u8]) -> Result<String> {
         let Some(parser) = self.parsers.iter().find(|p| p.supports(mime_type)) else {
-            bail!("no parser registered for MIME type {mime_type:?}");
+            return Err(InvalidArgument(format!(
+                "no parser registered for MIME type {mime_type:?}"
+            ))
+            .into());
         };
         parser.parse(content)
     }
@@ -114,6 +135,16 @@ mod tests {
     fn unknown_mime_is_an_error() {
         let registry = ParserRegistry::with_defaults();
         assert!(registry.parse("application/pdf", b"%PDF").is_err());
+    }
+
+    #[test]
+    fn unknown_mime_error_is_an_invalid_argument_not_a_generic_failure() {
+        let registry = ParserRegistry::with_defaults();
+        let error = registry.parse("application/pdf", b"%PDF").unwrap_err();
+        let invalid = error
+            .downcast_ref::<InvalidArgument>()
+            .expect("unsupported MIME type must be reported as InvalidArgument (#7)");
+        assert!(invalid.0.contains("application/pdf"));
     }
 
     #[test]

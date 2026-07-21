@@ -69,8 +69,9 @@ func Run(ctx context.Context, version string) error {
 // ---- search ----
 
 type searchInput struct {
-	Query string `json:"query" jsonschema:"the natural-language search query"`
-	Limit int    `json:"limit,omitempty" jsonschema:"maximum results to return (1-100, default 10)"`
+	Query    string `json:"query" jsonschema:"the natural-language search query"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"maximum results to return (1-100, default 10)"`
+	SourceID string `json:"source_id,omitempty" jsonschema:"restrict results to one source ID (see list_sources)"`
 }
 
 type searchOutput struct {
@@ -85,7 +86,7 @@ func searchTool(api *apiclient.Client) mcp.ToolHandlerFor[searchInput, searchOut
 		if limit == 0 {
 			limit = 10
 		}
-		results, err := api.Search(ctx, in.Query, limit)
+		results, err := api.Search(ctx, in.Query, limit, in.SourceID)
 		if err != nil {
 			return nil, searchOutput{}, err
 		}

@@ -25,7 +25,7 @@ type DataPlane interface {
 	EnsureRunning()
 	IngestBatch(ctx context.Context, documents []IngestBatchDocument) ([]IngestBatchResult, error)
 	DeleteDocument(ctx context.Context, documentID string) error
-	Search(ctx context.Context, query string, limit uint32) ([]SearchResult, error)
+	Search(ctx context.Context, query string, limit uint32, sourceID string) ([]SearchResult, error)
 }
 
 // Manager owns lumen's lifecycle for as long as lumd runs: an idle timer
@@ -161,7 +161,7 @@ func (m *Manager) DeleteDocument(ctx context.Context, documentID string) error {
 	return err
 }
 
-func (m *Manager) Search(ctx context.Context, query string, limit uint32) ([]SearchResult, error) {
+func (m *Manager) Search(ctx context.Context, query string, limit uint32, sourceID string) ([]SearchResult, error) {
 	client, err := m.awaitReady(ctx)
 	if err != nil {
 		return nil, err
@@ -169,7 +169,7 @@ func (m *Manager) Search(ctx context.Context, query string, limit uint32) ([]Sea
 	m.beginOp()
 	defer m.endOp()
 	started := time.Now()
-	results, err := client.Search(ctx, query, limit)
+	results, err := client.Search(ctx, query, limit, sourceID)
 	m.recordRPC(ctx, "Search", started, err)
 	return results, err
 }

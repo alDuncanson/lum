@@ -18,7 +18,8 @@ use tonic::{Request, Response, Status};
 
 use crate::pb;
 use crate::pipeline::{
-    Chunk, Chunker, Embedder, EmbeddingModelChoice, FastEmbedder, ParserRegistry, WordWindowChunker,
+    Chunk, Chunker, Embedder, EmbeddingModelChoice, FastEmbedder, InvalidArgument, ParserRegistry,
+    WordWindowChunker,
 };
 use crate::store::{edge::EdgeStore, DocumentMeta, VectorStore};
 
@@ -158,8 +159,18 @@ impl DataPlaneService {
         tokio::task::spawn_blocking(move || f(&pipeline))
             .await
             .map_err(|e| Status::internal(format!("worker panicked: {e}")))?
-            .map_err(|e| Status::internal(format!("{e:#}")))
+            .map_err(pipeline_error_status)
     }
+}
+
+/// Distinguishes the caller's fault (bad input, e.g. an unsupported MIME
+/// type) from a genuine internal failure, rather than mapping every
+/// pipeline error to `Status::internal` regardless of cause (#7).
+fn pipeline_error_status(error: anyhow::Error) -> Status {
+    if let Some(invalid) = error.downcast_ref::<InvalidArgument>() {
+        return Status::invalid_argument(invalid.to_string());
+    }
+    Status::internal(format!("{error:#}"))
 }
 
 #[tonic::async_trait]
@@ -552,7 +563,8 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         let results = self
             .run_blocking(move |p| {
                 let vector = p.embedder.embed_query(&req.query)?;
-                let hits = p.store.search(vector, limit)?;
+                let source_filter = (!req.source_id.is_empty()).then_some(req.source_id.as_str());
+                let hits = p.store.search(vector, limit, source_filter)?;
                 Ok(hits
                     .into_iter()
                     .map(|h| pb::SearchResult {
@@ -592,9 +604,26 @@ mod tests {
             .search(Request::new(pb::SearchRequest {
                 query: "test".to_owned(),
                 limit: 1,
+                source_id: String::new(),
             }))
             .await
             .expect_err("search is unavailable before initialization");
         assert_eq!(error.code(), tonic::Code::Unavailable);
+    }
+
+    #[test]
+    fn pipeline_error_status_reports_invalid_argument_for_bad_input() {
+        let error = anyhow::Error::new(InvalidArgument(
+            "no parser registered for MIME type \"application/pdf\"".to_owned(),
+        ));
+        let status = pipeline_error_status(error);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("application/pdf"));
+    }
+
+    #[test]
+    fn pipeline_error_status_falls_back_to_internal_for_other_failures() {
+        let status = pipeline_error_status(anyhow::anyhow!("store flush failed"));
+        assert_eq!(status.code(), tonic::Code::Internal);
     }
 }

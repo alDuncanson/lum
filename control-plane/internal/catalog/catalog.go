@@ -294,7 +294,9 @@ func (c *Catalog) ingestFailures(ctx context.Context, query string, args ...any)
 		if err := rows.Scan(&failure.SourceID, &failure.URI, &failure.Attempts, &failure.Error, &failedAt); err != nil {
 			return nil, err
 		}
-		failure.FailedAt, _ = time.Parse(time.RFC3339Nano, failedAt)
+		if failure.FailedAt, err = time.Parse(time.RFC3339Nano, failedAt); err != nil {
+			return nil, fmt.Errorf("parsing ingest failure %s/%s failed_at %q: %w", failure.SourceID, failure.URI, failedAt, err)
+		}
 		failures = append(failures, failure)
 	}
 	return failures, rows.Err()
@@ -331,7 +333,10 @@ func scanSource(r rowScanner) (Source, error) {
 	if err := r.Scan(&s.ID, &s.Type, &s.URI, &created); err != nil {
 		return Source{}, err
 	}
-	s.CreatedAt, _ = time.Parse(time.RFC3339, created)
+	var err error
+	if s.CreatedAt, err = time.Parse(time.RFC3339, created); err != nil {
+		return Source{}, fmt.Errorf("parsing source %s created_at %q: %w", s.ID, created, err)
+	}
 	return s, nil
 }
 
@@ -341,6 +346,9 @@ func scanDocument(r rowScanner) (Document, error) {
 	if err := r.Scan(&d.ID, &d.SourceID, &d.URI, &d.ContentHash, &d.ChunkCount, &ingested); err != nil {
 		return Document{}, err
 	}
-	d.IngestedAt, _ = time.Parse(time.RFC3339, ingested)
+	var err error
+	if d.IngestedAt, err = time.Parse(time.RFC3339, ingested); err != nil {
+		return Document{}, fmt.Errorf("parsing document %s ingested_at %q: %w", d.ID, ingested, err)
+	}
 	return d, nil
 }

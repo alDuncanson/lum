@@ -69,6 +69,8 @@ The same API the CLI uses is available to anything else:
 
 ```sh
 curl 'localhost:7420/v1/search?q=wild+yeast&limit=3'
+curl 'localhost:7420/v1/search?q=wild+yeast&source=<source-id>'  # restrict to one source
+curl -X DELETE localhost:7420/v1/sources/<source-id>             # remove a source + its vectors
 ```
 
 Watch the pipeline as it works via Server-Sent Events — scans, per-document

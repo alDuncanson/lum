@@ -8,7 +8,7 @@
 //	GET    /v1/sources                                   list sources
 //	POST   /v1/sources/{id}/scan                         trigger rescan
 //	DELETE /v1/sources/{id}                              remove source + its vectors
-//	GET    /v1/search?q=...&limit=10                     semantic search
+//	GET    /v1/search?q=...&limit=10&source=<id>          semantic search
 //	GET    /v1/status                                    daemon + data plane health
 //	GET    /v1/events[?types=k1,k2]                       SSE event stream
 package api
@@ -228,8 +228,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
+	sourceID := r.URL.Query().Get("source")
 
-	results, err := s.dp.Search(r.Context(), query, uint32(limit))
+	results, err := s.dp.Search(r.Context(), query, uint32(limit), sourceID)
 	if err != nil {
 		httpError(w, http.StatusBadGateway, "data plane search failed: "+err.Error())
 		return

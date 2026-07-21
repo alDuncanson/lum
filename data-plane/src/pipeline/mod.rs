@@ -16,4 +16,4 @@ pub mod parser;
 
 pub use chunker::{Chunk, Chunker, WordWindowChunker};
 pub use embedder::{Embedder, EmbeddingModelChoice, FastEmbedder};
-pub use parser::ParserRegistry;
+pub use parser::{InvalidArgument, ParserRegistry};

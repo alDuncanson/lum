@@ -47,7 +47,7 @@ func (s stubDataPlane) DeleteDocument(_ context.Context, documentID string) erro
 	return nil
 }
 
-func (stubDataPlane) Search(context.Context, string, uint32) ([]dataplane.SearchResult, error) {
+func (stubDataPlane) Search(context.Context, string, uint32, string) ([]dataplane.SearchResult, error) {
 	return nil, nil
 }
 

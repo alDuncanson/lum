@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func (stubDataPlane) IngestBatch(context.Context, []dataplane.IngestBatchDocumen
 	return nil, nil
 }
 func (stubDataPlane) DeleteDocument(context.Context, string) error { return nil }
-func (stubDataPlane) Search(context.Context, string, uint32) ([]dataplane.SearchResult, error) {
+func (stubDataPlane) Search(context.Context, string, uint32, string) ([]dataplane.SearchResult, error) {
 	return nil, nil
 }
 
@@ -43,6 +44,11 @@ func newTestServer(t *testing.T, bus *events.Bus) *Server {
 
 func newTestServerWithCatalog(t *testing.T, bus *events.Bus) (*Server, *catalog.Catalog) {
 	t.Helper()
+	return newTestServerWithDataPlane(t, bus, stubDataPlane{})
+}
+
+func newTestServerWithDataPlane(t *testing.T, bus *events.Bus, dp dataplane.DataPlane) (*Server, *catalog.Catalog) {
+	t.Helper()
 	cat, err := catalog.Open(filepath.Join(t.TempDir(), "catalog.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -50,8 +56,8 @@ func newTestServerWithCatalog(t *testing.T, bus *events.Bus) (*Server, *catalog.
 	t.Cleanup(func() { _ = cat.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	ing := ingest.New(ctx, cat, stubDataPlane{}, bus)
-	return New(cat, stubDataPlane{}, ing, bus), cat
+	ing := ingest.New(ctx, cat, dp, bus)
+	return New(cat, dp, ing, bus), cat
 }
 
 // lineChannel streams body's lines to a channel so tests can bound each
@@ -258,5 +264,43 @@ func TestDeleteSourceReturns404ForUnknownID(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// capturingSearchDataPlane records the arguments handleSearch passes
+// through, so a test can confirm the ?source= query param actually
+// reaches DataPlane.Search rather than being silently dropped.
+type capturingSearchDataPlane struct {
+	stubDataPlane
+	mu       sync.Mutex
+	sourceID string
+}
+
+func (c *capturingSearchDataPlane) Search(_ context.Context, _ string, _ uint32, sourceID string) ([]dataplane.SearchResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sourceID = sourceID
+	return nil, nil
+}
+
+func TestSearchPassesSourceQueryParamThrough(t *testing.T) {
+	dp := &capturingSearchDataPlane{}
+	server, _ := newTestServerWithDataPlane(t, nil, dp)
+	httpServer := httptest.NewServer(server.Handler(nil))
+	t.Cleanup(httpServer.Close)
+
+	resp, err := http.Get(httpServer.URL + "/v1/search?q=wild+yeast&source=source-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	dp.mu.Lock()
+	defer dp.mu.Unlock()
+	if dp.sourceID != "source-42" {
+		t.Fatalf("sourceID passed to DataPlane.Search = %q, want source-42", dp.sourceID)
 	}
 }

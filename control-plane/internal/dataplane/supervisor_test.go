@@ -360,3 +360,48 @@ func TestIngestBatchFallsBackToLegacyUnaryRPC(t *testing.T) {
 		t.Fatalf("unexpected fallback results: %#v", results)
 	}
 }
+
+type captureSearchDataPlane struct {
+	lumv1.UnimplementedDataPlaneServer
+	mu       sync.Mutex
+	requests []*lumv1.SearchRequest
+}
+
+func (s *captureSearchDataPlane) Search(_ context.Context, req *lumv1.SearchRequest) (*lumv1.SearchResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = append(s.requests, req)
+	return &lumv1.SearchResponse{}, nil
+}
+
+func TestSearchSendsSourceIDFilterToDataPlane(t *testing.T) {
+	service := &captureSearchDataPlane{}
+	listener := listenUnix(t)
+	server := grpc.NewServer()
+	lumv1.RegisterDataPlaneServer(server, service)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+
+	client, err := Dial(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	if _, err := client.Search(context.Background(), "wild yeast", 5, "source-123"); err != nil {
+		t.Fatal(err)
+	}
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if len(service.requests) != 1 {
+		t.Fatalf("requests received = %d, want 1", len(service.requests))
+	}
+	got := service.requests[0]
+	if got.SourceId != "source-123" || got.Query != "wild yeast" || got.Limit != 5 {
+		t.Fatalf("request = %+v, want query=\"wild yeast\" limit=5 source_id=source-123", got)
+	}
+}

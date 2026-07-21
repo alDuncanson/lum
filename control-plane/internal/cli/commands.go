@@ -34,6 +34,7 @@ func addCmd() *cobra.Command {
 // searchCmd queries the index: `lum search "how do I rotate keys"`.
 func searchCmd() *cobra.Command {
 	var limit int
+	var sourceID string
 
 	cmd := &cobra.Command{
 		Use:   "search <query>",
@@ -41,7 +42,7 @@ func searchCmd() *cobra.Command {
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := strings.Join(args, " ")
-			results, err := apiclient.New().Search(cmd.Context(), query, limit)
+			results, err := apiclient.New().Search(cmd.Context(), query, limit, sourceID)
 			if err != nil {
 				return err
 			}
@@ -57,6 +58,7 @@ func searchCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum results to return")
+	cmd.Flags().StringVar(&sourceID, "source", "", "restrict results to one source ID (see `lum sources`)")
 	return cmd
 }
 

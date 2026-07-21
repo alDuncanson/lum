@@ -934,7 +934,9 @@ type SearchRequest struct {
 	// Natural-language query. Embedded with the same model as passages.
 	Query string `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
 	// Maximum number of chunks to return.
-	Limit         uint32 `protobuf:"varint,2,opt,name=limit,proto3" json:"limit,omitempty"`
+	Limit uint32 `protobuf:"varint,2,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Optional: restrict results to one source (empty means all sources).
+	SourceId      string `protobuf:"bytes,3,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -981,6 +983,13 @@ func (x *SearchRequest) GetLimit() uint32 {
 		return x.Limit
 	}
 	return 0
+}
+
+func (x *SearchRequest) GetSourceId() string {
+	if x != nil {
+		return x.SourceId
+	}
+	return ""
 }
 
 type SearchResponse struct {
@@ -1167,10 +1176,11 @@ const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"\x15DeleteDocumentRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentIdJ\x04\b\x02\x10\x03R\vchunk_count\"\x18\n" +
-	"\x16DeleteDocumentResponse\";\n" +
+	"\x16DeleteDocumentResponse\"X\n" +
 	"\rSearchRequest\x12\x14\n" +
 	"\x05query\x18\x01 \x01(\tR\x05query\x12\x14\n" +
-	"\x05limit\x18\x02 \x01(\rR\x05limit\"@\n" +
+	"\x05limit\x18\x02 \x01(\rR\x05limit\x12\x1b\n" +
+	"\tsource_id\x18\x03 \x01(\tR\bsourceId\"@\n" +
 	"\x0eSearchResponse\x12.\n" +
 	"\aresults\x18\x01 \x03(\v2\x14.lum.v1.SearchResultR\aresults\"\xa9\x01\n" +
 	"\fSearchResult\x12\x1f\n" +

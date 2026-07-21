@@ -202,7 +202,10 @@ lum search "..." ──▶ GET /v1/search ──▶ gRPC Search
 ```
 
 Chunks are embedded as `"passage: ..."` and queries as `"query: ..."` —
-the asymmetric-prefix convention bge models are trained with.
+the asymmetric-prefix convention bge models are trained with. An
+optional `?source=<id>` restricts results to one source, applied as a
+payload-indexed filter on `source_id` (the same mechanism `document_id`
+filtering uses for deletes, see below) (#7).
 
 ## MCP — `internal/mcpserver`
 
@@ -331,6 +334,29 @@ No semantics live in the TUI that aren't already in the event schema
 | SQLite via modernc (pure Go) | mattn/go-sqlite3 (cgo) | `go build` works without a C toolchain |
 | channel + worker | NATS/Kafka | right-sized for local-only; interface allows upgrading |
 | REST between CLI and daemon | gRPC everywhere | curl-ability; gRPC learning happens on the inter-plane hop |
+
+## Hardening nits (#7)
+
+Small fixes from an architecture review:
+
+- **Swallowed `time.Parse` errors** in catalog row scanners now propagate
+  instead of silently producing a zero-value `time.Time` — in practice
+  only reachable via DB corruption, since every write goes through
+  `time.Format`, but a corrupted row should error, not look like it was
+  created at the Unix epoch.
+- **`WalkDir` now logs** (`slog.Warn`) when it skips an unreadable path
+  during a scan instead of silently continuing. One bad permission still
+  doesn't hide every document, but now it's diagnosable instead of an
+  invisible gap in the index.
+- **gRPC error taxonomy**: `run_blocking` (data-plane) mapped every
+  pipeline error to `Status::internal`, including "no parser registered
+  for MIME type," which is the caller's fault, not lumen's. A small
+  `InvalidArgument` marker error (downcast from the `anyhow::Error`) lets
+  it choose `Status::invalid_argument` instead — a first step toward
+  distinguishing retryable from permanent failures, not a full
+  taxonomy.
+- **`SearchRequest` gained a `source_id` filter** (see Search flow above)
+  — the first field a real user asks for.
 
 ## Known gaps (deliberate, ordered)
 

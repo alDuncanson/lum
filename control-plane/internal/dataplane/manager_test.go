@@ -152,7 +152,7 @@ func TestManagerConcurrentRealOpsCoalesceOntoOneRespawn(t *testing.T) {
 	errs := make(chan error, 3)
 	for range 3 {
 		go func() {
-			_, err := m.Search(context.Background(), "q", 10)
+			_, err := m.Search(context.Background(), "q", 10, "")
 			errs <- err
 		}()
 	}
@@ -199,7 +199,7 @@ func TestManagerTreatsCrashLikeIdleShedAndRespawnsOnNextRequest(t *testing.T) {
 		t.Fatalf("state after detecting crash = %q, want idle (not yet respawning)", health.State)
 	}
 
-	if _, err := m.Search(context.Background(), "q", 10); err != nil {
+	if _, err := m.Search(context.Background(), "q", 10, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := spawnCount.Load(); got != 1 {
@@ -252,7 +252,7 @@ func TestManagerPublishesRPCCompletedEventsForRealOps(t *testing.T) {
 	ch, _, unsubscribe := bus.Subscribe(8)
 	defer unsubscribe()
 
-	if _, err := m.Search(context.Background(), "q", 10); err != nil {
+	if _, err := m.Search(context.Background(), "q", 10, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -275,7 +275,7 @@ func TestManagerAwaitReadyTimesOutWhenRespawnNeverBecomesReady(t *testing.T) {
 	m.startupTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { _ = m.Close() })
 
-	_, err := m.Search(context.Background(), "q", 10)
+	_, err := m.Search(context.Background(), "q", 10, "")
 	if err == nil {
 		t.Fatal("expected timeout error waiting for a data plane stuck starting")
 	}

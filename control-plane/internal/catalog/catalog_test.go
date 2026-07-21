@@ -262,3 +262,42 @@ func TestIngestFailuresAreNewestFirst(t *testing.T) {
 		t.Fatalf("failure order = %#v, want newer then older", failures)
 	}
 }
+
+// TestMalformedTimestampsSurfaceAsErrors guards the #7 fix: a malformed
+// timestamp (in practice only reachable via DB corruption, since every
+// write goes through time.Format) must be reported, not silently
+// swallowed into a zero-value time.Time.
+func TestMalformedTimestampsSurfaceAsErrors(t *testing.T) {
+	c := openTestCatalog(t)
+	ctx := context.Background()
+
+	if _, err := c.db.ExecContext(ctx,
+		`INSERT INTO sources (id, type, uri, created_at) VALUES (?, ?, ?, ?)`,
+		"src-1", "localdir", "/tmp/docs", "not-a-timestamp",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetSource(ctx, "src-1"); err == nil {
+		t.Fatal("GetSource with a malformed created_at returned no error")
+	}
+
+	if _, err := c.db.ExecContext(ctx,
+		`INSERT INTO documents (id, source_id, uri, content_hash, chunk_count, ingested_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"doc-1", "src-1", "/tmp/docs/a.md", "hash", 1, "not-a-timestamp",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DocumentByURI(ctx, "src-1", "/tmp/docs/a.md"); err == nil {
+		t.Fatal("DocumentByURI with a malformed ingested_at returned no error")
+	}
+
+	if _, err := c.db.ExecContext(ctx,
+		`INSERT INTO ingest_failures (source_id, uri, attempts, error, failed_at) VALUES (?, ?, ?, ?, ?)`,
+		"src-1", "/tmp/docs/b.md", 1, "boom", "not-a-timestamp",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.IngestFailuresBySource(ctx, "src-1"); err == nil {
+		t.Fatal("IngestFailuresBySource with a malformed failed_at returned no error")
+	}
+}

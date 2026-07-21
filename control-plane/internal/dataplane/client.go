@@ -353,8 +353,9 @@ type SearchResult struct {
 }
 
 // Search embeds the query in the data plane and returns nearest chunks.
-func (c *Client) Search(ctx context.Context, query string, limit uint32) ([]SearchResult, error) {
-	resp, err := c.rpc.Search(ctx, &lumv1.SearchRequest{Query: query, Limit: limit})
+// sourceID restricts results to one source; empty means all sources.
+func (c *Client) Search(ctx context.Context, query string, limit uint32, sourceID string) ([]SearchResult, error) {
+	resp, err := c.rpc.Search(ctx, &lumv1.SearchRequest{Query: query, Limit: limit, SourceId: sourceID})
 	if err != nil {
 		return nil, err
 	}

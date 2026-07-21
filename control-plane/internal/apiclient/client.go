@@ -69,12 +69,16 @@ func (c *Client) ListSources(ctx context.Context) ([]catalog.Source, error) {
 	return out, err
 }
 
-// Search runs a semantic query and returns the nearest chunks.
-func (c *Client) Search(ctx context.Context, query string, limit int) ([]dataplane.SearchResult, error) {
+// Search runs a semantic query and returns the nearest chunks. sourceID
+// restricts results to one source; empty means all sources.
+func (c *Client) Search(ctx context.Context, query string, limit int, sourceID string) ([]dataplane.SearchResult, error) {
 	var out struct {
 		Results []dataplane.SearchResult `json:"results"`
 	}
 	path := fmt.Sprintf("/v1/search?q=%s&limit=%d", url.QueryEscape(query), limit)
+	if sourceID != "" {
+		path += "&source=" + url.QueryEscape(sourceID)
+	}
 	err := c.call(ctx, "GET", path, nil, &out)
 	return out.Results, err
 }

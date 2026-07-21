@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,9 @@ func (l *LocalDir) Scan(ctx context.Context) ([]DocumentRef, error) {
 		if err != nil {
 			// Skip unreadable entries rather than failing the whole
 			// scan; one bad permission shouldn't hide every document.
+			// But do surface it — a silently skipped subtree, given no
+			// other errors, is hard to notice let alone diagnose.
+			slog.Warn("skipping unreadable path during scan", "path", path, "error", err)
 			return nil
 		}
 		if ctx.Err() != nil {
