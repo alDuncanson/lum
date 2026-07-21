@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"github.com/alDuncanson/lum/control-plane/internal/api"
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
@@ -67,6 +68,13 @@ func run(ctx context.Context, cfg config.Config) error {
 	if err := os.Chmod(cfg.DataDir, 0o700); err != nil {
 		return fmt.Errorf("securing data dir: %w", err)
 	}
+	daemonLock, err := acquireDaemonLock(ctx, cfg.DaemonLockPath())
+	if err != nil {
+		return err
+	}
+	// This defer is registered before every owned resource so the lifetime
+	// lock is released only after lumen, gRPC, catalog, and HTTP clean up.
+	defer daemonLock.Close()
 
 	cat, err := catalog.Open(cfg.CatalogPath())
 	if err != nil {
@@ -97,9 +105,16 @@ func run(ctx context.Context, cfg config.Config) error {
 	// Do not start ingestion workers until the public API is guaranteed to
 	// have its socket. In particular, a bind failure must start no scans.
 	ingestor := ingest.New(daemonCtx, cat, dp)
+	activityCh := make(chan struct{}, 1)
+	recordActivity := func() {
+		select {
+		case activityCh <- struct{}{}:
+		default:
+		}
+	}
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: api.New(cat, dp, ingestor).Handler(),
+		Handler: api.New(cat, dp, ingestor).Handler(recordActivity),
 	}
 	defer server.Close()
 	errCh := make(chan error, 1)
@@ -134,15 +149,35 @@ func run(ctx context.Context, cfg config.Config) error {
 		}
 	}()
 
+	idleTimer := time.NewTimer(cfg.IdleTimeout)
+	defer idleTimer.Stop()
 	var runErr error
-	select {
-	case err := <-errCh:
-		runErr = err
-	case err := <-readyErrCh:
-		if !(errors.Is(err, context.Canceled) && ctx.Err() != nil) {
+waitForExit:
+	for {
+		select {
+		case err := <-errCh:
 			runErr = err
+			break waitForExit
+		case err := <-readyErrCh:
+			if !(errors.Is(err, context.Canceled) && ctx.Err() != nil) {
+				runErr = err
+			}
+			break waitForExit
+		case <-ctx.Done():
+			break waitForExit
+		case <-activityCh:
+			resetTimer(idleTimer, cfg.IdleTimeout)
+		case <-idleTimer.C:
+			// Prefer activity when it raced the deadline rather than shutting
+			// down underneath a request that has just arrived.
+			select {
+			case <-activityCh:
+				idleTimer.Reset(cfg.IdleTimeout)
+			default:
+				slog.Info("idle timeout reached", "timeout", cfg.IdleTimeout)
+				break waitForExit
+			}
 		}
-	case <-ctx.Done():
 	}
 	// Stop workers before closing the catalog or data-plane client. Every exit
 	// path shares this ordering, including HTTP and contract errors.
@@ -152,4 +187,35 @@ func run(ctx context.Context, cfg config.Config) error {
 	defer cancel()
 	_ = server.Shutdown(shutdownCtx)
 	return runErr
+}
+
+func resetTimer(timer *time.Timer, timeout time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(timeout)
+}
+
+func acquireDaemonLock(ctx context.Context, path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("opening daemon lock: %w", err)
+	}
+	for {
+		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
+			return file, nil
+		} else if !errors.Is(err, unix.EWOULDBLOCK) {
+			_ = file.Close()
+			return nil, fmt.Errorf("locking daemon lifetime: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }

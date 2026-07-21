@@ -9,8 +9,8 @@
 // Transport is stdio: the agent (Claude Desktop, Amp, etc.) spawns
 // `lum mcp` as a child process and speaks JSON-RPC over stdin/stdout.
 // That means this process must never print to stdout itself; all
-// diagnostics go to stderr. The daemon (`lum serve`) must already be
-// running — `lum mcp` is a client of it, not a second daemon.
+// diagnostics go to stderr. `lum mcp` remains a client rather than a second
+// daemon; the shared API client starts the daemon on first use when needed.
 package mcpserver
 
 import (
@@ -166,7 +166,7 @@ func statusTool(api *apiclient.Client) mcp.ToolHandlerFor[statusInput, statusOut
 	) {
 		st, err := api.Status(ctx)
 		if err != nil {
-			return nil, statusOutput{}, fmt.Errorf("%w (start it with `lum serve`)", err)
+			return nil, statusOutput{}, fmt.Errorf("status: %w", err)
 		}
 		return nil, statusOutput{
 			Daemon:    st.Daemon,

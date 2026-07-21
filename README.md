@@ -9,8 +9,7 @@ No cloud, no API keys, no Docker, no services to operate. Two binaries and
 a data directory.
 
 ```
-$ lum serve                    # terminal 1: the daemon
-$ lum add ~/Documents          # terminal 2: register a source
+$ lum add ~/Documents          # starts the daemon on demand and registers a source
 $ lum search "that note about sourdough hydration"
  1. 0.744  /Users/al/Documents/baking.md (chunk 0)
     # Sourdough basics  A sourdough starter is a living culture …
@@ -28,7 +27,7 @@ compute in another, a versioned gRPC contract between them.
                       │ HTTP     │
                       ▼          ▼
         ┌─────────────────────────────────┐
-        │   lumd — Go control plane       │   `lum serve`
+        │   lumd — Go control plane       │   auto-started on demand
         │   sources · scans · catalog     │
         │   SQLite (~/.lum/catalog.db)    │
         └───────────────┬─────────────────┘
@@ -59,12 +58,6 @@ on first run and is cached in the data dir.
 
 ```sh
 make build        # builds bin/lum (Go) and bin/lumen (Rust)
-./bin/lum serve   # starts the daemon; spawns + supervises lumen
-```
-
-Then, from another terminal:
-
-```sh
 ./bin/lum add ~/Documents      # register + index a directory
 ./bin/lum status               # daemon health and index counts
 ./bin/lum sources              # list registered sources
@@ -85,7 +78,8 @@ Indexed file types: `.txt`, `.md` (see `internal/source/localdir.go` and
 `lum mcp` serves the [Model Context Protocol](https://modelcontextprotocol.io)
 over stdio, exposing four tools: `search`, `add_source`, `list_sources`,
 and `status`. Each one is a thin wrapper around the REST API, so agents
-see exactly the same system you do — and the daemon must be running.
+see exactly the same system you do. The first tool call starts the daemon if
+needed.
 
 Configure your MCP client (Claude Desktop, Amp, ...) to spawn it:
 
@@ -107,6 +101,9 @@ Everything lives under `~/.lum` (override with `LUM_DATA_DIR`):
 ```
 ~/.lum/
 ├── catalog.db   # SQLite: sources, documents, hashes, chunk counts, ingest failures
+├── daemon.log   # detached daemon and data-plane logs
+├── daemon.lock  # held for the daemon's complete lifetime
+├── daemon-start.lock  # coordinates concurrent on-demand starts
 ├── lumen.sock   # private gRPC hop to the supervised data plane
 ├── models/      # embedding model cache (auto-downloaded)
 └── vectors/     # qdrant-edge index (embeddings + chunk payloads)
@@ -127,7 +124,9 @@ make run          # build + serve
 
 The HTTP API listens on `127.0.0.1:7420` (`LUM_HTTP_ADDR` to change). The
 private data-plane gRPC hop uses `lumen.sock` under the owner-only data
-directory; it does not open a TCP port.
+directory; it does not open a TCP port. CLI and MCP requests start the daemon
+automatically, and it exits after 15 minutes without an HTTP request. `lum
+serve` remains available for foreground debugging.
 
 The full-precision embedding model remains the default. For higher CPU
 throughput with a small retrieval-quality tradeoff, start the daemon with

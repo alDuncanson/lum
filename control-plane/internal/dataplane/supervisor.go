@@ -14,9 +14,9 @@ import (
 
 // Supervisor runs lumen as a child process for the lifetime of lumd.
 //
-// This is what makes `lum serve` the only command a user ever starts:
-// the data plane is an implementation detail, not a second service to
-// operate. Unexpected exits are reaped and logged; automatic respawn
+// This keeps the data plane an implementation detail rather than a second
+// service to operate, whether the daemon was auto-started or run in the
+// foreground. Unexpected exits are reaped and logged; automatic respawn
 // with backoff is a planned improvement (see docs/architecture.md).
 type Supervisor struct {
 	cmd   *exec.Cmd

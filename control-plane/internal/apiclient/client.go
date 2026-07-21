@@ -26,13 +26,22 @@ import (
 
 // Client talks to a running lumd over loopback HTTP.
 type Client struct {
-	base string
+	base       string
+	cfg        config.Config
+	httpClient *http.Client
+	spawn      func(config.Config) error
 }
 
 // New builds a client pointed at the configured daemon address
 // (LUM_HTTP_ADDR, default 127.0.0.1:7420).
 func New() *Client {
-	return &Client{base: config.Load().BaseURL()}
+	cfg := config.Load()
+	return &Client{
+		base:       cfg.BaseURL(),
+		cfg:        cfg,
+		httpClient: http.DefaultClient,
+		spawn:      spawnDaemon,
+	}
 }
 
 // ---- typed API methods ----
@@ -87,35 +96,26 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 
 // call performs one JSON request/response round trip. `out` may be nil.
 func (c *Client) call(ctx context.Context, method, path string, body, out any) error {
-	var reqBody io.Reader
+	var requestBody []byte
 	if body != nil {
-		buf, err := json.Marshal(body)
+		var err error
+		requestBody, err = json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		reqBody = bytes.NewReader(buf)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reqBody)
+	statusCode, status, raw, err := c.do(ctx, method, path, requestBody)
+	if isConnectionRefused(err) || statusCode == http.StatusServiceUnavailable {
+		if err := c.ensureDaemon(ctx); err != nil {
+			return err
+		}
+		statusCode, status, raw, err = c.do(ctx, method, path, requestBody)
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot reach the lum daemon at %s: %w", c.base, err)
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf(
-			"cannot reach the lum daemon at %s (is `lum serve` running?): %w", c.base, err)
-	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode >= 400 {
+	if statusCode >= 400 {
 		// The API returns {"error": "..."} for failures; surface it.
 		var apiErr struct {
 			Error string `json:"error"`
@@ -123,10 +123,35 @@ func (c *Client) call(ctx context.Context, method, path string, body, out any) e
 		if json.Unmarshal(raw, &apiErr) == nil && apiErr.Error != "" {
 			return fmt.Errorf("%s", apiErr.Error)
 		}
-		return fmt.Errorf("API returned %s", resp.Status)
+		return fmt.Errorf("API returned %s", status)
 	}
 	if out == nil {
 		return nil
 	}
 	return json.Unmarshal(raw, out)
+}
+
+func (c *Client) do(
+	ctx context.Context,
+	method, path string,
+	body []byte,
+) (int, string, []byte, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Status, raw, err
 }

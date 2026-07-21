@@ -15,7 +15,7 @@ const Version = "0.1.0"
 //
 // MCP clients spawn this command themselves — you configure the client
 // with `command: lum, args: [mcp]` rather than running it by hand. It
-// is a thin adapter over the REST API, so `lum serve` must be running.
+// is a thin adapter over the REST API and starts the daemon on first use.
 func mcpCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "mcp",
@@ -24,8 +24,8 @@ func mcpCmd() *cobra.Command {
 
 Exposes lum to local AI agents as MCP tools: search, add_source,
 list_sources, and status. This command is normally spawned by an MCP
-client (configure it with command "lum" and args ["mcp"]), and it
-requires a running daemon (` + "`lum serve`" + `) to talk to.`,
+client (configure it with command "lum" and args ["mcp"]); the first
+tool call starts the daemon when needed.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return mcpserver.Run(cmd.Context(), Version)

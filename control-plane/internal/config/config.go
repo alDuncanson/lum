@@ -9,12 +9,19 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const (
 	// DefaultHTTPAddr is where lumd serves its REST API and where the
 	// CLI expects to find it.
 	DefaultHTTPAddr = "127.0.0.1:7420"
+	// DefaultIdleTimeout keeps an interactive session warm without leaving
+	// auto-started daemons running indefinitely.
+	DefaultIdleTimeout = 15 * time.Minute
+	// DefaultStartupTimeout bounds model download and initialization so a
+	// broken detached daemon cannot hang every waiting client forever.
+	DefaultStartupTimeout = 5 * time.Minute
 	// DefaultEmbeddingModel preserves the original full-precision model.
 	// "quantized" is available as an opt-in CPU-throughput tradeoff.
 	DefaultEmbeddingModel = "standard"
@@ -28,6 +35,10 @@ type Config struct {
 	DataDir string
 	// HTTPAddr is the REST API listen address.
 	HTTPAddr string
+	// IdleTimeout stops the daemon after this long without an HTTP request.
+	IdleTimeout time.Duration
+	// StartupTimeout bounds on-demand daemon readiness waits.
+	StartupTimeout time.Duration
 	// LumenPath optionally pins the lumen binary location. Empty means
 	// auto-discover (next to the lum executable, then $PATH).
 	LumenPath string
@@ -41,6 +52,8 @@ func Load() Config {
 	return Config{
 		DataDir:        envOr("LUM_DATA_DIR", filepath.Join(homeDir(), ".lum")),
 		HTTPAddr:       envOr("LUM_HTTP_ADDR", DefaultHTTPAddr),
+		IdleTimeout:    DefaultIdleTimeout,
+		StartupTimeout: DefaultStartupTimeout,
 		LumenPath:      os.Getenv("LUM_LUMEN_PATH"),
 		EmbeddingModel: envOr("LUM_EMBEDDING_MODEL", DefaultEmbeddingModel),
 	}
@@ -61,6 +74,18 @@ func (c Config) CatalogPath() string {
 // directory's owner-only permissions for access control.
 func (c Config) GRPCSocketPath() string {
 	return filepath.Join(c.DataDir, "lumen.sock")
+}
+
+func (c Config) DaemonLockPath() string {
+	return filepath.Join(c.DataDir, "daemon.lock")
+}
+
+func (c Config) DaemonStartLockPath() string {
+	return filepath.Join(c.DataDir, "daemon-start.lock")
+}
+
+func (c Config) DaemonLogPath() string {
+	return filepath.Join(c.DataDir, "daemon.log")
 }
 
 func envOr(key, fallback string) string {

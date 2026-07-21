@@ -35,7 +35,7 @@ at last scan, what changed, what to (re)ingest, and the public API.
 
 | Package | Responsibility |
 |---|---|
-| `internal/cli` | cobra commands; `serve` runs the daemon, the rest are HTTP clients |
+| `internal/cli` | cobra commands; `serve` runs the daemon, the rest are auto-starting HTTP clients |
 | `internal/config` | data dir + addresses, env overrides |
 | `internal/api` | REST endpoints (the system's only front door) |
 | `internal/apiclient` | typed Go client for the REST API (shared by cli and mcpserver) |
@@ -185,7 +185,7 @@ it as a child process and calls its tools (`search`, `add_source`,
 `list_sources`, `status`) via JSON-RPC on stdin/stdout.
 
 ```
-agent ──spawns──▶ lum mcp ──HTTP──▶ lumd (must already be running)
+agent ──spawns──▶ lum mcp ──HTTP──▶ lumd (started on first tool call)
         stdio (JSON-RPC)
 ```
 
@@ -203,6 +203,21 @@ Two design points worth copying:
 
 One stdio rule: the process must never print to stdout (that's the
 protocol channel); diagnostics go to stderr.
+
+## On-demand daemon lifecycle
+
+CLI commands and MCP tools first try the loopback HTTP API. A refused
+connection takes an exclusive `daemon-start.lock` flock, rechecks the API, and
+starts a detached `lum serve` only when still needed. This makes concurrent
+commands converge on one daemon. The daemon itself holds `daemon.lock` until
+all resources finish shutting down, preventing a replacement from overlapping
+the old lumen process. Calls poll `/v1/status` through model startup before
+replaying the original request; waits are bounded at five minutes and detached
+output goes to `daemon.log`.
+
+Every HTTP request resets a 15-minute idle timer. When it expires, the normal
+ordered shutdown path stops ingestion, drains HTTP, and gracefully terminates
+lumen. The next client request starts a fresh daemon.
 
 ## Key dependency choices
 

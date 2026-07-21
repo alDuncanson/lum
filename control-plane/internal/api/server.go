@@ -38,19 +38,23 @@ func New(cat *catalog.Catalog, dp *dataplane.Client, ing *ingest.Ingestor) *Serv
 	return &Server{catalog: cat, dp: dp, ingestor: ing}
 }
 
-// Handler builds the route table (Go 1.22+ method-aware patterns).
-func (s *Server) Handler() http.Handler {
+// Handler builds the route table (Go 1.22+ method-aware patterns). onRequest
+// reports activity to the daemon's idle timer before dispatch.
+func (s *Server) Handler(onRequest func()) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/sources", s.handleAddSource)
 	mux.HandleFunc("GET /v1/sources", s.handleListSources)
 	mux.HandleFunc("POST /v1/sources/{id}/scan", s.handleScanSource)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
-	return withRequestID(mux)
+	return withRequestID(mux, onRequest)
 }
 
-func withRequestID(next http.Handler) http.Handler {
+func withRequestID(next http.Handler, onRequest func()) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if onRequest != nil {
+			onRequest()
+		}
 		ctx, id := requestid.New(r.Context())
 		w.Header().Set(requestid.Header, id)
 		started := time.Now()
