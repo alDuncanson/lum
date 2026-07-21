@@ -17,13 +17,15 @@
 //     request carries everything the data plane needs. This keeps the
 //     data plane restartable at any time without coordination.
 //
-//   - Chunk bookkeeping: when a document is ingested, the data plane
-//     splits it into N chunks and stores one vector point per chunk,
-//     with a point ID derived deterministically from (document_id,
-//     chunk_index). The control plane records N (chunk_count) in its
-//     catalog and passes it back on re-ingest/delete so the data plane
-//     can remove exactly the stale points. This avoids needing filtered
-//     deletes in the vector store.
+//   - Chunk identity: when a document is ingested, the data plane splits
+//     it into N chunks and stores one vector point per chunk, with a
+//     point ID derived deterministically from (document_id, chunk_index).
+//     Re-ingesting the same document_id overwrites those points in
+//     place. Deletion (re-ingest of a shrunk document, or an explicit
+//     DeleteDocument) removes every point for a document_id via a
+//     payload-indexed filtered delete in the vector store, not by
+//     counting — the control plane no longer needs to track or echo
+//     back a chunk count for this to work.
 //
 // Versioning: the `lum.v1` package name is the API version. Breaking
 // changes mean a new `lum.v2` package, never edits that change the
@@ -286,13 +288,9 @@ type IngestDocumentRequest struct {
 	MimeType string `protobuf:"bytes,4,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	// Raw document bytes. Parsing happens in the data plane so that new
 	// formats (PDF, HTML, ...) never require control-plane changes.
-	Content []byte `protobuf:"bytes,5,opt,name=content,proto3" json:"content,omitempty"`
-	// How many chunks the *previous* ingest of this document produced
-	// (0 if new). The data plane deletes those points before upserting,
-	// which keeps re-ingests clean even when the new chunk count shrinks.
-	PreviousChunkCount uint32 `protobuf:"varint,6,opt,name=previous_chunk_count,json=previousChunkCount,proto3" json:"previous_chunk_count,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	Content       []byte `protobuf:"bytes,5,opt,name=content,proto3" json:"content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *IngestDocumentRequest) Reset() {
@@ -358,13 +356,6 @@ func (x *IngestDocumentRequest) GetContent() []byte {
 		return x.Content
 	}
 	return nil
-}
-
-func (x *IngestDocumentRequest) GetPreviousChunkCount() uint32 {
-	if x != nil {
-		return x.PreviousChunkCount
-	}
-	return 0
 }
 
 type IngestDocumentResponse struct {
@@ -514,12 +505,11 @@ func (*IngestBatchRequest_Content) isIngestBatchRequest_Frame() {}
 func (*IngestBatchRequest_EndDocument) isIngestBatchRequest_Frame() {}
 
 type IngestBatchDocumentHeader struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	DocumentId         string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
-	SourceId           string                 `protobuf:"bytes,2,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
-	Uri                string                 `protobuf:"bytes,3,opt,name=uri,proto3" json:"uri,omitempty"`
-	MimeType           string                 `protobuf:"bytes,4,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
-	PreviousChunkCount uint32                 `protobuf:"varint,5,opt,name=previous_chunk_count,json=previousChunkCount,proto3" json:"previous_chunk_count,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	DocumentId string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
+	SourceId   string                 `protobuf:"bytes,2,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
+	Uri        string                 `protobuf:"bytes,3,opt,name=uri,proto3" json:"uri,omitempty"`
+	MimeType   string                 `protobuf:"bytes,4,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	// Exact number of content bytes that follow. The server rejects
 	// truncated or overlong streams before modifying the vector store.
 	ContentLength uint64 `protobuf:"varint,6,opt,name=content_length,json=contentLength,proto3" json:"content_length,omitempty"`
@@ -583,13 +573,6 @@ func (x *IngestBatchDocumentHeader) GetMimeType() string {
 		return x.MimeType
 	}
 	return ""
-}
-
-func (x *IngestBatchDocumentHeader) GetPreviousChunkCount() uint32 {
-	if x != nil {
-		return x.PreviousChunkCount
-	}
-	return 0
 }
 
 func (x *IngestBatchDocumentHeader) GetContentLength() uint64 {
@@ -867,11 +850,8 @@ func (x *IngestBatchDocumentFailure) GetMessage() string {
 }
 
 type DeleteDocumentRequest struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	DocumentId string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
-	// Chunk count from the control plane's catalog; identifies exactly
-	// which derived point IDs to remove.
-	ChunkCount    uint32 `protobuf:"varint,2,opt,name=chunk_count,json=chunkCount,proto3" json:"chunk_count,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DocumentId    string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -911,13 +891,6 @@ func (x *DeleteDocumentRequest) GetDocumentId() string {
 		return x.DocumentId
 	}
 	return ""
-}
-
-func (x *DeleteDocumentRequest) GetChunkCount() uint32 {
-	if x != nil {
-		return x.ChunkCount
-	}
-	return 0
 }
 
 type DeleteDocumentResponse struct {
@@ -1153,15 +1126,14 @@ const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12)\n" +
 	"\x10contract_version\x18\x03 \x01(\tR\x0fcontractVersion\x12,\n" +
-	"\x05state\x18\x04 \x01(\x0e2\x16.lum.v1.ReadinessStateR\x05state\"\xd0\x01\n" +
+	"\x05state\x18\x04 \x01(\x0e2\x16.lum.v1.ReadinessStateR\x05state\"\xba\x01\n" +
 	"\x15IngestDocumentRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1b\n" +
 	"\tsource_id\x18\x02 \x01(\tR\bsourceId\x12\x10\n" +
 	"\x03uri\x18\x03 \x01(\tR\x03uri\x12\x1b\n" +
 	"\tmime_type\x18\x04 \x01(\tR\bmimeType\x12\x18\n" +
-	"\acontent\x18\x05 \x01(\fR\acontent\x120\n" +
-	"\x14previous_chunk_count\x18\x06 \x01(\rR\x12previousChunkCount\"9\n" +
+	"\acontent\x18\x05 \x01(\fR\acontentJ\x04\b\x06\x10\aR\x14previous_chunk_count\"9\n" +
 	"\x16IngestDocumentResponse\x12\x1f\n" +
 	"\vchunk_count\x18\x01 \x01(\rR\n" +
 	"chunkCount\"\xbf\x01\n" +
@@ -1169,15 +1141,14 @@ const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"\bdocument\x18\x01 \x01(\v2!.lum.v1.IngestBatchDocumentHeaderH\x00R\bdocument\x12\x1a\n" +
 	"\acontent\x18\x02 \x01(\fH\x00R\acontent\x12C\n" +
 	"\fend_document\x18\x03 \x01(\v2\x1e.lum.v1.IngestBatchEndDocumentH\x00R\vendDocumentB\a\n" +
-	"\x05frame\"\xe1\x01\n" +
+	"\x05frame\"\xcb\x01\n" +
 	"\x19IngestBatchDocumentHeader\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1b\n" +
 	"\tsource_id\x18\x02 \x01(\tR\bsourceId\x12\x10\n" +
 	"\x03uri\x18\x03 \x01(\tR\x03uri\x12\x1b\n" +
-	"\tmime_type\x18\x04 \x01(\tR\bmimeType\x120\n" +
-	"\x14previous_chunk_count\x18\x05 \x01(\rR\x12previousChunkCount\x12%\n" +
-	"\x0econtent_length\x18\x06 \x01(\x04R\rcontentLength\"\x18\n" +
+	"\tmime_type\x18\x04 \x01(\tR\bmimeType\x12%\n" +
+	"\x0econtent_length\x18\x06 \x01(\x04R\rcontentLengthJ\x04\b\x05\x10\x06R\x14previous_chunk_count\"\x18\n" +
 	"\x16IngestBatchEndDocument\"V\n" +
 	"\x13IngestBatchResponse\x12?\n" +
 	"\tdocuments\x18\x01 \x03(\v2!.lum.v1.IngestBatchDocumentResultR\tdocuments\"\xc7\x01\n" +
@@ -1192,12 +1163,10 @@ const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"chunkCount\"m\n" +
 	"\x1aIngestBatchDocumentFailure\x125\n" +
 	"\x05stage\x18\x01 \x01(\x0e2\x1f.lum.v1.IngestBatchFailureStageR\x05stage\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"Y\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"K\n" +
 	"\x15DeleteDocumentRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
-	"documentId\x12\x1f\n" +
-	"\vchunk_count\x18\x02 \x01(\rR\n" +
-	"chunkCount\"\x18\n" +
+	"documentIdJ\x04\b\x02\x10\x03R\vchunk_count\"\x18\n" +
 	"\x16DeleteDocumentResponse\";\n" +
 	"\rSearchRequest\x12\x14\n" +
 	"\x05query\x18\x01 \x01(\tR\x05query\x12\x14\n" +

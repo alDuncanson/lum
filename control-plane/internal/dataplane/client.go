@@ -22,7 +22,12 @@ import (
 
 // ContractVersion changes only when the two binaries can no longer safely
 // communicate using the shared proto contract.
-const ContractVersion = "1"
+//
+// "2": DeleteDocument and the ingest RPCs no longer carry a chunk count
+// (#3) — a lumd built against "1" would send a stale/zero count that an
+// old lumen's delete_document would misinterpret as "nothing to delete",
+// silently leaving stale chunks behind on a shrinking re-ingest.
+const ContractVersion = "2"
 
 type ReadinessState string
 
@@ -182,20 +187,20 @@ func readinessState(resp *lumv1.HealthResponse) ReadinessState {
 }
 
 // IngestDocument runs the full pipeline for one document and returns
-// the number of chunks stored.
+// the number of chunks stored. Re-ingesting the same document_id
+// replaces its chunks: the data plane removes any existing points for it
+// via a filtered delete before upserting, so no chunk count is needed.
 func (c *Client) IngestDocument(
 	ctx context.Context,
 	documentID, sourceID, uri, mimeType string,
 	content []byte,
-	previousChunkCount uint32,
 ) (uint32, error) {
 	resp, err := c.rpc.IngestDocument(ctx, &lumv1.IngestDocumentRequest{
-		DocumentId:         documentID,
-		SourceId:           sourceID,
-		Uri:                uri,
-		MimeType:           mimeType,
-		Content:            content,
-		PreviousChunkCount: previousChunkCount,
+		DocumentId: documentID,
+		SourceId:   sourceID,
+		Uri:        uri,
+		MimeType:   mimeType,
+		Content:    content,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("ingest %s: %w", uri, err)
@@ -205,12 +210,11 @@ func (c *Client) IngestDocument(
 
 // IngestBatchDocument is one document sent through the streaming batch RPC.
 type IngestBatchDocument struct {
-	DocumentID         string
-	SourceID           string
-	URI                string
-	MimeType           string
-	Content            []byte
-	PreviousChunkCount uint32
+	DocumentID string
+	SourceID   string
+	URI        string
+	MimeType   string
+	Content    []byte
 }
 
 // IngestBatchResult is the ordered outcome for one batch document.
@@ -238,12 +242,11 @@ func (c *Client) IngestBatch(
 		for _, document := range documents {
 			err = stream.Send(&lumv1.IngestBatchRequest{Frame: &lumv1.IngestBatchRequest_Document{
 				Document: &lumv1.IngestBatchDocumentHeader{
-					DocumentId:         document.DocumentID,
-					SourceId:           document.SourceID,
-					Uri:                document.URI,
-					MimeType:           document.MimeType,
-					PreviousChunkCount: document.PreviousChunkCount,
-					ContentLength:      uint64(len(document.Content)),
+					DocumentId:    document.DocumentID,
+					SourceId:      document.SourceID,
+					Uri:           document.URI,
+					MimeType:      document.MimeType,
+					ContentLength: uint64(len(document.Content)),
 				},
 			}})
 			if err != nil {
@@ -323,17 +326,17 @@ func (c *Client) ingestBatchUnaryFallback(
 			document.URI,
 			document.MimeType,
 			document.Content,
-			document.PreviousChunkCount,
 		)
 	}
 	return results, nil
 }
 
-// DeleteDocument removes a document's chunks from the vector index.
-func (c *Client) DeleteDocument(ctx context.Context, documentID string, chunkCount uint32) error {
+// DeleteDocument removes every vector point belonging to a document. The
+// data plane locates them by a filtered delete on document_id, not a
+// chunk count (#3).
+func (c *Client) DeleteDocument(ctx context.Context, documentID string) error {
 	_, err := c.rpc.DeleteDocument(ctx, &lumv1.DeleteDocumentRequest{
 		DocumentId: documentID,
-		ChunkCount: chunkCount,
 	})
 	return err
 }

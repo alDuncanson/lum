@@ -17,13 +17,15 @@
 //     request carries everything the data plane needs. This keeps the
 //     data plane restartable at any time without coordination.
 //
-//   - Chunk bookkeeping: when a document is ingested, the data plane
-//     splits it into N chunks and stores one vector point per chunk,
-//     with a point ID derived deterministically from (document_id,
-//     chunk_index). The control plane records N (chunk_count) in its
-//     catalog and passes it back on re-ingest/delete so the data plane
-//     can remove exactly the stale points. This avoids needing filtered
-//     deletes in the vector store.
+//   - Chunk identity: when a document is ingested, the data plane splits
+//     it into N chunks and stores one vector point per chunk, with a
+//     point ID derived deterministically from (document_id, chunk_index).
+//     Re-ingesting the same document_id overwrites those points in
+//     place. Deletion (re-ingest of a shrunk document, or an explicit
+//     DeleteDocument) removes every point for a document_id via a
+//     payload-indexed filtered delete in the vector store, not by
+//     counting — the control plane no longer needs to track or echo
+//     back a chunk count for this to work.
 //
 // Versioning: the `lum.v1` package name is the API version. Breaking
 // changes mean a new `lum.v2` package, never edits that change the
@@ -107,10 +109,8 @@ message IngestDocumentRequest {
   // Raw document bytes. Parsing happens in the data plane so that new
   // formats (PDF, HTML, ...) never require control-plane changes.
   bytes content = 5;
-  // How many chunks the *previous* ingest of this document produced
-  // (0 if new). The data plane deletes those points before upserting,
-  // which keeps re-ingests clean even when the new chunk count shrinks.
-  uint32 previous_chunk_count = 6;
+  reserved 6; // previous_chunk_count, replaced by a filtered delete on document_id (#3)
+  reserved "previous_chunk_count";
 }
 
 message IngestDocumentResponse {
@@ -134,7 +134,8 @@ message IngestBatchDocumentHeader {
   string source_id = 2;
   string uri = 3;
   string mime_type = 4;
-  uint32 previous_chunk_count = 5;
+  reserved 5; // previous_chunk_count, replaced by a filtered delete on document_id (#3)
+  reserved "previous_chunk_count";
   // Exact number of content bytes that follow. The server rejects
   // truncated or overlong streams before modifying the vector store.
   uint64 content_length = 6;
@@ -173,9 +174,8 @@ enum IngestBatchFailureStage {
 
 message DeleteDocumentRequest {
   string document_id = 1;
-  // Chunk count from the control plane's catalog; identifies exactly
-  // which derived point IDs to remove.
-  uint32 chunk_count = 2;
+  reserved 2; // chunk_count, replaced by a filtered delete on document_id (#3)
+  reserved "chunk_count";
 }
 
 message DeleteDocumentResponse {}

@@ -17,13 +17,15 @@
 //     request carries everything the data plane needs. This keeps the
 //     data plane restartable at any time without coordination.
 //
-//   - Chunk bookkeeping: when a document is ingested, the data plane
-//     splits it into N chunks and stores one vector point per chunk,
-//     with a point ID derived deterministically from (document_id,
-//     chunk_index). The control plane records N (chunk_count) in its
-//     catalog and passes it back on re-ingest/delete so the data plane
-//     can remove exactly the stale points. This avoids needing filtered
-//     deletes in the vector store.
+//   - Chunk identity: when a document is ingested, the data plane splits
+//     it into N chunks and stores one vector point per chunk, with a
+//     point ID derived deterministically from (document_id, chunk_index).
+//     Re-ingesting the same document_id overwrites those points in
+//     place. Deletion (re-ingest of a shrunk document, or an explicit
+//     DeleteDocument) removes every point for a document_id via a
+//     payload-indexed filtered delete in the vector store, not by
+//     counting — the control plane no longer needs to track or echo
+//     back a chunk count for this to work.
 //
 // Versioning: the `lum.v1` package name is the API version. Breaking
 // changes mean a new `lum.v2` package, never edits that change the

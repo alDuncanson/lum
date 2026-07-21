@@ -49,8 +49,9 @@ pub trait VectorStore: Send + Sync {
         vectors: Vec<Vec<f32>>,
     ) -> Result<()>;
 
-    /// Remove the points for chunk indices `0..chunk_count`.
-    fn delete_document(&self, document_id: &str, chunk_count: u32) -> Result<()>;
+    /// Remove every point belonging to a document, located by a filtered
+    /// delete on its document_id payload field rather than a chunk count.
+    fn delete_document(&self, document_id: &str) -> Result<()>;
 
     /// Nearest-neighbor search over all stored chunks.
     fn search(&self, query_vector: Vec<f32>, limit: usize) -> Result<Vec<Hit>>;

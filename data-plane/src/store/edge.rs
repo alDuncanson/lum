@@ -15,9 +15,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use qdrant_edge::{
-    Distance, EdgeConfig, EdgeShard, EdgeVectorParams, NamedQuery, PointId, PointInsertOperations,
-    PointOperations, PointStruct, QueryEnum, QueryRequest, ScoringQuery, UpdateOperation,
-    WithPayloadInterface, WithVector, DEFAULT_VECTOR_NAME,
+    Condition, CreateIndex, Distance, EdgeConfig, EdgeShard, EdgeVectorParams, FieldCondition,
+    FieldIndexOperations, Filter, Match, NamedQuery, PayloadFieldSchema, PayloadSchemaType,
+    PointId, PointInsertOperations, PointOperations, PointStruct, QueryEnum, QueryRequest,
+    ScoringQuery, UpdateOperation, ValueVariants, WithPayloadInterface, WithVector,
+    DEFAULT_VECTOR_NAME,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -30,23 +32,38 @@ use crate::pipeline::Chunk;
 /// would orphan every existing point, so: don't.
 const POINT_NAMESPACE: Uuid = Uuid::from_u128(0x9f8b_4a1e_6c75_4d2a_b03e_517f_22c8_d941);
 
+/// Payload field indexed so every point belonging to a document can be
+/// located and removed by a filtered delete, without the control plane
+/// tracking or echoing back a chunk count (#3).
+const DOCUMENT_ID_FIELD: &str = "document_id";
+
 // Every index created before manifests were introduced used this model.
 // Keeping that legacy identity explicit makes the one-time backfill safe:
 // a future binary cannot bless old vectors as belonging to a new model.
 const LEGACY_MODEL: &str = "BAAI/bge-small-en-v1.5";
 const LEGACY_DIMENSION: usize = 384;
 
-/// Deterministic point ID for a chunk.
-///
-/// This is the trick that lets the whole system avoid filtered deletes
-/// and vector-store-side bookkeeping: knowing only (document_id,
-/// chunk_count) — which the control plane's catalog tracks — we can name
-/// every point a document owns, for overwrite and for deletion.
+/// Deterministic point ID for a chunk (document_id, chunk_index). Kept
+/// even though deletion no longer derives IDs from it (see
+/// `document_id_filter`): re-ingesting the same document_id at the same
+/// chunk count still overwrites points in place instead of writing new
+/// ones, which is idempotent and avoids needless churn.
 fn point_uuid(document_id: &str, chunk_index: u32) -> Uuid {
     Uuid::new_v5(
         &POINT_NAMESPACE,
         format!("{document_id}/{chunk_index}").as_bytes(),
     )
+}
+
+/// A filter matching every point stored for one document, used for
+/// deletion instead of deriving point IDs from a chunk count.
+fn document_id_filter(document_id: &str) -> Filter {
+    Filter::new_must(Condition::Field(FieldCondition::new_match(
+        DOCUMENT_ID_FIELD
+            .parse()
+            .expect("\"document_id\" is a valid JsonPath"),
+        Match::new_value(ValueVariants::String(document_id.to_owned())),
+    )))
 }
 
 pub struct EdgeStore {
@@ -79,6 +96,20 @@ impl EdgeStore {
         if !has_manifest {
             write_manifest(path, model, dimension)?;
         }
+
+        // Idempotent: creating an already-existing index is a documented
+        // no-op upstream, so this runs unconditionally on every open.
+        shard
+            .update(UpdateOperation::FieldIndexOperation(
+                FieldIndexOperations::CreateIndex(CreateIndex {
+                    field_name: DOCUMENT_ID_FIELD
+                        .parse()
+                        .expect("\"document_id\" is a valid JsonPath"),
+                    field_schema: Some(PayloadFieldSchema::FieldType(PayloadSchemaType::Keyword)),
+                }),
+            ))
+            .map_err(|e| anyhow!("creating document_id payload index: {e}"))?;
+
         Ok(Self { shard })
     }
 }
@@ -215,16 +246,10 @@ impl VectorStore for EdgeStore {
         Ok(())
     }
 
-    fn delete_document(&self, document_id: &str, chunk_count: u32) -> Result<()> {
-        if chunk_count == 0 {
-            return Ok(());
-        }
-        let ids = (0..chunk_count)
-            .map(|i| PointId::Uuid(point_uuid(document_id, i)))
-            .collect();
+    fn delete_document(&self, document_id: &str) -> Result<()> {
         self.shard
             .update(UpdateOperation::PointOperation(
-                PointOperations::DeletePoints { ids },
+                PointOperations::DeletePointsByFilter(document_id_filter(document_id)),
             ))
             .map_err(|e| anyhow!("qdrant-edge delete: {e}"))?;
         // Same durability-before-bookkeeping rule as upsert_document.
@@ -313,5 +338,137 @@ mod tests {
         assert!(!manifest_path(&path).exists());
 
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = std::fs::remove_dir_all(path);
+        let _ = std::fs::remove_file(manifest_path(path));
+    }
+
+    #[test]
+    fn delete_document_removes_only_that_documents_points() {
+        let path = test_index_path();
+        let store = EdgeStore::open(&path, "test-model", 4).unwrap();
+
+        store
+            .upsert_document(
+                DocumentMeta {
+                    document_id: "doc-a",
+                    source_id: "s",
+                    uri: "/a",
+                },
+                &[
+                    Chunk {
+                        index: 0,
+                        text: "a0".to_owned(),
+                    },
+                    Chunk {
+                        index: 1,
+                        text: "a1".to_owned(),
+                    },
+                ],
+                vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]],
+            )
+            .unwrap();
+        store
+            .upsert_document(
+                DocumentMeta {
+                    document_id: "doc-b",
+                    source_id: "s",
+                    uri: "/b",
+                },
+                &[Chunk {
+                    index: 0,
+                    text: "b0".to_owned(),
+                }],
+                vec![vec![0.0, 0.0, 1.0, 0.0]],
+            )
+            .unwrap();
+
+        let before = store.search(vec![1.0, 0.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(
+            before.len(),
+            3,
+            "expected both documents' points before delete"
+        );
+
+        store.delete_document("doc-a").unwrap();
+
+        let after = store.search(vec![1.0, 0.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(
+            after.iter().map(|hit| hit.document_id.as_str()).collect::<Vec<_>>(),
+            vec!["doc-b"],
+            "delete_document must remove exactly the target document's points, leaving others intact"
+        );
+
+        drop(store); // flush/close before the directory is removed
+        cleanup(&path);
+    }
+
+    #[test]
+    fn delete_document_on_a_document_with_no_points_is_a_no_op() {
+        let path = test_index_path();
+        let store = EdgeStore::open(&path, "test-model", 4).unwrap();
+
+        // Filtered delete on a document_id that never existed must succeed
+        // quietly, matching the old chunk_count == 0 short-circuit.
+        store.delete_document("never-ingested").unwrap();
+
+        drop(store); // flush/close before the directory is removed
+        cleanup(&path);
+    }
+
+    #[test]
+    fn reingesting_a_shrunk_document_leaves_no_stale_tail() {
+        let path = test_index_path();
+        let store = EdgeStore::open(&path, "test-model", 4).unwrap();
+        let meta = || DocumentMeta {
+            document_id: "doc",
+            source_id: "s",
+            uri: "/doc",
+        };
+
+        store
+            .upsert_document(
+                meta(),
+                &[
+                    Chunk {
+                        index: 0,
+                        text: "v1-chunk0".to_owned(),
+                    },
+                    Chunk {
+                        index: 1,
+                        text: "v1-chunk1".to_owned(),
+                    },
+                ],
+                vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]],
+            )
+            .unwrap();
+        assert_eq!(store.search(vec![1.0, 0.0, 0.0, 0.0], 10).unwrap().len(), 2);
+
+        // Mirrors service.rs's ingest path: delete every existing point for
+        // the document before upserting the new, shorter chunk set.
+        store.delete_document("doc").unwrap();
+        store
+            .upsert_document(
+                meta(),
+                &[Chunk {
+                    index: 0,
+                    text: "v2-chunk0".to_owned(),
+                }],
+                vec![vec![1.0, 0.0, 0.0, 0.0]],
+            )
+            .unwrap();
+
+        let after = store.search(vec![1.0, 0.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(
+            after.len(),
+            1,
+            "shrinking re-ingest must leave no stale trailing chunk"
+        );
+        assert_eq!(after[0].text, "v2-chunk0");
+
+        drop(store); // flush/close before the directory is removed
+        cleanup(&path);
     }
 }

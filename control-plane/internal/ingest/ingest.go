@@ -499,7 +499,6 @@ func (i *Ingestor) documentWorker(ctx context.Context) {
 					input: dataplane.IngestBatchDocument{
 						DocumentID: job.document.ID, SourceID: job.run.sourceID,
 						URI: job.ref.URI, MimeType: job.ref.MimeType, Content: content,
-						PreviousChunkCount: job.document.ChunkCount,
 					},
 				})
 				pendingBytes += len(content)
@@ -576,7 +575,7 @@ func (i *Ingestor) flushBatch(ctx context.Context, pending []pendingDocument) {
 func (i *Ingestor) deleteDocument(ctx context.Context, job documentJob) {
 	run := job.run
 	jobCtx := requestid.WithValue(ctx, run.requestID)
-	if err := i.dp.DeleteDocument(jobCtx, job.document.ID, job.document.ChunkCount); err != nil {
+	if err := i.dp.DeleteDocument(jobCtx, job.document.ID); err != nil {
 		slog.Warn("vector delete failed",
 			"request_id", run.requestID, "uri", job.document.URI, "error", err)
 		i.failDocument(jobCtx, job, fmt.Errorf("delete: %w", err))

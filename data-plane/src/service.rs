@@ -23,7 +23,7 @@ use crate::pipeline::{
 use crate::store::{edge::EdgeStore, DocumentMeta, VectorStore};
 
 /// Must match the control plane's dataplane.ContractVersion.
-const CONTRACT_VERSION: &str = "1";
+const CONTRACT_VERSION: &str = "2";
 const MAX_BATCH_DOCUMENTS: usize = 128;
 const MAX_CONTENT_FRAME_BYTES: usize = 256 * 1024;
 const MAX_BATCH_CONTENT_BYTES: usize = 32 * 1024 * 1024;
@@ -199,10 +199,10 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
                 let chunk_duration = started.elapsed();
 
                 // Drop the previous generation of points first, so a
-                // shrinking document leaves no stale tail behind.
+                // shrinking document leaves no stale tail behind. A
+                // filtered delete on document_id needs no chunk count (#3).
                 let started = Instant::now();
-                p.store
-                    .delete_document(&req.document_id, req.previous_chunk_count)?;
+                p.store.delete_document(&req.document_id)?;
                 let delete_duration = started.elapsed();
 
                 if chunks.is_empty() {
@@ -449,10 +449,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
                 let started = Instant::now();
                 let store_result = pipeline
                     .store
-                    .delete_document(
-                        &document.header.document_id,
-                        document.header.previous_chunk_count,
-                    )
+                    .delete_document(&document.header.document_id)
                     .and_then(|()| {
                         if chunks.is_empty() {
                             Ok(())
@@ -531,7 +528,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
         let _ = log_request(&request, "DeleteDocument");
         let _ = self.pipeline()?;
         let req = request.into_inner();
-        self.run_blocking(move |p| p.store.delete_document(&req.document_id, req.chunk_count))
+        self.run_blocking(move |p| p.store.delete_document(&req.document_id))
             .await?;
         Ok(Response::new(pb::DeleteDocumentResponse {}))
     }

@@ -37,7 +37,7 @@ func (s stubDataPlane) IngestBatch(_ context.Context, documents []dataplane.Inge
 	return results, nil
 }
 
-func (stubDataPlane) DeleteDocument(context.Context, string, uint32) error { return nil }
+func (stubDataPlane) DeleteDocument(context.Context, string) error { return nil }
 
 func (stubDataPlane) Search(context.Context, string, uint32) ([]dataplane.SearchResult, error) {
 	return nil, nil

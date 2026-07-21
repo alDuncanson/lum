@@ -24,7 +24,7 @@ type DataPlane interface {
 	Health(ctx context.Context) (HealthResult, error)
 	EnsureRunning()
 	IngestBatch(ctx context.Context, documents []IngestBatchDocument) ([]IngestBatchResult, error)
-	DeleteDocument(ctx context.Context, documentID string, chunkCount uint32) error
+	DeleteDocument(ctx context.Context, documentID string) error
 	Search(ctx context.Context, query string, limit uint32) ([]SearchResult, error)
 }
 
@@ -148,7 +148,7 @@ func (m *Manager) IngestBatch(ctx context.Context, documents []IngestBatchDocume
 	return results, err
 }
 
-func (m *Manager) DeleteDocument(ctx context.Context, documentID string, chunkCount uint32) error {
+func (m *Manager) DeleteDocument(ctx context.Context, documentID string) error {
 	client, err := m.awaitReady(ctx)
 	if err != nil {
 		return err
@@ -156,7 +156,7 @@ func (m *Manager) DeleteDocument(ctx context.Context, documentID string, chunkCo
 	m.beginOp()
 	defer m.endOp()
 	started := time.Now()
-	err = client.DeleteDocument(ctx, documentID, chunkCount)
+	err = client.DeleteDocument(ctx, documentID)
 	m.recordRPC(ctx, "DeleteDocument", started, err)
 	return err
 }

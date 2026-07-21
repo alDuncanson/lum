@@ -60,7 +60,7 @@ Owns *bytes and math*: parse → chunk → embed → store/search. Spawned by
 | `store/` | `VectorStore` trait + qdrant-edge implementation |
 
 The data plane is **stateless between calls**: every RPC carries all
-context it needs (document IDs, previous chunk counts). It can be killed
+context it needs (document IDs, source IDs, content). It can be killed
 and restarted at any time without coordination — its only persistent
 artifacts are the vector index and the model cache.
 
@@ -88,18 +88,22 @@ is never enumerated to answer "what have we ingested?". Search results
 are self-describing because chunk payloads carry their provenance
 (document id, source id, uri, text).
 
-### The chunk-count trick
+### Chunk identity and deletion
 
-Vector points get **deterministic IDs**: `UUIDv5(namespace, "{document_id}/{chunk_index}")`.
-The catalog records how many chunks each document produced. Together
-these mean:
+Vector points get **deterministic IDs**: `UUIDv5(namespace, "{document_id}/{chunk_index}")`,
+so re-ingesting the same document_id overwrites points in place instead
+of writing new ones — idempotent, and no needless churn.
 
-- re-ingesting overwrites points in place (same IDs),
-- deleting needs no filtered queries — the control plane knows every
-  point ID a document owns from `(document_id, chunk_count)` alone,
-- a shrinking document leaves no stale tail (old range deleted first).
-
-This is why the data plane needs no bookkeeping of its own.
+Deletion (a shrinking re-ingest's stale tail, or an explicit
+`DeleteDocument`) is a **filtered delete** on a payload index over
+`document_id` (`qdrant-edge`'s `DeletePointsByFilter`), not a chunk
+count. Earlier, the wire contract carried `previous_chunk_count` /
+`chunk_count` so the data plane could derive exactly which point IDs to
+remove — a physical detail of the vector store's layout leaking across
+the plane boundary, and a cross-plane invariant ("catalog chunk_count
+must exactly match points on disk") that could drift after a hard
+crash. The filtered delete removes that invariant entirely: the control
+plane no longer tracks or echoes back a count for this to work (#3).
 
 ### Durability ordering
 
