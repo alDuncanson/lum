@@ -97,3 +97,77 @@ func TestDocumentLifecycle(t *testing.T) {
 		t.Fatalf("after delete: got %v, want sql.ErrNoRows", err)
 	}
 }
+
+func TestIngestFailureLifecycle(t *testing.T) {
+	c := openTestCatalog(t)
+	ctx := context.Background()
+	src := Source{ID: "src-1", Type: "localdir", URI: "/tmp/docs", CreatedAt: time.Now().UTC()}
+	if _, _, err := c.AddSource(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+
+	failedAt := time.Now().UTC()
+	failure := IngestFailure{
+		SourceID: src.ID, URI: "/tmp/docs/a.md", Error: "lumen unavailable", FailedAt: failedAt,
+	}
+	for want := 1; want <= 2; want++ {
+		attempts, err := c.RecordIngestFailure(ctx, failure)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempts != want {
+			t.Fatalf("attempts = %d, want %d", attempts, want)
+		}
+	}
+
+	failures, err := c.IngestFailuresBySource(ctx, src.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failures) != 1 || failures[0].Attempts != 2 || failures[0].Error != failure.Error {
+		t.Fatalf("failures = %#v, want one two-attempt failure", failures)
+	}
+	stats, err := c.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Failures != 1 {
+		t.Fatalf("failure count = %d, want 1", stats.Failures)
+	}
+
+	if err := c.ClearIngestFailure(ctx, src.ID, failure.URI); err != nil {
+		t.Fatal(err)
+	}
+	failures, err = c.IngestFailures(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("failures after clear = %#v, want none", failures)
+	}
+}
+
+func TestIngestFailuresAreNewestFirst(t *testing.T) {
+	c := openTestCatalog(t)
+	ctx := context.Background()
+	src := Source{ID: "src-1", Type: "localdir", URI: "/tmp/docs", CreatedAt: time.Now().UTC()}
+	if _, _, err := c.AddSource(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, time.July, 21, 12, 0, 0, 100_000_000, time.UTC)
+	for _, failure := range []IngestFailure{
+		{SourceID: src.ID, URI: "/older", Error: "older", FailedAt: base},
+		{SourceID: src.ID, URI: "/newer", Error: "newer", FailedAt: base.Add(10 * time.Millisecond)},
+	} {
+		if _, err := c.RecordIngestFailure(ctx, failure); err != nil {
+			t.Fatal(err)
+		}
+	}
+	failures, err := c.IngestFailures(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failures) != 2 || failures[0].URI != "/newer" || failures[1].URI != "/older" {
+		t.Fatalf("failure order = %#v, want newer then older", failures)
+	}
+}

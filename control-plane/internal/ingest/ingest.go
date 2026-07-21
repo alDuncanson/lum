@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -52,11 +53,12 @@ type scanRun struct {
 	started   time.Time
 	done      chan struct{}
 
-	ingested  int
-	unchanged int
-	removed   int
-	failed    int
-	err       error
+	ingested   int
+	unchanged  int
+	removed    int
+	failed     int
+	err        error
+	retryAfter time.Duration
 }
 
 type pendingDocument struct {
@@ -70,11 +72,17 @@ type debounceRequest struct {
 	timer     *time.Timer
 }
 
+type retryRequest struct {
+	timer *time.Timer
+}
+
 const (
 	batchDocumentLimit = 128
 	batchContentTarget = 4 * 1024 * 1024
 	batchContentLimit  = 32 * 1024 * 1024
 	debounceWindow     = time.Second
+	retryLimit         = 3
+	retryBaseDelay     = time.Second
 )
 
 var documentIDNamespace = uuid.MustParse("9c4064c4-672b-4aa6-b3ba-bf18f0b94670")
@@ -92,7 +100,9 @@ type Ingestor struct {
 	pending   map[string]scanRequest
 	scanOrder []string
 	debounced map[string]*debounceRequest
+	retries   map[string]*retryRequest
 	debounce  time.Duration
+	retryBase time.Duration
 }
 
 // New creates an Ingestor and starts its planner and document worker; cancel
@@ -106,7 +116,9 @@ func New(ctx context.Context, cat *catalog.Catalog, dp *dataplane.Client) *Inges
 		jobs:      make(chan documentJob, 256),
 		pending:   make(map[string]scanRequest),
 		debounced: make(map[string]*debounceRequest),
+		retries:   make(map[string]*retryRequest),
 		debounce:  debounceWindow,
+		retryBase: retryBaseDelay,
 	}
 	go ing.planner(ctx)
 	go ing.documentWorker(ctx)
@@ -119,14 +131,18 @@ func New(ctx context.Context, cat *catalog.Catalog, dp *dataplane.Client) *Inges
 // starts it leaves the pending set, so a change arriving during a scan queues
 // one follow-up reconciliation rather than being lost.
 func (i *Ingestor) EnqueueScan(ctx context.Context, sourceID string) {
-	requestID := requestIDFrom(ctx)
-
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.cancelRetryLocked(sourceID)
+	i.enqueueScanLocked(scanRequest{sourceID: sourceID, requestID: requestIDFrom(ctx)})
+}
+
+func (i *Ingestor) enqueueScanLocked(req scanRequest) {
+	sourceID := req.sourceID
 	if _, exists := i.pending[sourceID]; exists {
 		return
 	}
-	i.pending[sourceID] = scanRequest{sourceID: sourceID, requestID: requestID}
+	i.pending[sourceID] = req
 	i.scanOrder = append(i.scanOrder, sourceID)
 	select {
 	case i.scanReady <- struct{}{}:
@@ -181,6 +197,10 @@ func (i *Ingestor) stopDebouncers(ctx context.Context) {
 	for sourceID, request := range i.debounced {
 		request.timer.Stop()
 		delete(i.debounced, sourceID)
+	}
+	for sourceID, request := range i.retries {
+		request.timer.Stop()
+		delete(i.retries, sourceID)
 	}
 }
 
@@ -242,6 +262,9 @@ func (i *Ingestor) planScan(ctx context.Context, run *scanRun) error {
 		existing, err := i.catalog.DocumentByURI(ctx, ref.URI)
 		switch {
 		case err == nil && existing.ContentHash == ref.ContentHash:
+			if err := i.catalog.ClearIngestFailure(ctx, run.sourceID, ref.URI); err != nil {
+				return err
+			}
 			run.unchanged++
 			continue
 		case err != nil && !errors.Is(err, sql.ErrNoRows):
@@ -267,9 +290,22 @@ func (i *Ingestor) planScan(ctx context.Context, run *scanRun) error {
 	if err != nil {
 		return err
 	}
+	knownURIs := make(map[string]bool, len(known))
 	for _, doc := range known {
+		knownURIs[doc.URI] = true
 		if !seen[doc.URI] && !i.sendJob(ctx, documentJob{kind: jobDelete, run: run, document: doc}) {
 			return ctx.Err()
+		}
+	}
+	failures, err := i.catalog.IngestFailuresBySource(ctx, run.sourceID)
+	if err != nil {
+		return err
+	}
+	for _, failure := range failures {
+		if !seen[failure.URI] && !knownURIs[failure.URI] {
+			if err := i.catalog.ClearIngestFailure(ctx, run.sourceID, failure.URI); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -311,13 +347,14 @@ func (i *Ingestor) documentWorker(ctx context.Context) {
 				if err != nil {
 					slog.Warn("read failed, skipping",
 						"request_id", job.run.requestID, "uri", job.ref.URI, "error", err)
-					job.run.failed++
+					i.failDocument(ctx, job, fmt.Errorf("read: %w", err))
 					continue
 				}
 				if len(content) > batchContentLimit {
+					err := fmt.Errorf("document exceeds 32 MiB ingest limit (%d bytes)", len(content))
 					slog.Warn("document exceeds 32 MiB ingest limit, skipping",
 						"request_id", job.run.requestID, "uri", job.ref.URI, "bytes", len(content))
-					job.run.failed++
+					i.failDocument(ctx, job, err)
 					continue
 				}
 				if len(pending) > 0 && (len(pending) >= batchDocumentLimit || pendingBytes+len(content) > batchContentTarget) {
@@ -360,7 +397,9 @@ func (i *Ingestor) flushBatch(ctx context.Context, pending []pendingDocument) {
 	if err != nil {
 		slog.Warn("ingest batch failed, skipping documents",
 			"request_id", run.requestID, "documents", len(pending), "error", err)
-		run.failed += len(pending)
+		for _, item := range pending {
+			i.failDocument(batchCtx, item.job, err)
+		}
 		return
 	}
 	for index, result := range results {
@@ -368,13 +407,17 @@ func (i *Ingestor) flushBatch(ctx context.Context, pending []pendingDocument) {
 		if result.Err != nil {
 			slog.Warn("ingest failed, skipping",
 				"request_id", run.requestID, "uri", item.job.document.URI, "error", result.Err)
-			run.failed++
+			i.failDocument(batchCtx, item.job, result.Err)
 			continue
 		}
 		item.job.document.ContentHash = item.contentHash
 		item.job.document.ChunkCount = result.ChunkCount
 		item.job.document.IngestedAt = time.Now().UTC()
 		if err := i.catalog.UpsertDocument(batchCtx, item.job.document); err != nil {
+			run.err = err
+			return
+		}
+		if err := i.catalog.ClearIngestFailure(batchCtx, run.sourceID, item.job.document.URI); err != nil {
 			run.err = err
 			return
 		}
@@ -388,14 +431,39 @@ func (i *Ingestor) deleteDocument(ctx context.Context, job documentJob) {
 	if err := i.dp.DeleteDocument(jobCtx, job.document.ID, job.document.ChunkCount); err != nil {
 		slog.Warn("vector delete failed",
 			"request_id", run.requestID, "uri", job.document.URI, "error", err)
-		run.failed++
+		i.failDocument(jobCtx, job, fmt.Errorf("delete: %w", err))
 		return
 	}
 	if err := i.catalog.DeleteDocument(jobCtx, job.document.ID); err != nil {
 		run.err = err
 		return
 	}
+	if err := i.catalog.ClearIngestFailure(jobCtx, run.sourceID, job.document.URI); err != nil {
+		run.err = err
+		return
+	}
 	run.removed++
+}
+
+func (i *Ingestor) failDocument(ctx context.Context, job documentJob, failureErr error) {
+	run := job.run
+	run.failed++
+	attempts, err := i.catalog.RecordIngestFailure(ctx, catalog.IngestFailure{
+		SourceID: run.sourceID,
+		URI:      job.document.URI,
+		Error:    failureErr.Error(),
+		FailedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		run.err = err
+		return
+	}
+	if attempts <= retryLimit {
+		delay := i.retryBase << (attempts - 1)
+		if delay > run.retryAfter {
+			run.retryAfter = delay
+		}
+	}
 }
 
 func (i *Ingestor) finishScan(run *scanRun) {
@@ -413,7 +481,41 @@ func (i *Ingestor) finishScan(run *scanRun) {
 			"took", time.Since(run.started).Round(time.Millisecond),
 		)
 	}
+	i.replaceRetry(run)
 	close(run.done)
+}
+
+func (i *Ingestor) replaceRetry(run *scanRun) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.cancelRetryLocked(run.sourceID)
+	if run.retryAfter == 0 {
+		return
+	}
+	if _, pending := i.pending[run.sourceID]; pending {
+		return
+	}
+
+	request := &retryRequest{}
+	request.timer = time.AfterFunc(run.retryAfter, func() {
+		i.mu.Lock()
+		defer i.mu.Unlock()
+		if i.retries[run.sourceID] != request {
+			return
+		}
+		delete(i.retries, run.sourceID)
+		if i.ctx.Err() == nil {
+			i.enqueueScanLocked(scanRequest{sourceID: run.sourceID, requestID: run.requestID})
+		}
+	})
+	i.retries[run.sourceID] = request
+}
+
+func (i *Ingestor) cancelRetryLocked(sourceID string) {
+	if request := i.retries[sourceID]; request != nil {
+		request.timer.Stop()
+		delete(i.retries, sourceID)
+	}
 }
 
 // resolveSource loads a source row and reconstructs its implementation.

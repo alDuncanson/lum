@@ -25,6 +25,8 @@ import (
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 )
 
+const sqliteTimestampFormat = "2006-01-02T15:04:05.000000000Z"
+
 const schema = `
 CREATE TABLE IF NOT EXISTS sources (
 	id         TEXT PRIMARY KEY,             -- UUID assigned at registration
@@ -42,7 +44,17 @@ CREATE TABLE IF NOT EXISTS documents (
 	ingested_at  TEXT NOT NULL               -- RFC 3339
 );
 
+CREATE TABLE IF NOT EXISTS ingest_failures (
+	source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+	uri       TEXT NOT NULL,
+	attempts  INTEGER NOT NULL,
+	error     TEXT NOT NULL,
+	failed_at TEXT NOT NULL,
+	PRIMARY KEY (source_id, uri)
+);
+
 CREATE INDEX IF NOT EXISTS documents_by_source ON documents(source_id);
+CREATE INDEX IF NOT EXISTS ingest_failures_by_time ON ingest_failures(failed_at DESC);
 `
 
 // Source is a registered document location.
@@ -61,6 +73,15 @@ type Document struct {
 	ContentHash string    `json:"content_hash"`
 	ChunkCount  uint32    `json:"chunk_count"`
 	IngestedAt  time.Time `json:"ingested_at"`
+}
+
+// IngestFailure is the latest failed attempt for one source document.
+type IngestFailure struct {
+	SourceID string    `json:"source_id"`
+	URI      string    `json:"uri"`
+	Attempts int       `json:"attempts"`
+	Error    string    `json:"error"`
+	FailedAt time.Time `json:"failed_at"`
 }
 
 // Catalog wraps the SQLite handle. Methods are safe for concurrent use
@@ -199,11 +220,73 @@ func (c *Catalog) DeleteDocument(ctx context.Context, id string) error {
 	return err
 }
 
+// RecordIngestFailure persists the latest error and increments the number of
+// consecutive failed attempts for a document.
+func (c *Catalog) RecordIngestFailure(ctx context.Context, failure IngestFailure) (int, error) {
+	row := c.db.QueryRowContext(ctx, `
+		INSERT INTO ingest_failures (source_id, uri, attempts, error, failed_at)
+		VALUES (?, ?, 1, ?, ?)
+		ON CONFLICT(source_id, uri) DO UPDATE SET
+		  attempts  = ingest_failures.attempts + 1,
+		  error     = excluded.error,
+		  failed_at = excluded.failed_at
+		RETURNING attempts`,
+		failure.SourceID, failure.URI, failure.Error, failure.FailedAt.UTC().Format(sqliteTimestampFormat),
+	)
+	var attempts int
+	if err := row.Scan(&attempts); err != nil {
+		return 0, err
+	}
+	return attempts, nil
+}
+
+// ClearIngestFailure removes a document's failure after success or when the
+// failed document disappeared before it was ever indexed.
+func (c *Catalog) ClearIngestFailure(ctx context.Context, sourceID, uri string) error {
+	_, err := c.db.ExecContext(ctx,
+		`DELETE FROM ingest_failures WHERE source_id = ? AND uri = ?`, sourceID, uri)
+	return err
+}
+
+// IngestFailuresBySource returns current failures for one source.
+func (c *Catalog) IngestFailuresBySource(ctx context.Context, sourceID string) ([]IngestFailure, error) {
+	return c.ingestFailures(ctx,
+		`SELECT source_id, uri, attempts, error, failed_at
+		 FROM ingest_failures WHERE source_id = ? ORDER BY failed_at DESC`, sourceID)
+}
+
+// IngestFailures returns all current failures, newest first.
+func (c *Catalog) IngestFailures(ctx context.Context) ([]IngestFailure, error) {
+	return c.ingestFailures(ctx,
+		`SELECT source_id, uri, attempts, error, failed_at
+		 FROM ingest_failures ORDER BY failed_at DESC`)
+}
+
+func (c *Catalog) ingestFailures(ctx context.Context, query string, args ...any) ([]IngestFailure, error) {
+	rows, err := c.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var failures []IngestFailure
+	for rows.Next() {
+		var failure IngestFailure
+		var failedAt string
+		if err := rows.Scan(&failure.SourceID, &failure.URI, &failure.Attempts, &failure.Error, &failedAt); err != nil {
+			return nil, err
+		}
+		failure.FailedAt, _ = time.Parse(time.RFC3339Nano, failedAt)
+		failures = append(failures, failure)
+	}
+	return failures, rows.Err()
+}
+
 // Stats summarizes catalog contents for `lum status`.
 type Stats struct {
 	Sources   int `json:"sources"`
 	Documents int `json:"documents"`
 	Chunks    int `json:"chunks"`
+	Failures  int `json:"failures"`
 }
 
 // Stats returns systemwide counts.
@@ -213,8 +296,9 @@ func (c *Catalog) Stats(ctx context.Context) (Stats, error) {
 		SELECT
 		  (SELECT COUNT(*) FROM sources),
 		  (SELECT COUNT(*) FROM documents),
-		  (SELECT COALESCE(SUM(chunk_count), 0) FROM documents)
-	`).Scan(&s.Sources, &s.Documents, &s.Chunks)
+		  (SELECT COALESCE(SUM(chunk_count), 0) FROM documents),
+		  (SELECT COUNT(*) FROM ingest_failures)
+	`).Scan(&s.Sources, &s.Documents, &s.Chunks, &s.Failures)
 	return s, err
 }
 

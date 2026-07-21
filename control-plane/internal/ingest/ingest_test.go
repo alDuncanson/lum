@@ -130,10 +130,75 @@ func TestDocumentWorkerTerminatesRunAfterPlanningError(t *testing.T) {
 	}
 }
 
+func TestDocumentFailurePersistsAttemptsAndCapsBackoff(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(filepath.Join(t.TempDir(), "catalog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+	_, _, err = cat.AddSource(ctx, catalog.Source{
+		ID: "source", Type: "localdir", URI: t.TempDir(), CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ing := &Ingestor{catalog: cat, retryBase: 10 * time.Millisecond}
+	run := &scanRun{sourceID: "source"}
+	job := documentJob{run: run, document: catalog.Document{URI: "/failed.md"}}
+	for range retryLimit + 1 {
+		ing.failDocument(ctx, job, context.DeadlineExceeded)
+	}
+	if run.failed != retryLimit+1 {
+		t.Fatalf("failed count = %d, want %d", run.failed, retryLimit+1)
+	}
+	wantBackoff := 10 * time.Millisecond << (retryLimit - 1)
+	if run.retryAfter != wantBackoff {
+		t.Fatalf("retry backoff = %s, want %s", run.retryAfter, wantBackoff)
+	}
+	failures, err := cat.IngestFailures(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failures) != 1 || failures[0].Attempts != retryLimit+1 {
+		t.Fatalf("failures = %#v, want %d attempts", failures, retryLimit+1)
+	}
+}
+
+func TestAcceptedScanSupersedesRetryTimer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ing := queueOnlyIngestor(ctx)
+	run := &scanRun{
+		sourceID: "source", requestID: "retry", retryAfter: time.Hour,
+	}
+	ing.replaceRetry(run)
+	if ing.retries[run.sourceID] == nil {
+		t.Fatal("retry timer was not scheduled")
+	}
+
+	ing.EnqueueScan(context.Background(), run.sourceID)
+	if ing.retries[run.sourceID] != nil {
+		t.Fatal("accepted scan did not supersede retry timer")
+	}
+	if len(ing.scanOrder) != 1 {
+		t.Fatalf("pending scans = %d, want 1", len(ing.scanOrder))
+	}
+
+	// A failed run must not add another timer when a follow-up scan is
+	// already pending, even when another run error was also observed.
+	run.err = context.Canceled
+	ing.replaceRetry(run)
+	if ing.retries[run.sourceID] != nil {
+		t.Fatal("retry timer scheduled alongside pending scan")
+	}
+}
+
 func queueOnlyIngestor(ctx context.Context) *Ingestor {
 	return &Ingestor{
 		ctx: ctx, scanReady: make(chan struct{}, 1),
 		pending: make(map[string]scanRequest), debounced: make(map[string]*debounceRequest),
-		debounce: debounceWindow,
+		retries: make(map[string]*retryRequest), debounce: debounceWindow, retryBase: retryBaseDelay,
 	}
 }

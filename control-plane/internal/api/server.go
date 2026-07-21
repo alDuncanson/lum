@@ -159,10 +159,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusResponse struct {
-	Daemon    string        `json:"daemon"`
-	DataPlane string        `json:"data_plane"`
-	Detail    string        `json:"detail,omitempty"`
-	Stats     catalog.Stats `json:"stats"`
+	Daemon    string                  `json:"daemon"`
+	DataPlane string                  `json:"data_plane"`
+	Detail    string                  `json:"detail,omitempty"`
+	Stats     catalog.Stats           `json:"stats"`
+	Failures  []catalog.IngestFailure `json:"failures"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +172,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	resp := statusResponse{Daemon: "ok", Stats: stats}
+	failures, err := s.catalog.IngestFailures(r.Context())
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if failures == nil {
+		failures = []catalog.IngestFailure{}
+	}
+	stats.Failures = len(failures)
+	resp := statusResponse{Daemon: "ok", Stats: stats, Failures: failures}
 	if ready, detail := s.dp.Health(r.Context()); ready {
 		resp.DataPlane = "ok"
 		resp.Detail = detail

@@ -97,6 +97,10 @@ func statusCmd() *cobra.Command {
 			fmt.Printf("sources:     %d\n", resp.Stats.Sources)
 			fmt.Printf("documents:   %d\n", resp.Stats.Documents)
 			fmt.Printf("chunks:      %d\n", resp.Stats.Chunks)
+			fmt.Printf("failures:    %d\n", resp.Stats.Failures)
+			for _, failure := range resp.Failures {
+				fmt.Printf("  %s (attempts: %d): %s\n", failure.URI, failure.Attempts, failure.Error)
+			}
 			return nil
 		},
 	}

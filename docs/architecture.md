@@ -40,8 +40,8 @@ at last scan, what changed, what to (re)ingest, and the public API.
 | `internal/apiclient` | typed Go client for the REST API (shared by cli and mcpserver) |
 | `internal/mcpserver` | MCP stdio server: four tools, each a thin wrapper over the REST API |
 | `internal/source` | the `Source` interface, URI → implementation dispatch, `localdir` |
-| `internal/catalog` | SQLite bookkeeping: sources, documents, hashes, chunk counts |
-| `internal/ingest` | the scan worker: diff source state vs catalog, drive the data plane |
+| `internal/catalog` | SQLite bookkeeping: sources, documents, hashes, chunk counts, ingest failures |
+| `internal/ingest` | scan planner + document worker: diff source state, batch jobs, retry failures |
 | `internal/dataplane` | lumen child-process supervisor + typed gRPC client wrapper |
 | `internal/gen` | generated proto code (committed, so `go build` just works) |
 
@@ -65,7 +65,7 @@ artifacts are the vector index and the model cache.
 
 ## The contract — `proto/lum/v1/dataplane.proto`
 
-Four RPCs: `Health`, `IngestDocument`, `DeleteDocument`, `Search`. The
+Five RPCs: `Health`, `IngestDocument`, `IngestBatch`, `DeleteDocument`, and `Search`. The
 narrowness is the point: features above this line (MCP, and planned RSS
 sources and file watching) reuse these RPCs untouched — MCP shipped
 without changing a single one.
@@ -78,7 +78,7 @@ Codegen without protoc:
 
 ```
 catalog.db  (control plane)   WHAT EXISTS   sources, documents, content
-                                            hashes, chunk counts
+                                            hashes, chunk counts, failures
 vectors/    (data plane)      WHAT IT MEANS embeddings + chunk payloads
 ```
 
@@ -146,6 +146,12 @@ because ingestion throughput is bounded by the embedding model anyway — and
 small documents are combined into cross-document batches. The job channel is
 the "event bus" in miniature; a real broker could replace it without changing
 what flows through it.
+
+Read, ingest, and delete failures are persisted per `(source_id, uri)` and
+retried by scheduling another source reconciliation after 1s, 2s, and 4s.
+Already-successful documents hash-skip during those retries. The failure is
+cleared on success (or when a never-indexed document disappears); exhausted
+failures remain visible through `/v1/status` and `lum status`.
 
 ## Search flow
 

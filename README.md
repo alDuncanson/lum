@@ -106,7 +106,7 @@ Everything lives under `~/.lum` (override with `LUM_DATA_DIR`):
 
 ```
 ~/.lum/
-├── catalog.db   # SQLite: sources, documents, hashes, chunk counts
+├── catalog.db   # SQLite: sources, documents, hashes, chunk counts, ingest failures
 ├── models/      # embedding model cache (auto-downloaded)
 └── vectors/     # qdrant-edge index (embeddings + chunk payloads)
 ```

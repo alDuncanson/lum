@@ -69,10 +69,11 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]datapla
 
 // Status is the response of GET /v1/status.
 type Status struct {
-	Daemon    string        `json:"daemon"`
-	DataPlane string        `json:"data_plane"`
-	Detail    string        `json:"detail"`
-	Stats     catalog.Stats `json:"stats"`
+	Daemon    string                  `json:"daemon"`
+	DataPlane string                  `json:"data_plane"`
+	Detail    string                  `json:"detail"`
+	Stats     catalog.Stats           `json:"stats"`
+	Failures  []catalog.IngestFailure `json:"failures"`
 }
 
 // Status reports daemon health, data plane health, and index counts.
