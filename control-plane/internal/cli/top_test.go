@@ -26,6 +26,76 @@ func TestApplySnapshotUpdatesGaugeFields(t *testing.T) {
 	}
 }
 
+// TestApplyLiveDocumentEventsUpdateActiveAndPendingImmediately guards
+// against relying solely on the periodic (2s) snapshot for "queue:" and
+// "active:": a batch that starts and finishes well inside that window
+// must still be visible, driven by the live document lifecycle events
+// instead.
+func TestApplyLiveDocumentEventsUpdateActiveAndPendingImmediately(t *testing.T) {
+	var m topModel
+	m.apply(events.Event{Kind: events.KindDocumentQueued, URI: "a.md"})
+	if m.pendingDocs != 1 {
+		t.Fatalf("pendingDocs after one queued event = %d, want 1", m.pendingDocs)
+	}
+	m.apply(events.Event{Kind: events.KindDocumentReading, URI: "a.md"})
+	if m.activeDocument != "a.md" || m.activeStage != "reading" {
+		t.Fatalf("active work after reading = %q/%q, want a.md/reading", m.activeDocument, m.activeStage)
+	}
+	m.apply(events.Event{Kind: events.KindDocumentEmbedding, URI: "a.md"})
+	if m.activeDocument != "a.md" || m.activeStage != "embedding" {
+		t.Fatalf("active work after embedding = %q/%q, want a.md/embedding", m.activeDocument, m.activeStage)
+	}
+	m.apply(events.Event{Kind: events.KindDocumentIngested, URI: "a.md", ChunkCount: 2})
+	if m.pendingDocs != 0 {
+		t.Fatalf("pendingDocs after resolving the only in-flight document = %d, want 0", m.pendingDocs)
+	}
+	if m.activeDocument != "" || m.activeStage != "" {
+		t.Fatalf("active work after the pipeline goes idle = %q/%q, want cleared", m.activeDocument, m.activeStage)
+	}
+}
+
+func TestApplyLiveDocumentCountStaysAccurateAcrossOverlappingDocuments(t *testing.T) {
+	var m topModel
+	m.apply(events.Event{Kind: events.KindDocumentQueued, URI: "a.md"})
+	m.apply(events.Event{Kind: events.KindDocumentQueued, URI: "b.md"})
+	if m.pendingDocs != 2 {
+		t.Fatalf("pendingDocs after two queued events = %d, want 2", m.pendingDocs)
+	}
+	m.apply(events.Event{Kind: events.KindDocumentReading, URI: "b.md"})
+	m.apply(events.Event{Kind: events.KindDocumentIngested, URI: "a.md"})
+	if m.pendingDocs != 1 {
+		t.Fatalf("pendingDocs after resolving one of two = %d, want 1", m.pendingDocs)
+	}
+	if m.activeDocument != "b.md" {
+		t.Fatalf("active work = %q, want b.md preserved while it's still in flight", m.activeDocument)
+	}
+	m.apply(events.Event{Kind: events.KindDocumentFailed, URI: "b.md", Error: "boom"})
+	if m.pendingDocs != 0 {
+		t.Fatalf("pendingDocs after resolving both = %d, want 0", m.pendingDocs)
+	}
+	if m.activeDocument != "" {
+		t.Fatalf("active work = %q, want cleared once nothing is in flight", m.activeDocument)
+	}
+}
+
+func TestApplyOnceLiveActivitySeenSnapshotNoLongerOverwritesPendingOrActive(t *testing.T) {
+	var m topModel
+	m.apply(events.Event{Kind: events.KindDocumentQueued, URI: "a.md"})
+	m.apply(events.Event{Kind: events.KindDocumentReading, URI: "a.md"})
+
+	// A lagging periodic snapshot published before this document resolved
+	// must not stomp the live-tracked state with stale numbers.
+	m.apply(events.Event{
+		Kind: events.KindSnapshot, PendingDocuments: 0, ActiveDocument: "", ActiveStage: "",
+	})
+	if m.pendingDocs != 1 {
+		t.Fatalf("pendingDocs after a stale snapshot = %d, want the live count of 1 preserved", m.pendingDocs)
+	}
+	if m.activeDocument != "a.md" || m.activeStage != "reading" {
+		t.Fatalf("active work after a stale snapshot = %q/%q, want a.md/reading preserved", m.activeDocument, m.activeStage)
+	}
+}
+
 func TestApplyDataPlaneStateChangedUpdatesStateOutsideSnapshot(t *testing.T) {
 	var m topModel
 	m.apply(events.Event{Kind: events.KindDataPlaneStateChanged, FromState: "ready", DataPlaneState: "idle", Detail: "shed"})

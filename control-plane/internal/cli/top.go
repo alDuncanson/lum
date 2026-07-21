@@ -61,6 +61,11 @@ type topModel struct {
 	pendingDocs     int
 	activeDocument  string
 	activeStage     string
+	// sawLiveDocumentActivity switches pendingDocs from snapshot-fed to
+	// event-fed once any document lifecycle event arrives: a live count
+	// tracks batches that start and finish faster than the periodic
+	// snapshot's 2s cadence, which would otherwise be missed entirely.
+	sawLiveDocumentActivity bool
 
 	lastBatchTookMS int64
 	lastBatchDocs   int
@@ -128,17 +133,37 @@ func (m *topModel) apply(e events.Event) {
 		m.dataPlaneState = e.DataPlaneState
 		m.dataPlaneDetail = e.Detail
 		m.sources, m.documents, m.chunks, m.ingestFailures = e.Sources, e.Documents, e.Chunks, e.IngestFailures
-		m.pendingScans, m.pendingDocs = e.PendingScans, e.PendingDocuments
-		m.activeDocument, m.activeStage = e.ActiveDocument, e.ActiveStage
+		m.pendingScans = e.PendingScans
+		// Documents in flight and the active document are tracked live
+		// below (queued/resolved events), since a periodic 2s snapshot can
+		// miss a batch that starts and finishes well inside that window.
+		// The snapshot only seeds these before the first live event
+		// arrives — e.g. connecting mid-scan, where it's the only signal
+		// available for whatever was already in flight.
+		if !m.sawLiveDocumentActivity {
+			m.pendingDocs = e.PendingDocuments
+			m.activeDocument, m.activeStage = e.ActiveDocument, e.ActiveStage
+		}
 	case events.KindDataPlaneStateChanged:
 		m.dataPlaneState = e.DataPlaneState
 		m.dataPlaneDetail = e.Detail
+	case events.KindDocumentQueued:
+		m.sawLiveDocumentActivity = true
+		m.pendingDocs++
+	case events.KindDocumentReading:
+		m.activeDocument, m.activeStage = e.URI, "reading"
+	case events.KindDocumentEmbedding:
+		m.activeDocument, m.activeStage = e.URI, "embedding"
 	case events.KindDocumentIngested:
 		m.ingestedTotal++
 		m.chunksTotal += e.ChunkCount
+		m.resolveDocument()
 	case events.KindDocumentFailed:
 		m.failedTotal++
 		m.lastError = fmt.Sprintf("%s: %s", e.URI, e.Error)
+		m.resolveDocument()
+	case events.KindDocumentDeleted:
+		m.resolveDocument()
 	case events.KindScanFinished:
 		m.lastScanTookMS = e.TookMS
 		if e.Error != "" {
@@ -159,6 +184,19 @@ func (m *topModel) apply(e events.Event) {
 		if len(m.recent) > topRecentEventsShown {
 			m.recent = m.recent[len(m.recent)-topRecentEventsShown:]
 		}
+	}
+}
+
+// resolveDocument accounts for one document leaving the pipeline
+// (ingested, failed, or deleted): decrements the live in-flight count and
+// clears the active indicator once nothing is left, rather than waiting
+// on the next periodic snapshot to notice the pipeline went idle.
+func (m *topModel) resolveDocument() {
+	if m.pendingDocs > 0 {
+		m.pendingDocs--
+	}
+	if m.pendingDocs == 0 {
+		m.activeDocument, m.activeStage = "", ""
 	}
 }
 
