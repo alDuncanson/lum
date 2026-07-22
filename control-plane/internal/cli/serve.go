@@ -130,9 +130,10 @@ func run(ctx context.Context, cfg config.Config) error {
 		default:
 		}
 	}
+	apiServer := api.New(cat, dp, ingestor, bus)
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: api.New(cat, dp, ingestor, bus).Handler(recordActivity),
+		Handler: apiServer.Handler(recordActivity),
 	}
 	defer server.Close()
 	errCh := make(chan error, 1)
@@ -182,6 +183,9 @@ waitForExit:
 			}
 			break waitForExit
 		case <-ctx.Done():
+			break waitForExit
+		case <-apiServer.ShutdownRequested():
+			slog.Info("shutdown requested via API")
 			break waitForExit
 		case <-activityCh:
 			resetTimer(idleTimer, cfg.IdleTimeout)

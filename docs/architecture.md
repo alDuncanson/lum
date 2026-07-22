@@ -248,6 +248,29 @@ Every HTTP request resets a 15-minute idle timer. When it expires, the normal
 ordered shutdown path stops ingestion, drains HTTP, and gracefully terminates
 lumen. The next client request starts a fresh daemon.
 
+`lum stop` (`POST /v1/shutdown`) ends the daemon on demand rather than
+waiting out the idle timer, going through the identical ordered path: the
+handler responds 202 before signaling, so the client always gets an
+answer, then the daemon's main loop selects on that signal exactly like
+an OS SIGINT or the idle timer firing. `apiclient.Client.Stop` then waits
+for `daemon.lock` to actually release before returning — deliberately
+*not* for the HTTP port to stop answering, since `listener.Close()` runs
+before `dp.Close()` (stops lumen) and `cat.Close()` in the shutdown
+sequence, so the port can go quiet while the process is still mid
+cleanup (confirmed by hand: the PID stayed alive nearly a second after
+`/v1/status` started refusing connections). The flock is the same
+authoritative "fully gone" signal the on-demand spawn above already
+relies on before starting a replacement. `Stop` never triggers that
+auto-spawn on a refused connection, unlike every other command — nothing
+listening just means nothing to stop.
+
+Deleting the data directory is only a full reset once the daemon has
+actually exited: on Unix, `rm -rf` only removes the directory entry, and
+a still-running process keeps its open files (catalog, vector index)
+alive by inode regardless, so it keeps serving the old state and
+`lum status`/`lum search` look completely unaffected by the deletion
+until the process holding them exits.
+
 ## Data plane idle shedding
 
 lumen carries its own, independent (and shorter) idle lifetime nested

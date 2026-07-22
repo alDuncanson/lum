@@ -304,3 +304,35 @@ func TestSearchPassesSourceQueryParamThrough(t *testing.T) {
 		t.Fatalf("sourceID passed to DataPlane.Search = %q, want source-42", dp.sourceID)
 	}
 }
+
+func TestShutdownRespondsBeforeSignalingAndIsIdempotent(t *testing.T) {
+	server := newTestServer(t, nil)
+	httpServer := httptest.NewServer(server.Handler(nil))
+	t.Cleanup(httpServer.Close)
+
+	resp, err := http.Post(httpServer.URL+"/v1/shutdown", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+
+	select {
+	case <-server.ShutdownRequested():
+	case <-time.After(time.Second):
+		t.Fatal("ShutdownRequested channel was never signaled")
+	}
+
+	// A second request must not block trying to signal an already-full
+	// channel (nothing has drained it, mirroring a slow main loop).
+	resp2, err := http.Post(httpServer.URL+"/v1/shutdown", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusAccepted {
+		t.Fatalf("second request status = %d, want 202", resp2.StatusCode)
+	}
+}

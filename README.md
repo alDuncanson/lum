@@ -63,6 +63,7 @@ make build        # builds bin/lum (Go) and bin/lumen (Rust)
 ./bin/lum sources              # list registered sources
 ./bin/lum search "..."         # semantic search
 ./bin/lum top                   # htop-style live view of the pipeline
+./bin/lum stop                  # stop the daemon, if one is running
 ```
 
 The same API the CLI uses is available to anything else:
@@ -121,7 +122,15 @@ Everything lives under `~/.lum` (override with `LUM_DATA_DIR`):
 └── vectors/     # qdrant-edge index (embeddings + chunk payloads)
 ```
 
-Delete the directory to reset lum completely.
+`lum stop`, then delete the directory, resets lum completely. Deleting it
+*without* stopping the daemon first doesn't actually reset anything: on
+Unix, a running process keeps its open files (the catalog, the vector
+index) alive by inode even after their directory entry is gone, so the
+daemon keeps serving the old state until it actually exits — `lum status`
+and `lum search` will look completely unaffected by the deletion. `lum
+stop` waits for the daemon to fully release everything (not just for its
+HTTP port to stop answering) before returning, so it's always safe to
+delete the directory immediately afterward.
 
 ## Development
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -103,6 +104,29 @@ func statusCmd() *cobra.Command {
 			for _, failure := range resp.Failures {
 				fmt.Printf("  %s (attempts: %d): %s\n", failure.URI, failure.Attempts, failure.Error)
 			}
+			return nil
+		},
+	}
+}
+
+// stopCmd requests a graceful shutdown of the running daemon, if any.
+// Unlike every other command, it must never auto-spawn a daemon on a
+// refused connection (#13) — there being nothing to stop is success, not
+// a reason to start one.
+func stopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop the running lum daemon, if any",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			err := apiclient.New().Stop(cmd.Context())
+			if errors.Is(err, apiclient.ErrNoDaemonRunning) {
+				fmt.Println("no lum daemon is running")
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			fmt.Println("daemon stopped")
 			return nil
 		},
 	}

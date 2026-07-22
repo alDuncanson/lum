@@ -15,17 +15,28 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
 	"github.com/alDuncanson/lum/control-plane/internal/config"
 	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
 	"github.com/alDuncanson/lum/control-plane/internal/events"
 )
+
+// ErrNoDaemonRunning means Stop found nothing listening. Unlike every
+// other Client method, Stop must never trigger the on-demand auto-spawn
+// (#13) on a refused connection — spawning a daemon just to tell it to
+// stop would be absurd.
+var ErrNoDaemonRunning = errors.New("no lum daemon is running")
 
 // Client talks to a running lumd over loopback HTTP.
 type Client struct {
@@ -97,6 +108,72 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	var out Status
 	err := c.call(ctx, "GET", "/v1/status", nil, &out)
 	return out, err
+}
+
+// Stop requests a graceful shutdown of the running daemon and waits for
+// it to actually exit, so a caller that gets a nil error back knows every
+// file (catalog, vector index, lumen's socket) is fully released, not
+// just that the HTTP port stopped answering. Returns ErrNoDaemonRunning
+// if nothing was listening in the first place.
+func (c *Client) Stop(ctx context.Context) error {
+	statusCode, status, _, err := c.do(ctx, http.MethodPost, "/v1/shutdown", nil)
+	if isConnectionRefused(err) {
+		return ErrNoDaemonRunning
+	}
+	if err != nil {
+		return fmt.Errorf("requesting shutdown: %w", err)
+	}
+	if statusCode >= 400 {
+		return fmt.Errorf("shutdown request returned %s", status)
+	}
+	return c.waitForDaemonLockToRelease(ctx)
+}
+
+// waitForDaemonLockToRelease blocks until the previous daemon has fully
+// released daemon.lock, which it holds for its complete lifetime (see
+// acquireDaemonLock in cli/serve.go) and which the OS releases the
+// instant the process exits, even on a crash. This is deliberately not
+// "wait until the HTTP port stops answering": listener.Close() runs
+// before dp.Close() (stops lumen) and cat.Close() in the shutdown
+// sequence, so the port can go quiet while the process is still mid
+// cleanup — confirmed by hand: PID still alive nearly a second after
+// /v1/status started refusing connections. The lock is the same
+// authoritative "fully gone" signal the on-demand daemon spawn (#13)
+// already relies on to know a replacement can safely start.
+func (c *Client) waitForDaemonLockToRelease(ctx context.Context) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	path := c.cfg.DaemonLockPath()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if released, err := tryAcquireAndRelease(path); err != nil {
+			return fmt.Errorf("checking daemon lock: %w", err)
+		} else if released {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("daemon did not fully exit within 15s of the shutdown request")
+		case <-ticker.C:
+		}
+	}
+}
+
+func tryAcquireAndRelease(path string) (bool, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return false, nil
+		}
+		return false, err
+	}
+	_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+	return true, nil
 }
 
 // Events opens a long-lived connection to GET /v1/events (SSE), starting

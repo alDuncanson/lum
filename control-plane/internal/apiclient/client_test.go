@@ -3,16 +3,20 @@ package apiclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/alDuncanson/lum/control-plane/internal/config"
 	"github.com/alDuncanson/lum/control-plane/internal/events"
@@ -278,4 +282,97 @@ func TestEventsAppliesTypesFilterAsQueryParam(t *testing.T) {
 	if want := "types=document_ingested%2Cdocument_failed"; gotQuery != want {
 		t.Fatalf("query = %q, want %q", gotQuery, want)
 	}
+}
+
+func TestStopReturnsErrNoDaemonRunningWhenNothingIsListening(t *testing.T) {
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := reserved.Addr().String()
+	_ = reserved.Close()
+
+	cfg := config.Config{DataDir: t.TempDir(), HTTPAddr: addr}
+	client := &Client{
+		base: cfg.BaseURL(), cfg: cfg, httpClient: http.DefaultClient,
+		spawn: func(config.Config) error {
+			t.Fatal("Stop must never trigger the on-demand auto-spawn (#13)")
+			return nil
+		},
+	}
+
+	if err := client.Stop(context.Background()); !errors.Is(err, ErrNoDaemonRunning) {
+		t.Fatalf("err = %v, want ErrNoDaemonRunning", err)
+	}
+}
+
+// TestStopWaitsForTheDaemonLockToActuallyRelease reproduces, by hand, a
+// real race found while testing this feature live: the HTTP port can
+// stop answering well before the process has actually exited (listener
+// Close() runs before dp.Close()/cat.Close() in the shutdown sequence),
+// so Stop must confirm the daemon.lock flock is released -- the same
+// authoritative signal the on-demand daemon spawn (#13) already relies
+// on -- not just that the port went quiet.
+func TestStopWaitsForTheDaemonLockToActuallyRelease(t *testing.T) {
+	cfg := config.Config{DataDir: t.TempDir()}
+
+	// Simulate the real daemon: it holds daemon.lock for its entire
+	// lifetime and only releases it once fully shut down.
+	lockFile, err := os.OpenFile(cfg.DaemonLockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+
+	const shutdownDelay = 150 * time.Millisecond
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/shutdown", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		// The HTTP response lands immediately; the lock (standing in for
+		// the rest of the real shutdown sequence) releases later.
+		go func() {
+			time.Sleep(shutdownDelay)
+			_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+			close(released)
+		}()
+	})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: mux}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	cfg.HTTPAddr = listener.Addr().String()
+	client := &Client{
+		base: cfg.BaseURL(), cfg: cfg, httpClient: http.DefaultClient,
+		spawn: func(config.Config) error {
+			t.Fatal("Stop must never trigger the on-demand auto-spawn (#13)")
+			return nil
+		},
+	}
+
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := client.Stop(ctx); err != nil {
+		t.Fatalf("Stop returned %v, want nil once the daemon lock is released", err)
+	}
+	if elapsed := time.Since(started); elapsed < shutdownDelay {
+		t.Fatalf("Stop returned after %v, want it to wait out the %v lock release", elapsed, shutdownDelay)
+	}
+
+	// Wait for the background goroutine to fully finish (not just for its
+	// Flock call to land) before touching lockFile ourselves, so closing
+	// it here can't race with that goroutine's own use of the fd.
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("background lock-release goroutine never finished")
+	}
+	_ = lockFile.Close()
 }

@@ -11,6 +11,7 @@
 //	GET    /v1/search?q=...&limit=10&source=<id>          semantic search
 //	GET    /v1/status                                    daemon + data plane health
 //	GET    /v1/events[?types=k1,k2]                       SSE event stream
+//	POST   /v1/shutdown                                   graceful daemon shutdown
 package api
 
 import (
@@ -35,17 +36,25 @@ import (
 
 // Server wires HTTP handlers to the control plane's components.
 type Server struct {
-	catalog   *catalog.Catalog
-	dp        dataplane.DataPlane
-	ingestor  *ingest.Ingestor
-	bus       *events.Bus
-	onRequest func()
+	catalog    *catalog.Catalog
+	dp         dataplane.DataPlane
+	ingestor   *ingest.Ingestor
+	bus        *events.Bus
+	onRequest  func()
+	shutdownCh chan struct{}
 }
 
 // New wires a Server. bus may be nil, in which case no events are published
 // and GET /v1/events reports 503.
 func New(cat *catalog.Catalog, dp dataplane.DataPlane, ing *ingest.Ingestor, bus *events.Bus) *Server {
-	return &Server{catalog: cat, dp: dp, ingestor: ing, bus: bus}
+	return &Server{catalog: cat, dp: dp, ingestor: ing, bus: bus, shutdownCh: make(chan struct{}, 1)}
+}
+
+// ShutdownRequested fires once a client POSTs /v1/shutdown. The daemon's
+// main loop selects on it alongside the idle timer and OS signals so a
+// requested shutdown goes through the exact same ordered teardown.
+func (s *Server) ShutdownRequested() <-chan struct{} {
+	return s.shutdownCh
 }
 
 // Handler builds the route table (Go 1.22+ method-aware patterns). onRequest
@@ -63,6 +72,7 @@ func (s *Server) Handler(onRequest func()) http.Handler {
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
+	mux.HandleFunc("POST /v1/shutdown", s.handleShutdown)
 	return s.withRequestID(mux, onRequest)
 }
 
@@ -269,6 +279,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp.DataPlane = string(health.State)
 	resp.Detail = health.Detail
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleShutdown requests a graceful daemon shutdown. It responds before
+// signaling ShutdownRequested, so the client always sees the 202 even
+// though the daemon starts tearing down (server, data plane, catalog, in
+// that order, per serve.go) as soon as the main loop observes the signal.
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "shutting down"})
+	select {
+	case s.shutdownCh <- struct{}{}:
+	default: // already requested; no-op
+	}
 }
 
 // eventsHeartbeatInterval is a var, not a const, so tests can shrink it
