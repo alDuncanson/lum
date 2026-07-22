@@ -44,27 +44,34 @@ compute in another, a versioned gRPC contract between them.
 See [docs/architecture.md](docs/architecture.md) for the full design and
 the reasoning behind each decision.
 
-## Requirements
+## Install
 
-- Go ≥ 1.26
-- Rust (stable)
+lum uses a Nix flake to pin Go, Rust, protobuf tooling, and native build
+dependencies. With flakes enabled:
 
-That's the whole list. Protobuf codegen needs no `protoc` (buf for Go,
-protox for Rust); the vector store is embedded (qdrant-edge); the
-embedding model (BAAI/bge-small-en-v1.5, ~70 MB) downloads automatically
-on first run and is cached in the data dir.
+```sh
+nix profile install github:alDuncanson/lum
+```
+
+The embedding model (BAAI/bge-small-en-v1.5, ~70 MB) downloads automatically
+on first run and is cached in the data dir. There are no containers, API keys,
+or services to configure.
 
 ## Build and run
 
 ```sh
-make build        # builds bin/lum (Go) and bin/lumen (Rust)
-./bin/lum add ~/Documents      # register + index a directory
-./bin/lum status               # daemon health and index counts
-./bin/lum sources              # list registered sources
-./bin/lum search "..."         # semantic search
-./bin/lum top                   # htop-style live view of the pipeline
-./bin/lum stop                  # stop the daemon, if one is running
+nix build                         # result/bin/lum + result/bin/lumen
+nix run . -- add ~/Documents
+nix run . -- status
+nix run . -- search "..."
+nix run . -- top
+nix run . -- stop
 ```
+
+The flake also exposes `.#lum` and `.#lumen` as separate packages for release
+artifacts, plus `.#lum-full` (the default) with both binaries side-by-side.
+Normal users should install the combined package so the Go control plane can
+discover its supervised Rust data plane.
 
 The same API the CLI uses is available to anything else:
 
@@ -83,8 +90,40 @@ curl -N localhost:7420/v1/events                    # everything, live
 curl -N 'localhost:7420/v1/events?types=document_ingested,document_failed'
 ```
 
-Indexed file types: `.txt`, `.md` (see `internal/source/localdir.go` and
-`data-plane/src/pipeline/parser.rs` for how to add more).
+Indexed files include Markdown and common Go, Rust, Lua, Nix, Python,
+JavaScript/TypeScript, JVM, C/C++, shell, SQL, configuration, and web source
+extensions. Directory sources honor nested `.gitignore` files, including
+negation rules.
+
+## Neovim / Telescope
+
+The repository includes a Telescope extension that discovers the current Git
+root, registers it idempotently, indexes it, and searches it without separate
+`lum add` setup. Search results carry source line ranges, so selection and
+preview jump to the matching code.
+
+Install the combined binary package, add this repository to Neovim's runtime
+path with your plugin manager, then load the extension:
+
+```lua
+require("telescope").load_extension("lum")
+vim.keymap.set("n", "<leader>fs", function()
+  require("telescope").extensions.lum.lum()
+end)
+```
+
+Equivalent command: `:Telescope lum`. Optional configuration:
+
+```lua
+require("telescope").setup({
+  extensions = {
+    lum = { executable = "lum", limit = 50, debounce_ms = 200 },
+  },
+})
+```
+
+The picker invokes `lum search --root <workspace> --jsonl`; it does not access
+the catalog, vector files, REST API, or private gRPC service directly.
 
 ## MCP (local agents)
 
@@ -138,10 +177,30 @@ lum targets Unix-like systems because its private inter-process transport is a
 Unix domain socket.
 
 ```sh
-make test         # Go + Rust unit tests
-make proto        # regenerate Go code after editing proto/ (output is committed)
-make run          # build + serve
+nix develop                   # pinned Go 1.26 and Rust 1.97.1 shell
+go test ./...                 # from control-plane/
+cargo test                    # from data-plane/
+buf generate                  # regenerate committed Go protobufs
+nix flake check               # all flake checks
+nix run . -- serve            # build and run in the foreground
 ```
+
+For repeatable local performance measurements, build the combined package and
+run the isolated benchmark harness against a representative workspace:
+
+```sh
+nix build
+bash scripts/benchmark.sh --lum ./result/bin/lum --model-cache ~/.lum/models .
+```
+
+It emits JSON with cold-start latency, initial index-and-search time, warm
+query latency (min/median/p95/max), indexed document/chunk counts, and a
+resident-memory snapshot for both processes. The harness uses a temporary
+`LUM_DATA_DIR`, so it cannot alter the normal catalog or vector index; passing
+an existing model cache only avoids measuring the one-time model download.
+Results are machine- and corpus-specific, so the repository records the
+procedure rather than a misleading fixed benchmark number. Use `--runs`,
+`--query`, or `--addr` to adjust the run.
 
 The HTTP API listens on `127.0.0.1:7420` (`LUM_HTTP_ADDR` to change). The
 private data-plane gRPC hop uses `lumen.sock` under the owner-only data
@@ -171,5 +230,7 @@ re-downloading cached model files.
       delete reconciliation on rescan
 - [x] MCP server (`lum mcp`) so local agents can search and add sources
 - [x] Live watching (fsnotify), with manual/startup rescans as a correctness backstop
+- [x] Common source-code formats with nested `.gitignore` support
+- [x] Line-aware semantic results and a Telescope picker
 - [ ] Second parser (PDF or HTML) to exercise the parser seam
 - [ ] RSS source to exercise the source seam

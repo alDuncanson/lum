@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/alDuncanson/lum/control-plane/internal/apiclient"
+	"github.com/alDuncanson/lum/control-plane/internal/apiv1"
 )
 
 // addCmd registers a new source: `lum add ~/Documents`.
@@ -36,23 +39,60 @@ func addCmd() *cobra.Command {
 func searchCmd() *cobra.Command {
 	var limit int
 	var sourceID string
+	var root string
+	var jsonOutput bool
+	var jsonl bool
 
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Semantic search across everything lum has indexed",
 		Args:  cobra.MinimumNArgs(1),
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			if jsonOutput && jsonl {
+				return errors.New("--json and --jsonl are mutually exclusive")
+			}
+			if root != "" && sourceID != "" {
+				return errors.New("--root and --source cannot be combined")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := strings.Join(args, " ")
-			results, err := apiclient.New().Search(cmd.Context(), query, limit, sourceID)
+			api := apiclient.New()
+			if root != "" {
+				ensured, err := api.EnsureSource(cmd.Context(), root)
+				if err != nil {
+					return err
+				}
+				sourceID = ensured.Source.ID
+			}
+			results, err := api.Search(cmd.Context(), query, limit, sourceID)
 			if err != nil {
 				return err
+			}
+			encoder := json.NewEncoder(os.Stdout)
+			encoder.SetEscapeHTML(false)
+			if jsonOutput {
+				return encoder.Encode(apiv1.SearchEnvelope{Query: query, Results: results})
+			}
+			if jsonl {
+				for _, result := range results {
+					if err := encoder.Encode(result); err != nil {
+						return err
+					}
+				}
+				return nil
 			}
 			if len(results) == 0 {
 				fmt.Println("no results")
 				return nil
 			}
 			for i, r := range results {
-				fmt.Printf("%2d. %.3f  %s (chunk %d)\n", i+1, r.Score, r.URI, r.ChunkIndex)
+				location := r.URI
+				if r.StartLine > 0 {
+					location = fmt.Sprintf("%s:%d", location, r.StartLine)
+				}
+				fmt.Printf("%2d. %.3f  %s (chunk %d)\n", i+1, r.Score, location, r.ChunkIndex)
 				fmt.Printf("    %s\n\n", snippet(r.Text, 240))
 			}
 			return nil
@@ -60,6 +100,9 @@ func searchCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum results to return")
 	cmd.Flags().StringVar(&sourceID, "source", "", "restrict results to one source ID (see `lum sources`)")
+	cmd.Flags().StringVar(&root, "root", "", "ensure and search only this local workspace")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit a compact JSON search envelope")
+	cmd.Flags().BoolVar(&jsonl, "jsonl", false, "emit one compact JSON result per line")
 	return cmd
 }
 

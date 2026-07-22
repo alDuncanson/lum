@@ -4,7 +4,7 @@
 // (lumd) talks to the Rust data plane (lumen). Both sides generate code
 // from it:
 //
-//   - Go:   `make proto` runs buf + protoc-gen-go/protoc-gen-go-grpc and
+//   - Go:   `buf generate` inside `nix develop` runs the Go plugins and
 //           commits the output to control-plane/internal/gen/.
 //   - Rust: data-plane/build.rs compiles it at build time with protox
 //           (a pure-Rust protobuf compiler — no protoc install needed).
@@ -1048,7 +1048,11 @@ type SearchResult struct {
 	Score float32 `protobuf:"fixed32,5,opt,name=score,proto3" json:"score,omitempty"`
 	// The chunk text itself, so callers can show a snippet without
 	// re-reading the original file.
-	Text          string `protobuf:"bytes,6,opt,name=text,proto3" json:"text,omitempty"`
+	Text string `protobuf:"bytes,6,opt,name=text,proto3" json:"text,omitempty"`
+	// Inclusive 1-based line range in the original document. Zero means
+	// unknown (for example, a result ingested by an older data plane).
+	StartLine     uint32 `protobuf:"varint,7,opt,name=start_line,json=startLine,proto3" json:"start_line,omitempty"`
+	EndLine       uint32 `protobuf:"varint,8,opt,name=end_line,json=endLine,proto3" json:"end_line,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1125,6 +1129,20 @@ func (x *SearchResult) GetText() string {
 	return ""
 }
 
+func (x *SearchResult) GetStartLine() uint32 {
+	if x != nil {
+		return x.StartLine
+	}
+	return 0
+}
+
+func (x *SearchResult) GetEndLine() uint32 {
+	if x != nil {
+		return x.EndLine
+	}
+	return 0
+}
+
 var File_lum_v1_dataplane_proto protoreflect.FileDescriptor
 
 const file_lum_v1_dataplane_proto_rawDesc = "" +
@@ -1182,7 +1200,7 @@ const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"\x05limit\x18\x02 \x01(\rR\x05limit\x12\x1b\n" +
 	"\tsource_id\x18\x03 \x01(\tR\bsourceId\"@\n" +
 	"\x0eSearchResponse\x12.\n" +
-	"\aresults\x18\x01 \x03(\v2\x14.lum.v1.SearchResultR\aresults\"\xa9\x01\n" +
+	"\aresults\x18\x01 \x03(\v2\x14.lum.v1.SearchResultR\aresults\"\xe3\x01\n" +
 	"\fSearchResult\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1b\n" +
@@ -1191,7 +1209,10 @@ const file_lum_v1_dataplane_proto_rawDesc = "" +
 	"\vchunk_index\x18\x04 \x01(\rR\n" +
 	"chunkIndex\x12\x14\n" +
 	"\x05score\x18\x05 \x01(\x02R\x05score\x12\x12\n" +
-	"\x04text\x18\x06 \x01(\tR\x04text*\xb2\x01\n" +
+	"\x04text\x18\x06 \x01(\tR\x04text\x12\x1d\n" +
+	"\n" +
+	"start_line\x18\a \x01(\rR\tstartLine\x12\x19\n" +
+	"\bend_line\x18\b \x01(\rR\aendLine*\xb2\x01\n" +
 	"\x0eReadinessState\x12\x1f\n" +
 	"\x1bREADINESS_STATE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18READINESS_STATE_STARTING\x10\x01\x12%\n" +

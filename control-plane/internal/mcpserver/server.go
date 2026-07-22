@@ -20,8 +20,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/alDuncanson/lum/control-plane/internal/apiclient"
-	"github.com/alDuncanson/lum/control-plane/internal/catalog"
-	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
+	"github.com/alDuncanson/lum/control-plane/internal/apiv1"
 )
 
 // Run serves MCP over stdio until the client disconnects or ctx is
@@ -75,7 +74,7 @@ type searchInput struct {
 }
 
 type searchOutput struct {
-	Results []dataplane.SearchResult `json:"results"`
+	Results []apiv1.SearchResult `json:"results"`
 }
 
 func searchTool(api *apiclient.Client) mcp.ToolHandlerFor[searchInput, searchOutput] {
@@ -91,7 +90,7 @@ func searchTool(api *apiclient.Client) mcp.ToolHandlerFor[searchInput, searchOut
 			return nil, searchOutput{}, err
 		}
 		if results == nil {
-			results = []dataplane.SearchResult{}
+			results = []apiv1.SearchResult{}
 		}
 		return nil, searchOutput{Results: results}, nil
 	}
@@ -104,9 +103,9 @@ type addSourceInput struct {
 }
 
 type addSourceOutput struct {
-	Source  catalog.Source `json:"source"`
-	Created bool           `json:"created"`
-	Message string         `json:"message"`
+	Source  apiv1.Source `json:"source"`
+	Created bool         `json:"created"`
+	Message string       `json:"message"`
 }
 
 func addSourceTool(api *apiclient.Client) mcp.ToolHandlerFor[addSourceInput, addSourceOutput] {
@@ -117,7 +116,7 @@ func addSourceTool(api *apiclient.Client) mcp.ToolHandlerFor[addSourceInput, add
 		if err != nil {
 			return nil, addSourceOutput{}, err
 		}
-		msg := "source already registered; a rescan has been queued"
+		msg := "source already registered"
 		if res.Created {
 			msg = "source added; indexing runs in the background"
 		}
@@ -130,7 +129,7 @@ func addSourceTool(api *apiclient.Client) mcp.ToolHandlerFor[addSourceInput, add
 type listSourcesInput struct{}
 
 type listSourcesOutput struct {
-	Sources []catalog.Source `json:"sources"`
+	Sources []apiv1.Source `json:"sources"`
 }
 
 func listSourcesTool(api *apiclient.Client) mcp.ToolHandlerFor[listSourcesInput, listSourcesOutput] {
@@ -142,7 +141,7 @@ func listSourcesTool(api *apiclient.Client) mcp.ToolHandlerFor[listSourcesInput,
 			return nil, listSourcesOutput{}, err
 		}
 		if sources == nil {
-			sources = []catalog.Source{}
+			sources = []apiv1.Source{}
 		}
 		return nil, listSourcesOutput{Sources: sources}, nil
 	}

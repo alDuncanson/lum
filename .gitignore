@@ -1,6 +1,7 @@
 # Build outputs
 /bin/
 /data-plane/target/
+/result
 
 # Local tool installs (protoc plugins, etc.)
 /.tools/

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	dotignore "github.com/codeglyph/go-dotignore/v2"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -28,6 +29,56 @@ var indexableExtensions = map[string]string{
 	".text":     "text/plain",
 	".md":       "text/markdown",
 	".markdown": "text/markdown",
+	".go":       "text/x-go",
+	".rs":       "text/x-rust",
+	".lua":      "text/x-lua",
+	".nix":      "text/x-nix",
+	".py":       "text/x-python",
+	".pyi":      "text/x-python",
+	".js":       "text/javascript",
+	".mjs":      "text/javascript",
+	".cjs":      "text/javascript",
+	".jsx":      "text/jsx",
+	".ts":       "text/typescript",
+	".mts":      "text/typescript",
+	".cts":      "text/typescript",
+	".tsx":      "text/tsx",
+	".java":     "text/x-java-source",
+	".kt":       "text/x-kotlin",
+	".kts":      "text/x-kotlin",
+	".c":        "text/x-c",
+	".h":        "text/x-c",
+	".cc":       "text/x-c++",
+	".cpp":      "text/x-c++",
+	".cxx":      "text/x-c++",
+	".hh":       "text/x-c++",
+	".hpp":      "text/x-c++",
+	".hxx":      "text/x-c++",
+	".cs":       "text/x-csharp",
+	".rb":       "text/x-ruby",
+	".php":      "text/x-php",
+	".swift":    "text/x-swift",
+	".scala":    "text/x-scala",
+	".sc":       "text/x-scala",
+	".sh":       "text/x-shellscript",
+	".bash":     "text/x-shellscript",
+	".zsh":      "text/x-shellscript",
+	".fish":     "text/x-shellscript",
+	".sql":      "text/x-sql",
+	".yaml":     "text/yaml",
+	".yml":      "text/yaml",
+	".toml":     "text/x-toml",
+	".json":     "text/json",
+	".jsonc":    "text/json",
+	".html":     "text/html",
+	".htm":      "text/html",
+	".css":      "text/css",
+	".scss":     "text/x-scss",
+	".sass":     "text/x-sass",
+	".less":     "text/x-less",
+	".proto":    "text/x-protobuf",
+	".xml":      "text/xml",
+	".svg":      "text/xml",
 }
 
 // LocalDir indexes a directory tree on the local filesystem.
@@ -62,7 +113,11 @@ func (l *LocalDir) Type() string { return TypeLocalDir }
 // is the classic optimization — a good future exercise.
 func (l *LocalDir) Scan(ctx context.Context) ([]DocumentRef, error) {
 	var refs []DocumentRef
-	err := filepath.WalkDir(l.root, func(path string, d fs.DirEntry, err error) error {
+	ignores, err := dotignore.NewRepositoryMatcher(l.root)
+	if err != nil {
+		return nil, fmt.Errorf("loading gitignore rules: %w", err)
+	}
+	err = filepath.WalkDir(l.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Skip unreadable entries rather than failing the whole
 			// scan; one bad permission shouldn't hide every document.
@@ -80,6 +135,20 @@ func (l *LocalDir) Scan(ctx context.Context) ([]DocumentRef, error) {
 			if hiddenDirectory(l.root, path, d.Name()) {
 				return filepath.SkipDir
 			}
+			ignored, matchErr := ignoredPath(ignores, path, true)
+			if matchErr != nil {
+				return matchErr
+			}
+			if ignored {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		ignored, matchErr := ignoredPath(ignores, path, false)
+		if matchErr != nil {
+			return matchErr
+		}
+		if ignored {
 			return nil
 		}
 		mime, ok := indexableExtensions[strings.ToLower(filepath.Ext(path))]
@@ -116,7 +185,12 @@ func (l *LocalDir) Watch(ctx context.Context) (<-chan struct{}, <-chan error, er
 		}
 	}
 	directories := make(map[string]struct{})
-	if err := l.addWatchTree(watcher, l.root, directories); err != nil {
+	ignores, err := dotignore.NewRepositoryMatcher(l.root)
+	if err != nil {
+		_ = watcher.Close()
+		return nil, nil, fmt.Errorf("loading gitignore rules: %w", err)
+	}
+	if err := l.addWatchTree(watcher, l.root, directories, ignores); err != nil {
 		_ = watcher.Close()
 		return nil, nil, err
 	}
@@ -148,6 +222,7 @@ func (l *LocalDir) Watch(ctx context.Context) (<-chan struct{}, <-chan error, er
 				if event.Name != l.root && !strings.HasPrefix(event.Name, l.root+string(os.PathSeparator)) {
 					continue
 				}
+				isIgnoreFile := filepath.Base(event.Name) == ".gitignore"
 				_, isDirectory := directories[event.Name]
 				if event.Has(fsnotify.Create) {
 					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
@@ -155,12 +230,22 @@ func (l *LocalDir) Watch(ctx context.Context) (<-chan struct{}, <-chan error, er
 							continue
 						}
 						isDirectory = true
-						if err := l.addWatchTree(watcher, event.Name, directories); err != nil {
+						ignored, matchErr := ignoredPath(ignores, event.Name, true)
+						if matchErr == nil && ignored {
+							continue
+						}
+						if err := l.addWatchTree(watcher, event.Name, directories, ignores); err != nil {
 							select {
 							case failures <- err:
 							default:
 							}
 						}
+					}
+				}
+				if !isIgnoreFile && !isDirectory {
+					ignored, matchErr := ignoredPath(ignores, event.Name, false)
+					if matchErr == nil && ignored {
+						continue
 					}
 				}
 				if isDirectory && event.Has(fsnotify.Rename) {
@@ -182,6 +267,17 @@ func (l *LocalDir) Watch(ctx context.Context) (<-chan struct{}, <-chan error, er
 						}
 					}
 				}
+				if isIgnoreFile {
+					if refreshed, refreshErr := dotignore.NewRepositoryMatcher(l.root); refreshErr == nil {
+						ignores = refreshed
+						if err := l.addWatchTree(watcher, l.root, directories, ignores); err != nil {
+							select {
+							case failures <- err:
+							default:
+							}
+						}
+					}
+				}
 				if l.relevantWatchEvent(event, isDirectory) {
 					select {
 					case changes <- struct{}{}:
@@ -194,7 +290,7 @@ func (l *LocalDir) Watch(ctx context.Context) (<-chan struct{}, <-chan error, er
 	return changes, failures, nil
 }
 
-func (l *LocalDir) addWatchTree(watcher *fsnotify.Watcher, root string, directories map[string]struct{}) error {
+func (l *LocalDir) addWatchTree(watcher *fsnotify.Watcher, root string, directories map[string]struct{}, ignores *dotignore.RepositoryMatcher) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -205,10 +301,19 @@ func (l *LocalDir) addWatchTree(watcher *fsnotify.Watcher, root string, director
 		if hiddenDirectory(l.root, path, d.Name()) {
 			return filepath.SkipDir
 		}
-		if err := watcher.Add(path); err != nil {
-			return fmt.Errorf("watching %s: %w", path, err)
+		ignored, matchErr := ignoredPath(ignores, path, true)
+		if matchErr != nil {
+			return matchErr
 		}
-		directories[path] = struct{}{}
+		if ignored {
+			return filepath.SkipDir
+		}
+		if _, watched := directories[path]; !watched {
+			if err := watcher.Add(path); err != nil {
+				return fmt.Errorf("watching %s: %w", path, err)
+			}
+			directories[path] = struct{}{}
+		}
 		return nil
 	})
 }
@@ -220,10 +325,20 @@ func (l *LocalDir) relevantWatchEvent(event fsnotify.Event, isDirectory bool) bo
 	if isDirectory {
 		return true
 	}
+	if filepath.Base(event.Name) == ".gitignore" {
+		return true
+	}
 	if _, ok := indexableExtensions[strings.ToLower(filepath.Ext(event.Name))]; ok {
 		return true
 	}
 	return false
+}
+
+func ignoredPath(ignores *dotignore.RepositoryMatcher, path string, directory bool) (bool, error) {
+	if directory {
+		path += string(os.PathSeparator)
+	}
+	return ignores.Matches(path)
 }
 
 func hiddenDirectory(root, path, name string) bool {

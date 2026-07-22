@@ -10,7 +10,112 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	dotignore "github.com/codeglyph/go-dotignore/v2"
+	"github.com/fsnotify/fsnotify"
 )
+
+func TestLocalDirScanIncludesSourceCodeExtensions(t *testing.T) {
+	root := t.TempDir()
+	wanted := []string{"main.go", "lib.rs", "app.tsx", "model.py", "query.sql", "schema.proto", "config.yaml", "page.html"}
+	for _, name := range append(wanted, "image.png") {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src, err := NewLocalDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]string)
+	for _, ref := range refs {
+		got[filepath.Base(ref.URI)] = ref.MimeType
+	}
+	for _, name := range wanted {
+		if mime := got[name]; !strings.HasPrefix(mime, "text/") {
+			t.Errorf("%s MIME = %q, want parser-compatible text/*", name, mime)
+		}
+	}
+	if _, ok := got["image.png"]; ok {
+		t.Error("image.png was indexed")
+	}
+}
+
+func TestLocalDirScanRespectsHierarchicalGitignore(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, ".gitignore"), "ignored/\n*.generated.ts\n*.ts\n")
+	writeTestFile(t, filepath.Join(root, "keep.go"), "package keep")
+	writeTestFile(t, filepath.Join(root, "ignored", "hidden.go"), "package hidden")
+	writeTestFile(t, filepath.Join(root, "src", "drop.generated.ts"), "drop")
+	writeTestFile(t, filepath.Join(root, "src", "normal.ts"), "drop")
+	writeTestFile(t, filepath.Join(root, "src", "special.ts"), "keep")
+	writeTestFile(t, filepath.Join(root, "src", ".gitignore"), "!special.ts\n")
+
+	src, err := NewLocalDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, ref := range refs {
+		rel, _ := filepath.Rel(root, ref.URI)
+		got = append(got, filepath.ToSlash(rel))
+	}
+	if strings.Join(got, ",") != "keep.go,src/special.ts" {
+		t.Fatalf("indexed files = %v, want keep.go and nested-negated src/special.ts", got)
+	}
+}
+
+func TestAddWatchTreeExcludesGitignoredDirectories(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, ".gitignore"), "vendor/\n")
+	if err := os.MkdirAll(filepath.Join(root, "vendor", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src, err := NewLocalDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ignores, err := dotignore.NewRepositoryMatcher(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	directories := make(map[string]struct{})
+	if err := src.addWatchTree(watcher, root, directories, ignores); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := directories[filepath.Join(root, "vendor")]; ok {
+		t.Error("gitignored vendor directory was watched")
+	}
+	if _, ok := directories[filepath.Join(root, "src")]; !ok {
+		t.Error("visible src directory was not watched")
+	}
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestLocalDirWatchTracksNewSubdirectories(t *testing.T) {
 	root := t.TempDir()
@@ -32,6 +137,36 @@ func TestLocalDirWatchTracksNewSubdirectories(t *testing.T) {
 	waitForWatchChange(t, changes, failures)
 
 	if err := os.WriteFile(filepath.Join(subdir, "live.md"), []byte("live"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitForWatchChange(t, changes, failures)
+}
+
+func TestLocalDirWatchTracksDirectoryUnignoredAtRuntime(t *testing.T) {
+	root := t.TempDir()
+	ignored := filepath.Join(root, "ignored")
+	writeTestFile(t, filepath.Join(root, ".gitignore"), "ignored/\n")
+	if err := os.Mkdir(ignored, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	src, err := NewLocalDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	changes, failures, err := src.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitForWatchChange(t, changes, failures)
+
+	if err := os.WriteFile(filepath.Join(ignored, "visible.md"), []byte("visible"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	waitForWatchChange(t, changes, failures)

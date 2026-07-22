@@ -71,8 +71,8 @@ narrowness is the point: features above this line (MCP, and planned RSS
 sources and file watching) reuse these RPCs untouched — MCP shipped
 without changing a single one.
 
-Codegen without protoc:
-- Go: `make proto` → buf + protoc-gen-go(-grpc), output committed.
+Codegen is available in `nix develop` without a system protobuf toolchain:
+- Go: `buf generate` → protoc-gen-go(-grpc), output committed.
 - Rust: `build.rs` → protox at build time, nothing committed.
 
 ## Data ownership: one home per fact
@@ -86,7 +86,7 @@ vectors/    (data plane)      WHAT IT MEANS embeddings + chunk payloads
 The catalog is never asked "what matches this query?"; the vector store
 is never enumerated to answer "what have we ingested?". Search results
 are self-describing because chunk payloads carry their provenance
-(document id, source id, uri, text).
+(document id, source id, URI, text, and inclusive 1-based line range).
 
 ### Chunk identity and deletion
 

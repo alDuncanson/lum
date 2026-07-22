@@ -26,9 +26,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/alDuncanson/lum/control-plane/internal/catalog"
+	"github.com/alDuncanson/lum/control-plane/internal/apiv1"
 	"github.com/alDuncanson/lum/control-plane/internal/config"
-	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
 	"github.com/alDuncanson/lum/control-plane/internal/events"
 )
 
@@ -61,31 +60,34 @@ func New() *Client {
 // ---- typed API methods ----
 
 // AddSourceResult is the response of POST /v1/sources.
-type AddSourceResult struct {
-	Source  catalog.Source `json:"source"`
-	Created bool           `json:"created"` // false if the URI was already registered
-}
+type AddSourceResult = apiv1.AddSourceResponse
 
 // AddSource registers a source URI and queues an initial scan.
 func (c *Client) AddSource(ctx context.Context, uri string) (AddSourceResult, error) {
 	var out AddSourceResult
-	err := c.call(ctx, "POST", "/v1/sources", map[string]string{"uri": uri}, &out)
+	err := c.call(ctx, "POST", "/v1/sources", apiv1.AddSourceRequest{URI: uri}, &out)
+	return out, err
+}
+
+// EnsureSource registers a source if needed and waits for any tracked initial
+// scan attempt to finish.
+func (c *Client) EnsureSource(ctx context.Context, uri string) (AddSourceResult, error) {
+	var out AddSourceResult
+	err := c.call(ctx, "POST", "/v1/sources?wait=initial", apiv1.AddSourceRequest{URI: uri}, &out)
 	return out, err
 }
 
 // ListSources returns every registered source.
-func (c *Client) ListSources(ctx context.Context) ([]catalog.Source, error) {
-	var out []catalog.Source
+func (c *Client) ListSources(ctx context.Context) ([]apiv1.Source, error) {
+	var out []apiv1.Source
 	err := c.call(ctx, "GET", "/v1/sources", nil, &out)
 	return out, err
 }
 
 // Search runs a semantic query and returns the nearest chunks. sourceID
 // restricts results to one source; empty means all sources.
-func (c *Client) Search(ctx context.Context, query string, limit int, sourceID string) ([]dataplane.SearchResult, error) {
-	var out struct {
-		Results []dataplane.SearchResult `json:"results"`
-	}
+func (c *Client) Search(ctx context.Context, query string, limit int, sourceID string) ([]apiv1.SearchResult, error) {
+	var out apiv1.SearchEnvelope
 	path := fmt.Sprintf("/v1/search?q=%s&limit=%d", url.QueryEscape(query), limit)
 	if sourceID != "" {
 		path += "&source=" + url.QueryEscape(sourceID)
@@ -95,13 +97,7 @@ func (c *Client) Search(ctx context.Context, query string, limit int, sourceID s
 }
 
 // Status is the response of GET /v1/status.
-type Status struct {
-	Daemon    string                  `json:"daemon"`
-	DataPlane string                  `json:"data_plane"`
-	Detail    string                  `json:"detail"`
-	Stats     catalog.Stats           `json:"stats"`
-	Failures  []catalog.IngestFailure `json:"failures"`
-}
+type Status = apiv1.Status
 
 // Status reports daemon health, data plane health, and index counts.
 func (c *Client) Status(ctx context.Context) (Status, error) {

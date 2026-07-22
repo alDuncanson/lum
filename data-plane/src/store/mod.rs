@@ -31,6 +31,8 @@ pub struct Hit {
     pub chunk_index: u32,
     pub score: f32,
     pub text: String,
+    pub start_line: u32,
+    pub end_line: u32,
 }
 
 /// Storage + retrieval for embedded chunks.

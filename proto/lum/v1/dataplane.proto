@@ -4,7 +4,7 @@
 // (lumd) talks to the Rust data plane (lumen). Both sides generate code
 // from it:
 //
-//   - Go:   `make proto` runs buf + protoc-gen-go/protoc-gen-go-grpc and
+//   - Go:   `buf generate` inside `nix develop` runs the Go plugins and
 //           commits the output to control-plane/internal/gen/.
 //   - Rust: data-plane/build.rs compiles it at build time with protox
 //           (a pure-Rust protobuf compiler — no protoc install needed).
@@ -205,4 +205,8 @@ message SearchResult {
   // The chunk text itself, so callers can show a snippet without
   // re-reading the original file.
   string text = 6;
+  // Inclusive 1-based line range in the original document. Zero means
+  // unknown (for example, a result ingested by an older data plane).
+  uint32 start_line = 7;
+  uint32 end_line = 8;
 }

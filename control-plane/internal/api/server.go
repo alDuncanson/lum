@@ -21,10 +21,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/alDuncanson/lum/control-plane/internal/apiv1"
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
 	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
 	"github.com/alDuncanson/lum/control-plane/internal/events"
@@ -42,6 +44,7 @@ type Server struct {
 	bus        *events.Bus
 	onRequest  func()
 	shutdownCh chan struct{}
+	sourceMu   sync.Mutex
 }
 
 // New wires a Server. bus may be nil, in which case no events are published
@@ -127,20 +130,8 @@ func (s *Server) withRequestID(next http.Handler, onRequest func()) http.Handler
 
 // ---- handlers ----
 
-type addSourceRequest struct {
-	URI string `json:"uri"`
-}
-
-type addSourceResponse struct {
-	Source  catalog.Source `json:"source"`
-	Created bool           `json:"created"` // false if URI was already registered
-}
-
 func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDataPlaneReady(w, r) {
-		return
-	}
-	var req addSourceRequest
+	var req apiv1.AddSourceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URI == "" {
 		httpError(w, http.StatusBadRequest, "body must be JSON like {\"uri\": \"~/Documents\"}")
 		return
@@ -154,6 +145,10 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialize the catalog insert with initial-attempt registration. Without
+	// this, a concurrent ensure can observe the new row just before its creator
+	// registers the daemon-owned attempt and incorrectly treat it as established.
+	s.sourceMu.Lock()
 	row, created, err := s.catalog.AddSource(r.Context(), catalog.Source{
 		ID:        uuid.NewString(),
 		Type:      src.Type(),
@@ -161,17 +156,28 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
+		s.sourceMu.Unlock()
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// Scan asynchronously: registering a big directory shouldn't hold
-	// the HTTP request open. 202 tells the client work is in progress;
-	// progress is observable via `lum status`.
-	s.ingestor.WatchSource(row.ID)
-	s.ingestor.EnqueueScan(r.Context(), row.ID)
+	// The initial attempt is registered before it is queued, so concurrent
+	// ensure callers can reliably join it.
+	if created {
+		s.dp.EnsureRunning()
+		s.ingestor.EnqueueInitialScan(r.Context(), row.ID)
+		s.ingestor.WatchSource(row.ID)
+	}
+	s.sourceMu.Unlock()
 
-	writeJSON(w, http.StatusAccepted, addSourceResponse{Source: row, Created: created})
+	if r.URL.Query().Get("wait") == "initial" {
+		if err := s.ingestor.WaitInitialScan(r.Context(), row.ID); err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusAccepted, apiv1.AddSourceResponse{Source: sourceDTO(row), Created: created})
 }
 
 func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
@@ -183,20 +189,22 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 	if sources == nil {
 		sources = []catalog.Source{} // JSON [] instead of null
 	}
-	writeJSON(w, http.StatusOK, sources)
+	out := make([]apiv1.Source, 0, len(sources))
+	for _, item := range sources {
+		out = append(out, sourceDTO(item))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleScanSource(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDataPlaneReady(w, r) {
-		return
-	}
 	id := r.PathValue("id")
 	if _, err := s.catalog.GetSource(r.Context(), id); err != nil {
 		httpError(w, http.StatusNotFound, "no source with id "+id)
 		return
 	}
 	s.ingestor.EnqueueScan(r.Context(), id)
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "scan queued"})
+	s.dp.EnsureRunning()
+	writeJSON(w, http.StatusAccepted, apiv1.StatusResponse{Status: "scan queued"})
 }
 
 // handleDeleteSource removes a source and every vector it produced.
@@ -205,9 +213,6 @@ func (s *Server) handleScanSource(w http.ResponseWriter, r *http.Request) {
 // temporarily unavailable) leaves the source in place with a clear
 // error rather than reporting success while vectors linger (#4).
 func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDataPlaneReady(w, r) {
-		return
-	}
 	id := r.PathValue("id")
 	if _, err := s.catalog.GetSource(r.Context(), id); err != nil {
 		httpError(w, http.StatusNotFound, "no source with id "+id)
@@ -217,13 +222,10 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	writeJSON(w, http.StatusOK, apiv1.StatusResponse{Status: "deleted"})
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDataPlaneReady(w, r) {
-		return
-	}
 	query := r.URL.Query().Get("q")
 	if query == "" {
 		httpError(w, http.StatusBadRequest, "missing query parameter q")
@@ -245,18 +247,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadGateway, "data plane search failed: "+err.Error())
 		return
 	}
-	if results == nil {
-		results = []dataplane.SearchResult{}
+	out := make([]apiv1.SearchResult, 0, len(results))
+	for _, item := range results {
+		out = append(out, searchResultDTO(item))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"query": query, "results": results})
-}
-
-type statusResponse struct {
-	Daemon    string                  `json:"daemon"`
-	DataPlane string                  `json:"data_plane"`
-	Detail    string                  `json:"detail,omitempty"`
-	Stats     catalog.Stats           `json:"stats"`
-	Failures  []catalog.IngestFailure `json:"failures"`
+	writeJSON(w, http.StatusOK, apiv1.SearchEnvelope{Query: query, Results: out})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -274,7 +269,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		failures = []catalog.IngestFailure{}
 	}
 	stats.Failures = len(failures)
-	resp := statusResponse{Daemon: "ok", Stats: stats, Failures: failures}
+	failureDTOs := make([]apiv1.IngestFailure, 0, len(failures))
+	for _, f := range failures {
+		failureDTOs = append(failureDTOs, apiv1.IngestFailure{SourceID: f.SourceID, URI: f.URI, Attempts: f.Attempts, Error: f.Error, FailedAt: f.FailedAt})
+	}
+	resp := apiv1.Status{Daemon: "ok", Stats: apiv1.Stats{Sources: stats.Sources, Documents: stats.Documents, Chunks: stats.Chunks, Failures: stats.Failures}, Failures: failureDTOs}
 	health, _ := s.dp.Health(r.Context())
 	resp.DataPlane = string(health.State)
 	resp.Detail = health.Detail
@@ -380,19 +379,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) requireDataPlaneReady(w http.ResponseWriter, r *http.Request) bool {
-	// Health alone never wakes a shed data plane (see DataPlane's doc
-	// comment) — a real request like this one is what's supposed to.
-	s.dp.EnsureRunning()
-	health, err := s.dp.Health(r.Context())
-	if err == nil && health.State == dataplane.StateReady {
-		return true
-	}
-	httpError(w, http.StatusServiceUnavailable, "data plane is "+string(health.State)+": "+health.Detail)
-	return false
-}
-
 // ---- helpers ----
+
+func sourceDTO(s catalog.Source) apiv1.Source {
+	return apiv1.Source{ID: s.ID, Type: s.Type, URI: s.URI, CreatedAt: s.CreatedAt}
+}
+func searchResultDTO(r dataplane.SearchResult) apiv1.SearchResult {
+	return apiv1.SearchResult{DocumentID: r.DocumentID, SourceID: r.SourceID, URI: r.URI, ChunkIndex: r.ChunkIndex, Score: r.Score, Text: r.Text, StartLine: r.StartLine, EndLine: r.EndLine}
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -403,5 +397,5 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func httpError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	writeJSON(w, status, apiv1.Error{Error: message})
 }

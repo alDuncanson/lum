@@ -26,7 +26,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 # --- The pipeline ---
 # Local embedding inference via ONNX Runtime. Models are downloaded to
 # our data dir on first use; no API keys, no network at query time.
-fastembed = "5"
+fastembed = { version = "5", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries-native-tls"] }
 # Embedded vector search engine from the Qdrant project. Runs entirely
 # in-process; data lives under ~/.lum/vectors. Beta, but its API surface
 # we use (update/query) is small and wrapped behind our VectorStore trait

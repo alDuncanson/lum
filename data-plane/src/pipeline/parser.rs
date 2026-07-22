@@ -9,6 +9,14 @@
 use anyhow::Result;
 use std::fmt;
 
+/// Text extracted from a document, together with its first original
+/// source line. Parsers that remove a prefix must adjust `starting_line`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedText {
+    pub text: String,
+    pub starting_line: u32,
+}
+
 /// Marks an error as the caller's fault (unsupported/invalid input), not
 /// an internal failure. `service::run_blocking` downcasts for this to
 /// return `Status::invalid_argument` instead of a blanket
@@ -35,7 +43,7 @@ pub trait Parser: Send + Sync {
     fn supports(&self, mime_type: &str) -> bool;
 
     /// Extract the human-readable text that should be indexed.
-    fn parse(&self, content: &[u8]) -> Result<String>;
+    fn parse(&self, content: &[u8]) -> Result<ParsedText>;
 }
 
 /// Ordered collection of parsers. Order matters: the first parser whose
@@ -54,7 +62,7 @@ impl ParserRegistry {
     }
 
     /// Parse `content` using the first parser that supports `mime_type`.
-    pub fn parse(&self, mime_type: &str, content: &[u8]) -> Result<String> {
+    pub fn parse(&self, mime_type: &str, content: &[u8]) -> Result<ParsedText> {
         let Some(parser) = self.parsers.iter().find(|p| p.supports(mime_type)) else {
             return Err(InvalidArgument(format!(
                 "no parser registered for MIME type {mime_type:?}"
@@ -74,8 +82,11 @@ impl Parser for PlainTextParser {
         mime_type.starts_with("text/")
     }
 
-    fn parse(&self, content: &[u8]) -> Result<String> {
-        Ok(String::from_utf8_lossy(content).into_owned())
+    fn parse(&self, content: &[u8]) -> Result<ParsedText> {
+        Ok(ParsedText {
+            text: String::from_utf8_lossy(content).into_owned(),
+            starting_line: 1,
+        })
     }
 }
 
@@ -91,31 +102,40 @@ impl Parser for MarkdownParser {
         mime_type == "text/markdown"
     }
 
-    fn parse(&self, content: &[u8]) -> Result<String> {
+    fn parse(&self, content: &[u8]) -> Result<ParsedText> {
         let text = String::from_utf8_lossy(content);
-        Ok(strip_front_matter(&text).to_owned())
+        let (text, starting_line) = strip_front_matter(&text);
+        Ok(ParsedText {
+            text: text.to_owned(),
+            starting_line,
+        })
     }
 }
 
 /// If `text` begins with a `---` fenced YAML block, return the content
 /// after the closing fence; otherwise return the input unchanged.
-fn strip_front_matter(text: &str) -> &str {
+fn strip_front_matter(text: &str) -> (&str, u32) {
     let Some(rest) = text
         .strip_prefix("---\n")
         .or_else(|| text.strip_prefix("---\r\n"))
     else {
-        return text;
+        return (text, 1);
     };
     // Walk line by line looking for the closing fence.
     let mut offset = 0;
     for line in rest.split_inclusive('\n') {
         if line.trim_end() == "---" {
-            return &rest[offset + line.len()..];
+            let body = &rest[offset + line.len()..];
+            let removed_len = text.len() - body.len();
+            return (
+                body,
+                1 + text[..removed_len].bytes().filter(|b| *b == b'\n').count() as u32,
+            );
         }
         offset += line.len();
     }
     // No closing fence: treat the whole thing as content, not metadata.
-    text
+    (text, 1)
 }
 
 #[cfg(test)]
@@ -126,9 +146,19 @@ mod tests {
     fn registry_prefers_specific_parser() {
         let registry = ParserRegistry::with_defaults();
         let md = b"---\ntags: [a, b]\n---\n# Hello";
-        assert_eq!(registry.parse("text/markdown", md).unwrap(), "# Hello");
+        assert_eq!(
+            registry.parse("text/markdown", md).unwrap(),
+            ParsedText {
+                text: "# Hello".to_owned(),
+                starting_line: 4
+            }
+        );
         // Plain text keeps the front matter verbatim.
-        assert!(registry.parse("text/plain", md).unwrap().starts_with("---"));
+        assert!(registry
+            .parse("text/plain", md)
+            .unwrap()
+            .text
+            .starts_with("---"));
     }
 
     #[test]
@@ -149,6 +179,18 @@ mod tests {
 
     #[test]
     fn front_matter_without_close_is_kept() {
-        assert_eq!(strip_front_matter("---\nunclosed"), "---\nunclosed");
+        assert_eq!(strip_front_matter("---\nunclosed"), ("---\nunclosed", 1));
+    }
+
+    #[test]
+    fn markdown_front_matter_preserves_crlf_line_provenance() {
+        let parsed = ParserRegistry::with_defaults()
+            .parse(
+                "text/markdown",
+                b"---\r\ntitle: x\r\n---\r\nfirst\r\nsecond",
+            )
+            .unwrap();
+        assert_eq!(parsed.text, "first\r\nsecond");
+        assert_eq!(parsed.starting_line, 4);
     }
 }

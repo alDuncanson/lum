@@ -113,7 +113,7 @@ func (s *Supervisor) Stop() {
 
 // findLumen resolves the lumen binary path, in priority order:
 //  1. explicit path (LUM_LUMEN_PATH / --lumen flag),
-//  2. next to the lum executable (how `make build` lays out bin/),
+//  2. next to the lum executable (as provided by `nix build`),
 //  3. $PATH.
 func findLumen(explicit string) (string, error) {
 	if explicit != "" {
@@ -132,5 +132,5 @@ func findLumen(explicit string) (string, error) {
 		return fromPath, nil
 	}
 	return "", fmt.Errorf(
-		"lumen binary not found: build it with `make build` (looked next to lum and in $PATH; override with LUM_LUMEN_PATH)")
+		"lumen binary not found: build it with `nix build` (looked next to lum and in $PATH; override with LUM_LUMEN_PATH)")
 }

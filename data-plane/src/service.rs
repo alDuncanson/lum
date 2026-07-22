@@ -23,6 +23,19 @@ use crate::pipeline::{
 };
 use crate::store::{edge::EdgeStore, DocumentMeta, VectorStore};
 
+fn search_result_from_hit(hit: crate::store::Hit) -> pb::SearchResult {
+    pb::SearchResult {
+        document_id: hit.document_id,
+        source_id: hit.source_id,
+        uri: hit.uri,
+        chunk_index: hit.chunk_index,
+        score: hit.score,
+        text: hit.text,
+        start_line: hit.start_line,
+        end_line: hit.end_line,
+    }
+}
+
 /// Must match the control plane's dataplane.ContractVersion.
 const CONTRACT_VERSION: &str = "2";
 const MAX_BATCH_DOCUMENTS: usize = 128;
@@ -401,7 +414,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
                 };
                 parse_duration += started.elapsed();
                 parsed_text_bytes = parsed_text_bytes
-                    .checked_add(text.len())
+                    .checked_add(text.text.len())
                     .ok_or_else(|| Status::resource_exhausted("parsed text is too large"))?;
                 if parsed_text_bytes > MAX_PARSED_TEXT_BYTES {
                     return Err(Status::resource_exhausted(
@@ -567,14 +580,7 @@ impl pb::data_plane_server::DataPlane for DataPlaneService {
                 let hits = p.store.search(vector, limit, source_filter)?;
                 Ok(hits
                     .into_iter()
-                    .map(|h| pb::SearchResult {
-                        document_id: h.document_id,
-                        source_id: h.source_id,
-                        uri: h.uri,
-                        chunk_index: h.chunk_index,
-                        score: h.score,
-                        text: h.text,
-                    })
+                    .map(search_result_from_hit)
                     .collect::<Vec<_>>())
             })
             .await?;
@@ -625,5 +631,20 @@ mod tests {
     fn pipeline_error_status_falls_back_to_internal_for_other_failures() {
         let status = pipeline_error_status(anyhow::anyhow!("store flush failed"));
         assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    #[test]
+    fn search_result_preserves_hit_line_range() {
+        let result = search_result_from_hit(crate::store::Hit {
+            document_id: "document".to_owned(),
+            source_id: "source".to_owned(),
+            uri: "/note.md".to_owned(),
+            chunk_index: 2,
+            score: 0.75,
+            text: "result text".to_owned(),
+            start_line: 12,
+            end_line: 17,
+        });
+        assert_eq!((result.start_line, result.end_line), (12, 17));
     }
 }

@@ -350,6 +350,8 @@ type SearchResult struct {
 	ChunkIndex uint32  `json:"chunk_index"`
 	Score      float32 `json:"score"`
 	Text       string  `json:"text"`
+	StartLine  uint32  `json:"start_line"`
+	EndLine    uint32  `json:"end_line"`
 }
 
 // Search embeds the query in the data plane and returns nearest chunks.
@@ -368,6 +370,8 @@ func (c *Client) Search(ctx context.Context, query string, limit uint32, sourceI
 			ChunkIndex: r.GetChunkIndex(),
 			Score:      r.GetScore(),
 			Text:       r.GetText(),
+			StartLine:  r.GetStartLine(),
+			EndLine:    r.GetEndLine(),
 		})
 	}
 	return results, nil

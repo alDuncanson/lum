@@ -10,6 +10,7 @@ package ingest
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 type scanRequest struct {
 	sourceID  string
 	requestID string
+	initial   *initialScanAttempt
 }
 
 type documentJobKind uint8
@@ -53,6 +55,7 @@ type scanRun struct {
 	requestID string
 	started   time.Time
 	done      chan struct{}
+	initial   *initialScanAttempt
 
 	ingested   int
 	unchanged  int
@@ -75,6 +78,26 @@ type debounceRequest struct {
 
 type retryRequest struct {
 	timer *time.Timer
+}
+
+type sourceState struct {
+	deleting bool
+	deleted  bool
+	delete   *deleteAttempt
+	active   *scanRun
+}
+
+type deleteAttempt struct {
+	done         chan struct{}
+	err          error
+	requestID    string
+	restoreWatch bool
+}
+
+type initialScanAttempt struct {
+	done      chan struct{}
+	err       error
+	completed bool
 }
 
 const (
@@ -103,6 +126,8 @@ type Ingestor struct {
 	scanOrder      []string
 	debounced      map[string]*debounceRequest
 	retries        map[string]*retryRequest
+	initialScans   map[string]*initialScanAttempt
+	sources        map[string]*sourceState
 	watching       map[string]context.CancelFunc
 	debounce       time.Duration
 	retryBase      time.Duration
@@ -124,6 +149,8 @@ func New(ctx context.Context, cat *catalog.Catalog, dp dataplane.DataPlane, bus 
 		pending:       make(map[string]scanRequest),
 		debounced:     make(map[string]*debounceRequest),
 		retries:       make(map[string]*retryRequest),
+		initialScans:  make(map[string]*initialScanAttempt),
+		sources:       make(map[string]*sourceState),
 		watching:      make(map[string]context.CancelFunc),
 		debounce:      debounceWindow,
 		retryBase:     retryBaseDelay,
@@ -173,6 +200,11 @@ func (i *Ingestor) setActiveWork(document, stage string) {
 // failed-scan logs for a source_id that no longer exists.
 func (i *Ingestor) WatchSource(sourceID string) {
 	i.mu.Lock()
+	state := i.sourceStateLocked(sourceID)
+	if state.deleting || state.deleted {
+		i.mu.Unlock()
+		return
+	}
 	if _, exists := i.watching[sourceID]; exists {
 		i.mu.Unlock()
 		return
@@ -205,50 +237,92 @@ func (i *Ingestor) StopWatching(sourceID string) {
 // place for a retry, rather than leaving a half-deleted source with no
 // way to finish cleanup.
 func (i *Ingestor) DeleteSource(ctx context.Context, sourceID string) error {
-	i.StopWatching(sourceID)
-	i.cancelQueuedScan(sourceID)
+	active, attempt, owner := i.beginDelete(sourceID, requestIDFrom(ctx))
+	if owner {
+		go i.runDelete(sourceID, active, attempt)
+	}
+	select {
+	case <-attempt.done:
+		return attempt.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (i *Ingestor) runDelete(sourceID string, active *scanRun, attempt *deleteAttempt) {
+	ctx := requestid.WithValue(i.ctx, attempt.requestID)
+	var deleteErr error
+	defer func() { i.endDelete(sourceID, attempt, deleteErr) }()
+	if active != nil {
+		select {
+		case <-active.done:
+		case <-ctx.Done():
+			deleteErr = ctx.Err()
+			return
+		}
+	}
 
 	documents, err := i.catalog.DocumentsBySource(ctx, sourceID)
 	if err != nil {
-		return err
+		deleteErr = err
+		return
 	}
 
-	run := &scanRun{sourceID: sourceID, requestID: requestIDFrom(ctx), started: time.Now(), done: make(chan struct{})}
+	run := &scanRun{sourceID: sourceID, requestID: attempt.requestID, started: time.Now(), done: make(chan struct{})}
 	for _, document := range documents {
 		if !i.sendJob(ctx, documentJob{kind: jobDelete, run: run, document: document}) {
-			return ctx.Err()
+			deleteErr = ctx.Err()
+			return
 		}
 	}
 	if !i.sendJob(ctx, documentJob{kind: jobScanComplete, run: run}) {
-		return ctx.Err()
+		deleteErr = ctx.Err()
+		return
 	}
 	select {
 	case <-run.done:
 	case <-ctx.Done():
-		return ctx.Err()
+		deleteErr = ctx.Err()
+		return
 	}
 
 	if run.err != nil {
-		return run.err
+		deleteErr = run.err
+		return
 	}
 	if run.failed > 0 {
-		return fmt.Errorf("%d of %d document(s) failed to delete; source not removed, retry the delete",
+		deleteErr = fmt.Errorf("%d of %d document(s) failed to delete; source not removed, retry the delete",
 			run.failed, len(documents))
+		return
 	}
-	return i.catalog.DeleteSource(ctx, sourceID)
+	deleteErr = i.catalog.DeleteSource(ctx, sourceID)
 }
 
-// cancelQueuedScan removes a source from the scan queue, its retry timer,
-// and any pending debounce, so a delete doesn't race a scan that's about
-// to start reconciling (and re-creating) the documents being removed. A
-// scan already in progress is left to finish; it's a narrow, harmless
-// race (see DeleteSource's doc comment).
-func (i *Ingestor) cancelQueuedScan(sourceID string) {
+func (i *Ingestor) sourceStateLocked(sourceID string) *sourceState {
+	if i.sources == nil {
+		i.sources = make(map[string]*sourceState)
+	}
+	if i.sources[sourceID] == nil {
+		i.sources[sourceID] = &sourceState{}
+	}
+	return i.sources[sourceID]
+}
+
+func (i *Ingestor) beginDelete(sourceID, requestID string) (*scanRun, *deleteAttempt, bool) {
 	i.mu.Lock()
-	defer i.mu.Unlock()
+	state := i.sourceStateLocked(sourceID)
+	if state.deleting {
+		i.mu.Unlock()
+		return nil, state.delete, false
+	}
+	state.deleting = true
+	cancel, watching := i.watching[sourceID]
+	delete(i.watching, sourceID)
+	state.delete = &deleteAttempt{done: make(chan struct{}), requestID: requestID, restoreWatch: watching}
 	i.cancelRetryLocked(sourceID)
-	if _, pending := i.pending[sourceID]; pending {
+	if request, pending := i.pending[sourceID]; pending {
 		delete(i.pending, sourceID)
+		i.completeInitialLocked(request.initial, errors.New("source deleted before initial scan completed"))
 		for index, id := range i.scanOrder {
 			if id == sourceID {
 				i.scanOrder = append(i.scanOrder[:index], i.scanOrder[index+1:]...)
@@ -260,6 +334,30 @@ func (i *Ingestor) cancelQueuedScan(sourceID string) {
 		request.timer.Stop()
 		delete(i.debounced, sourceID)
 	}
+	active, attempt := state.active, state.delete
+	i.mu.Unlock()
+	if watching {
+		cancel()
+	}
+	return active, attempt, true
+}
+
+func (i *Ingestor) endDelete(sourceID string, attempt *deleteAttempt, err error) {
+	restoreWatch := false
+	if err != nil && attempt.restoreWatch {
+		_, sourceErr := i.catalog.GetSource(i.ctx, sourceID)
+		restoreWatch = sourceErr == nil
+	}
+	i.mu.Lock()
+	state := i.sourceStateLocked(sourceID)
+	attempt.err = err
+	state.deleting = false
+	state.deleted = err == nil
+	i.mu.Unlock()
+	if restoreWatch {
+		i.WatchSource(sourceID)
+	}
+	close(attempt.done)
 }
 
 func (i *Ingestor) watchSource(ctx context.Context, sourceID string) {
@@ -337,8 +435,64 @@ func (i *Ingestor) periodicScans(ctx context.Context, sourceID string) {
 func (i *Ingestor) EnqueueScan(ctx context.Context, sourceID string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	state := i.sourceStateLocked(sourceID)
+	if state.deleting || state.deleted {
+		return
+	}
 	i.cancelRetryLocked(sourceID)
 	i.enqueueScanLocked(scanRequest{sourceID: sourceID, requestID: requestIDFrom(ctx)})
+}
+
+// EnqueueInitialScan registers a source's first authoritative scan and queues
+// it atomically. The attempt belongs to the daemon, not to the request context.
+func (i *Ingestor) EnqueueInitialScan(ctx context.Context, sourceID string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	state := i.sourceStateLocked(sourceID)
+	if state.deleting || state.deleted {
+		return
+	}
+	if i.initialScans == nil {
+		i.initialScans = make(map[string]*initialScanAttempt)
+	}
+	if _, exists := i.initialScans[sourceID]; exists {
+		return
+	}
+	attempt := &initialScanAttempt{done: make(chan struct{})}
+	i.initialScans[sourceID] = attempt
+	i.cancelRetryLocked(sourceID)
+	i.enqueueScanLocked(scanRequest{sourceID: sourceID, requestID: requestIDFrom(ctx), initial: attempt})
+}
+
+// WaitInitialScan joins a tracked initial scan. Established sources predating
+// this daemon-owned state have nothing to wait for and return immediately.
+func (i *Ingestor) WaitInitialScan(ctx context.Context, sourceID string) error {
+	i.mu.Lock()
+	attempt := i.initialScans[sourceID]
+	i.mu.Unlock()
+	if attempt == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-i.ctx.Done():
+		return i.ctx.Err()
+	case <-attempt.done:
+		i.mu.Lock()
+		err := attempt.err
+		i.mu.Unlock()
+		return err
+	}
+}
+
+func (i *Ingestor) completeInitialLocked(attempt *initialScanAttempt, err error) {
+	if attempt == nil || attempt.completed {
+		return
+	}
+	attempt.err = err
+	attempt.completed = true
+	close(attempt.done)
 }
 
 func (i *Ingestor) enqueueScanLocked(req scanRequest) {
@@ -360,6 +514,11 @@ func (i *Ingestor) enqueueScanLocked(req scanRequest) {
 func (i *Ingestor) EnqueueDebouncedScan(ctx context.Context, sourceID string) {
 	requestID := requestIDFrom(ctx)
 	i.mu.Lock()
+	state := i.sourceStateLocked(sourceID)
+	if state.deleting || state.deleted {
+		i.mu.Unlock()
+		return
+	}
 	if current := i.debounced[sourceID]; current != nil {
 		current.timer.Stop()
 	}
@@ -416,15 +575,11 @@ func (i *Ingestor) planner(ctx context.Context) {
 		case <-i.scanReady:
 		}
 
-		for req, ok := i.nextScan(); ok; req, ok = i.nextScan() {
-			run := &scanRun{
-				sourceID: req.sourceID, requestID: req.requestID,
-				started: time.Now(), done: make(chan struct{}),
-			}
+		for run, ok := i.nextScan(); ok; run, ok = i.nextScan() {
 			i.publish(events.Event{
 				Kind: events.KindScanStarted, RequestID: run.requestID, SourceID: run.sourceID,
 			})
-			scanCtx := requestid.WithValue(ctx, req.requestID)
+			scanCtx := requestid.WithValue(ctx, run.requestID)
 			planErr := i.planScan(scanCtx, run)
 			if !i.sendJob(ctx, documentJob{kind: jobScanComplete, run: run, err: planErr}) {
 				return
@@ -438,17 +593,24 @@ func (i *Ingestor) planner(ctx context.Context) {
 	}
 }
 
-func (i *Ingestor) nextScan() (scanRequest, bool) {
+func (i *Ingestor) nextScan() (*scanRun, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if len(i.scanOrder) == 0 {
-		return scanRequest{}, false
+	for len(i.scanOrder) > 0 {
+		sourceID := i.scanOrder[0]
+		i.scanOrder = i.scanOrder[1:]
+		req := i.pending[sourceID]
+		delete(i.pending, sourceID)
+		state := i.sourceStateLocked(sourceID)
+		if state.deleting || state.deleted {
+			i.completeInitialLocked(req.initial, errors.New("source deleted before initial scan completed"))
+			continue
+		}
+		run := &scanRun{sourceID: req.sourceID, requestID: req.requestID, started: time.Now(), done: make(chan struct{}), initial: req.initial}
+		state.active = run
+		return run, true
 	}
-	sourceID := i.scanOrder[0]
-	i.scanOrder = i.scanOrder[1:]
-	req := i.pending[sourceID]
-	delete(i.pending, sourceID)
-	return req, true
+	return nil, false
 }
 
 // planScan turns one authoritative source snapshot into document jobs. It
@@ -579,7 +741,7 @@ func (i *Ingestor) documentWorker(ctx context.Context) {
 					flush()
 				}
 				pending = append(pending, pendingDocument{
-					job: job, contentHash: job.ref.ContentHash,
+					job: job, contentHash: fmt.Sprintf("%x", sha256.Sum256(content)),
 					input: dataplane.IngestBatchDocument{
 						DocumentID: job.document.ID, SourceID: job.run.sourceID,
 						URI: job.ref.URI, MimeType: job.ref.MimeType, Content: content,
@@ -729,6 +891,14 @@ func (i *Ingestor) finishScan(run *scanRun) {
 	}
 	i.publish(event)
 	i.replaceRetry(run)
+	i.mu.Lock()
+	if state := i.sourceStateLocked(run.sourceID); state.active == run {
+		state.active = nil
+	}
+	if run.initial != nil {
+		i.completeInitialLocked(run.initial, run.err)
+	}
+	i.mu.Unlock()
 	close(run.done)
 }
 
@@ -736,6 +906,10 @@ func (i *Ingestor) replaceRetry(run *scanRun) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.cancelRetryLocked(run.sourceID)
+	state := i.sourceStateLocked(run.sourceID)
+	if state.deleting || state.deleted {
+		return
+	}
 	if run.retryAfter == 0 {
 		return
 	}

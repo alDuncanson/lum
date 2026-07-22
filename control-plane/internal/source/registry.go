@@ -57,5 +57,9 @@ func normalizePath(p string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolving path %q: %w", p, err)
 	}
-	return abs, nil
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolving symlinks in path %q: %w", abs, err)
+	}
+	return filepath.Clean(real), nil
 }

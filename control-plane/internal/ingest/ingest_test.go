@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"github.com/alDuncanson/lum/control-plane/internal/catalog"
 	"github.com/alDuncanson/lum/control-plane/internal/dataplane"
 	"github.com/alDuncanson/lum/control-plane/internal/events"
+	"github.com/alDuncanson/lum/control-plane/internal/source"
 )
 
 // stubDataPlane is a minimal dataplane.DataPlane for exercising the
@@ -20,6 +22,35 @@ import (
 type stubDataPlane struct {
 	failURIs      map[string]bool
 	failDeleteIDs map[string]bool
+}
+
+type blockingDeleteDataPlane struct {
+	stubDataPlane
+	started chan string
+	release <-chan struct{}
+	err     error
+}
+
+func (s blockingDeleteDataPlane) DeleteDocument(ctx context.Context, documentID string) error {
+	select {
+	case s.started <- documentID:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-s.release:
+		return s.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type changingSource struct{ content []byte }
+
+func (changingSource) Type() string                                       { return "test" }
+func (changingSource) Scan(context.Context) ([]source.DocumentRef, error) { return nil, nil }
+func (s changingSource) Read(context.Context, source.DocumentRef) ([]byte, error) {
+	return s.content, nil
 }
 
 func (stubDataPlane) Health(context.Context) (dataplane.HealthResult, error) {
@@ -68,6 +99,74 @@ func TestEnqueueScanDeduplicatesPendingSource(t *testing.T) {
 	ing.EnqueueScan(context.Background(), "source")
 	if got := len(ing.scanOrder); got != 1 {
 		t.Fatalf("pending follow-up scans = %d, want 1", got)
+	}
+}
+
+func TestInitialScanCanceledWaitDoesNotCancelAndSecondWaitJoins(t *testing.T) {
+	ing := queueOnlyIngestor(context.Background()) // nil event bus is intentional
+	ing.EnqueueInitialScan(context.Background(), "source")
+	run, ok := ing.nextScan()
+	if !ok || run.initial == nil {
+		t.Fatal("initial scan was not associated with its queued run")
+	}
+
+	firstCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := ing.WaitInitialScan(firstCtx, "source"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first wait error = %v, want context canceled", err)
+	}
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- ing.WaitInitialScan(context.Background(), "source") }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second wait returned before scan completion: %v", err)
+	default:
+	}
+	ing.finishScan(run)
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second wait error = %v", err)
+	}
+}
+
+func TestInitialScanCompletedAndEstablishedSourcesReturnImmediately(t *testing.T) {
+	ing := queueOnlyIngestor(context.Background())
+	if err := ing.WaitInitialScan(context.Background(), "established"); err != nil {
+		t.Fatalf("established source wait error = %v", err)
+	}
+	ing.EnqueueInitialScan(context.Background(), "completed")
+	run, ok := ing.nextScan()
+	if !ok {
+		t.Fatal("initial scan was not queued")
+	}
+	ing.finishScan(run)
+	if err := ing.WaitInitialScan(context.Background(), "completed"); err != nil {
+		t.Fatalf("completed source wait error = %v", err)
+	}
+}
+
+func TestDeleteCompletesPendingInitialScanWaiter(t *testing.T) {
+	ing := queueOnlyIngestor(context.Background())
+	ing.EnqueueInitialScan(context.Background(), "source")
+
+	_, attempt, owner := ing.beginDelete("source", "request")
+	if !owner {
+		t.Fatal("delete did not acquire gate")
+	}
+	if err := ing.WaitInitialScan(context.Background(), "source"); err == nil {
+		t.Fatal("initial scan waiter returned nil after its pending scan was deleted")
+	}
+	ing.endDelete("source", attempt, nil)
+}
+
+func TestInitialScanWaiterReturnsWhenIngestorStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ing := queueOnlyIngestor(ctx)
+	ing.EnqueueInitialScan(context.Background(), "source")
+	cancel()
+
+	if err := ing.WaitInitialScan(context.Background(), "source"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v, want context canceled", err)
 	}
 }
 
@@ -168,6 +267,35 @@ func TestDocumentWorkerTerminatesRunAfterPlanningError(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("document worker did not terminate failed run")
+	}
+}
+
+func TestDocumentWorkerPersistsHashOfReadBytes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cat := newDeleteSourceTestCatalog(t, "source")
+	ing := &Ingestor{catalog: cat, dp: stubDataPlane{}, jobs: make(chan documentJob, 2)}
+	run := &scanRun{sourceID: "source", requestID: "request", started: time.Now(), done: make(chan struct{})}
+	content := []byte("bytes changed after scan")
+	go ing.documentWorker(ctx)
+	ing.jobs <- documentJob{
+		kind: jobUpsert, run: run, source: changingSource{content: content},
+		ref:      source.DocumentRef{URI: "/document", ContentHash: "scan-time-hash"},
+		document: catalog.Document{ID: "document", SourceID: "source", URI: "/document"},
+	}
+	ing.jobs <- documentJob{kind: jobScanComplete, run: run}
+	select {
+	case <-run.done:
+	case <-time.After(time.Second):
+		t.Fatal("document run did not finish")
+	}
+	doc, err := cat.DocumentByURI(ctx, "source", "/document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%x", sha256.Sum256(content))
+	if doc.ContentHash != want {
+		t.Fatalf("persisted hash = %q, want read-byte hash %q", doc.ContentHash, want)
 	}
 }
 
@@ -347,16 +475,25 @@ func TestScanPublishesFailedAndDeletedEvents(t *testing.T) {
 	}
 }
 
-func TestCancelQueuedScanRemovesPendingRetryAndDebounce(t *testing.T) {
+func TestBeginDeleteRemovesPendingRetryAndDebounce(t *testing.T) {
 	ing := queueOnlyIngestor(context.Background())
 	ing.EnqueueScan(context.Background(), "source")
 	if len(ing.scanOrder) != 1 {
 		t.Fatalf("pending scans = %d, want 1", len(ing.scanOrder))
 	}
 
-	ing.cancelQueuedScan("source")
+	_, attempt, owner := ing.beginDelete("source", "request")
+	if !owner {
+		t.Fatal("first delete did not acquire gate")
+	}
+	ing.endDelete("source", attempt, nil)
 	if len(ing.scanOrder) != 0 || len(ing.pending) != 0 {
-		t.Fatalf("scanOrder=%v pending=%v, want both empty after cancelQueuedScan", ing.scanOrder, ing.pending)
+		t.Fatalf("scanOrder=%v pending=%v, want both empty after beginDelete", ing.scanOrder, ing.pending)
+	}
+	ing.WatchSource("source")
+	ing.EnqueueScan(context.Background(), "source")
+	if len(ing.watching) != 0 || len(ing.scanOrder) != 0 {
+		t.Fatalf("successful deletion accepted stale startup work: watching=%v scanOrder=%v", ing.watching, ing.scanOrder)
 	}
 }
 
@@ -469,5 +606,178 @@ func TestDeleteSourceStopsWatching(t *testing.T) {
 	ing.mu.Unlock()
 	if stillWatching {
 		t.Fatal("DeleteSource did not stop watching the deleted source")
+	}
+}
+
+func TestDeleteSourceWaitsForActiveScanBeforeEnumeratingAndDeleting(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cat := newDeleteSourceTestCatalog(t, "source", "before-wait")
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	close(release)
+	ing := New(ctx, cat, blockingDeleteDataPlane{started: started, release: release}, nil)
+	active := &scanRun{sourceID: "source", done: make(chan struct{})}
+	ing.mu.Lock()
+	ing.sourceStateLocked("source").active = active
+	ing.mu.Unlock()
+
+	result := make(chan error, 1)
+	go func() { result <- ing.DeleteSource(context.Background(), "source") }()
+	select {
+	case id := <-started:
+		t.Fatalf("DeleteDocument(%q) started before the active scan completed", id)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// If enumeration happened before the wait, this document would not be
+	// included in the deletion run and would prevent source removal.
+	if err := cat.UpsertDocument(context.Background(), catalog.Document{
+		ID: "during-wait", SourceID: "source", URI: "/docs/during-wait",
+		ContentHash: "h", ChunkCount: 1, IngestedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	close(active.done)
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case id := <-started:
+			seen[id] = true
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for deletes; saw %v", seen)
+		}
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DeleteSource did not finish")
+	}
+	if !seen["before-wait"] || !seen["during-wait"] {
+		t.Fatalf("deleted documents = %v, want both pre-existing and scan-added documents", seen)
+	}
+}
+
+func TestDeleteSourceOwnerCancellationKeepsGateAndDuplicateWaiter(t *testing.T) {
+	ctx, cancelIngestor := context.WithCancel(context.Background())
+	defer cancelIngestor()
+	cat := newDeleteSourceTestCatalog(t, "source", "document")
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	ing := New(ctx, cat, blockingDeleteDataPlane{started: started, release: release}, nil)
+
+	ownerCtx, cancelOwner := context.WithCancel(context.Background())
+	ownerResult := make(chan error, 1)
+	go func() { ownerResult <- ing.DeleteSource(ownerCtx, "source") }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("DeleteDocument did not start")
+	}
+	duplicateResult := make(chan error, 1)
+	go func() { duplicateResult <- ing.DeleteSource(context.Background(), "source") }()
+	cancelOwner()
+	select {
+	case err := <-ownerResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("owner error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled owner did not return")
+	}
+
+	ing.EnqueueScan(context.Background(), "source")
+	ing.mu.Lock()
+	deleting := ing.sourceStateLocked("source").deleting
+	_, pending := ing.pending["source"]
+	ing.mu.Unlock()
+	if !deleting || pending {
+		t.Fatalf("while blocked: deleting=%v pending scan=%v, want true/false", deleting, pending)
+	}
+	close(release)
+	select {
+	case err := <-duplicateResult:
+		if err != nil {
+			t.Fatalf("duplicate waiter error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("duplicate waiter did not receive final result")
+	}
+	if _, err := cat.GetSource(context.Background(), "source"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("source after background deletion: got %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestWatchSourceWhileDeletingDoesNotRegisterWatcher(t *testing.T) {
+	ing := queueOnlyIngestor(context.Background())
+	ing.watching = make(map[string]context.CancelFunc)
+	ing.mu.Lock()
+	ing.sourceStateLocked("source").deleting = true
+	ing.mu.Unlock()
+
+	ing.WatchSource("source")
+	ing.mu.Lock()
+	_, watching := ing.watching["source"]
+	ing.mu.Unlock()
+	if watching {
+		t.Fatal("WatchSource registered a watcher while deletion gate was held")
+	}
+}
+
+func TestFailedDeleteRestoresWatcherAndReleasesScanGate(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cat := newDeleteSourceTestCatalog(t, "source", "document")
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	ing := New(ctx, cat, blockingDeleteDataPlane{
+		started: started, release: release, err: errors.New("delete failed"),
+	}, nil)
+	watchCanceled := make(chan struct{})
+	ing.mu.Lock()
+	ing.watching["source"] = func() { close(watchCanceled) }
+	ing.mu.Unlock()
+
+	result := make(chan error, 1)
+	go func() { result <- ing.DeleteSource(context.Background(), "source") }()
+	select {
+	case <-watchCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("existing watcher was not stopped")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("DeleteDocument did not start")
+	}
+	close(release)
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("failed deletion returned nil")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed deletion did not return")
+	}
+
+	ing.mu.Lock()
+	deleting := ing.sourceStateLocked("source").deleting
+	_, watching := ing.watching["source"]
+	ing.mu.Unlock()
+	if deleting || !watching {
+		t.Fatalf("after failure: deleting=%v watching=%v, want false/true", deleting, watching)
+	}
+	// Stop the planner so it cannot consume the accepted request before the
+	// assertion below; cancellation does not change gate behavior.
+	cancel()
+	ing.EnqueueScan(context.Background(), "source")
+	ing.mu.Lock()
+	_, pending := ing.pending["source"]
+	ing.mu.Unlock()
+	if !pending {
+		t.Fatal("scan gate remained held after failed deletion")
 	}
 }

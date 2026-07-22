@@ -74,6 +74,14 @@ fn document_id_filter(document_id: &str) -> Filter {
     field_equals_filter(DOCUMENT_ID_FIELD, document_id)
 }
 
+fn payload_u32(payload: &serde_json::Value, field: &str) -> u32 {
+    payload
+        .get(field)
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0)
+}
+
 pub struct EdgeStore {
     shard: EdgeShard,
 }
@@ -237,6 +245,8 @@ impl VectorStore for EdgeStore {
                         "uri": meta.uri,
                         "chunk_index": chunk.index,
                         "text": chunk.text,
+                        "start_line": chunk.start_line,
+                        "end_line": chunk.end_line,
                     }),
                 )
                 .into()
@@ -308,6 +318,8 @@ impl VectorStore for EdgeStore {
                     chunk_index: payload.get("chunk_index")?.as_u64()? as u32,
                     score: point.score,
                     text: payload.get("text")?.as_str()?.to_owned(),
+                    start_line: payload_u32(&payload, "start_line"),
+                    end_line: payload_u32(&payload, "end_line"),
                 })
             })
             .collect())
@@ -328,6 +340,13 @@ mod tests {
             std::process::id(),
             NEXT_PATH.fetch_add(1, Ordering::Relaxed),
         ))
+    }
+
+    #[test]
+    fn payloads_without_line_ranges_degrade_to_unknown() {
+        let old_payload = json!({ "document_id": "old", "text": "legacy" });
+        assert_eq!(payload_u32(&old_payload, "start_line"), 0);
+        assert_eq!(payload_u32(&old_payload, "end_line"), 0);
     }
 
     #[test]
@@ -379,10 +398,14 @@ mod tests {
                     Chunk {
                         index: 0,
                         text: "a0".to_owned(),
+                        start_line: 1,
+                        end_line: 1,
                     },
                     Chunk {
                         index: 1,
                         text: "a1".to_owned(),
+                        start_line: 2,
+                        end_line: 3,
                     },
                 ],
                 vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]],
@@ -398,6 +421,8 @@ mod tests {
                 &[Chunk {
                     index: 0,
                     text: "b0".to_owned(),
+                    start_line: 4,
+                    end_line: 4,
                 }],
                 vec![vec![0.0, 0.0, 1.0, 0.0]],
             )
@@ -453,10 +478,14 @@ mod tests {
                     Chunk {
                         index: 0,
                         text: "v1-chunk0".to_owned(),
+                        start_line: 1,
+                        end_line: 1,
                     },
                     Chunk {
                         index: 1,
                         text: "v1-chunk1".to_owned(),
+                        start_line: 2,
+                        end_line: 2,
                     },
                 ],
                 vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]],
@@ -479,6 +508,8 @@ mod tests {
                 &[Chunk {
                     index: 0,
                     text: "v2-chunk0".to_owned(),
+                    start_line: 3,
+                    end_line: 5,
                 }],
                 vec![vec![1.0, 0.0, 0.0, 0.0]],
             )
@@ -491,6 +522,7 @@ mod tests {
             "shrinking re-ingest must leave no stale trailing chunk"
         );
         assert_eq!(after[0].text, "v2-chunk0");
+        assert_eq!((after[0].start_line, after[0].end_line), (3, 5));
 
         drop(store); // flush/close before the directory is removed
         cleanup(&path);
@@ -511,6 +543,8 @@ mod tests {
                 &[Chunk {
                     index: 0,
                     text: "a0".to_owned(),
+                    start_line: 1,
+                    end_line: 1,
                 }],
                 vec![vec![1.0, 0.0, 0.0, 0.0]],
             )
@@ -525,6 +559,8 @@ mod tests {
                 &[Chunk {
                     index: 0,
                     text: "b0".to_owned(),
+                    start_line: 1,
+                    end_line: 1,
                 }],
                 vec![vec![1.0, 0.0, 0.0, 0.0]],
             )
