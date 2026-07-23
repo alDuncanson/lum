@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
@@ -113,7 +114,99 @@ func Open(path string) (*Catalog, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrating catalog schema: %w", err)
 	}
+	if err := migrateDocumentIdentity(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrating document identity: %w", err)
+	}
 	return &Catalog{db: db}, nil
+}
+
+// migrateDocumentIdentity upgrades catalogs created before document identity
+// was scoped to (source_id, uri). CREATE TABLE IF NOT EXISTS cannot replace
+// the old global UNIQUE(uri) constraint, so those catalogs must be rebuilt
+// once before the current upsert can target the composite constraint.
+func migrateDocumentIdentity(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	scoped, err := hasScopedDocumentIdentity(tx)
+	if err != nil {
+		return err
+	}
+	if scoped {
+		return tx.Commit()
+	}
+
+	const migration = `
+CREATE TABLE documents_migrated (
+	id           TEXT PRIMARY KEY,
+	source_id    TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+	uri          TEXT NOT NULL,
+	content_hash TEXT NOT NULL,
+	chunk_count  INTEGER NOT NULL DEFAULT 0,
+	ingested_at  TEXT NOT NULL,
+	UNIQUE (source_id, uri)
+);
+INSERT INTO documents_migrated (id, source_id, uri, content_hash, chunk_count, ingested_at)
+	SELECT id, source_id, uri, content_hash, chunk_count, ingested_at FROM documents;
+DROP TABLE documents;
+ALTER TABLE documents_migrated RENAME TO documents;
+CREATE INDEX documents_by_source ON documents(source_id);
+`
+	if _, err := tx.Exec(migration); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func hasScopedDocumentIdentity(tx *sql.Tx) (bool, error) {
+	rows, err := tx.Query(`PRAGMA index_list(documents)`)
+	if err != nil {
+		return false, err
+	}
+	var uniqueIndexes []string
+	for rows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			rows.Close()
+			return false, err
+		}
+		if unique != 0 {
+			uniqueIndexes = append(uniqueIndexes, name)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+
+	for _, index := range uniqueIndexes {
+		quoted := strings.ReplaceAll(index, `"`, `""`)
+		indexRows, err := tx.Query(`PRAGMA index_info("` + quoted + `")`)
+		if err != nil {
+			return false, err
+		}
+		var columns []string
+		for indexRows.Next() {
+			var seq, cid int
+			var name string
+			if err := indexRows.Scan(&seq, &cid, &name); err != nil {
+				indexRows.Close()
+				return false, err
+			}
+			columns = append(columns, name)
+		}
+		if err := indexRows.Close(); err != nil {
+			return false, err
+		}
+		if len(columns) == 2 && columns[0] == "source_id" && columns[1] == "uri" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c *Catalog) Close() error { return c.db.Close() }

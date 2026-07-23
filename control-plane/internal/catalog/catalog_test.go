@@ -156,6 +156,59 @@ func TestDocumentIdentityIsScopedBySourceNotGloballyUnique(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesLegacyGlobalDocumentIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE sources (
+			id TEXT PRIMARY KEY, type TEXT NOT NULL, uri TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+		);
+		CREATE TABLE documents (
+			id TEXT PRIMARY KEY,
+			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+			uri TEXT NOT NULL UNIQUE,
+			content_hash TEXT NOT NULL,
+			chunk_count INTEGER NOT NULL DEFAULT 0,
+			ingested_at TEXT NOT NULL
+		);
+		CREATE INDEX documents_by_source ON documents(source_id);
+		INSERT INTO sources VALUES
+			('src-a', 'localdir', '/tmp/a', '2026-01-01T00:00:00Z'),
+			('src-b', 'localdir', '/tmp/b', '2026-01-01T00:00:00Z');
+		INSERT INTO documents VALUES
+			('doc-a', 'src-a', '/tmp/shared.go', 'old-hash', 1, '2026-01-01T00:00:00Z');
+	`)
+	if err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open legacy catalog: %v", err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+	if got, err := c.DocumentByURI(ctx, "src-a", "/tmp/shared.go"); err != nil || got.ID != "doc-a" {
+		t.Fatalf("legacy document after migration = %+v, %v", got, err)
+	}
+	if err := c.UpsertDocument(ctx, Document{
+		ID: "doc-b", SourceID: "src-b", URI: "/tmp/shared.go",
+		ContentHash: "new-hash", ChunkCount: 2, IngestedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("upsert with URI shared across sources after migration: %v", err)
+	}
+	if got, err := c.DocumentByURI(ctx, "src-b", "/tmp/shared.go"); err != nil || got.ID != "doc-b" {
+		t.Fatalf("new scoped document after migration = %+v, %v", got, err)
+	}
+}
+
 func TestDeleteSourceRemovesRowAndCascadesDocuments(t *testing.T) {
 	c := openTestCatalog(t)
 	ctx := context.Background()
