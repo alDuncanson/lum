@@ -149,7 +149,8 @@ without an HTTP request. Its worker is shed after 5 minutes without an
 ingest/search RPC to release model and index memory, then respawned lazily; a
 worker crash is handled the same way. `lum serve` runs the product in the
 foreground for debugging. See [docs/architecture.md](docs/architecture.md) for
-the detailed design.
+the detailed design and [docs/diagrams.md](docs/diagrams.md) for data flow,
+architecture, and protocol-boundary diagrams.
 
 ## State and reset
 

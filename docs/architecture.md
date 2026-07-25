@@ -10,6 +10,11 @@ separately deployed user-facing services.
 This document explains that multi-process design and, more importantly, *why*.
 It is written alongside the code; every section names the files it describes.
 
+See [diagrams.md](diagrams.md) for the same system drawn out: protocol
+boundaries, per-interface request flows from CLI to Neovim, the ingestion data
+flow, the representation each payload takes at every hop, and the lifecycle
+state machines.
+
 ## Design constraints
 
 These were chosen up front and drive everything else:
