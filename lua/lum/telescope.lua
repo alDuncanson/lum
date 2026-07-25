@@ -11,6 +11,21 @@ local config = {
   -- a background subscription, and by extension the lum daemon. See
   -- lua/lum/notify.lua for the options this accepts.
   notify = false,
+  -- Register and index the current Git repository when Neovim opens, rather
+  -- than when the picker is first opened.
+  --
+  -- The picker registers its repository through `lum search --root`, which
+  -- blocks until the *first* index of that repository finishes. On a cold
+  -- repository that is a model download plus a full embed, during which the
+  -- picker shows nothing — and since Telescope respawns the job on every
+  -- keystroke, typing actively restarts the wait. Starting at open moves
+  -- that work off the critical path: an LSP attaches when you open a file
+  -- for the same reason.
+  --
+  -- Off by default because it starts a background daemon in every Neovim
+  -- session, including the ones where you never search. Worth turning on if
+  -- you use lum regularly.
+  index_on_open = false,
 }
 
 local function workspace_root(opts)
@@ -98,6 +113,51 @@ function M.setup(opts)
     notify_opts = { enabled = false }
   end
   notify.setup(notify_opts)
+
+  if config.index_on_open then
+    -- Wait for startup to finish: setup() runs during plugin loading, when
+    -- the buffer that determines the repository root may not exist yet, and
+    -- when adding work to the startup path is least welcome.
+    if vim.v.vim_did_enter == 1 then
+      vim.schedule(M.start_indexing)
+    else
+      vim.api.nvim_create_autocmd("VimEnter", {
+        once = true,
+        callback = function()
+          M.start_indexing()
+        end,
+      })
+    end
+  end
+end
+
+-- start_indexing warms the current repository's index in the background.
+--
+-- Fire and forget by design: nothing waits on it, and failures are the
+-- notification channel's problem rather than something to interrupt startup
+-- over. A repository that is already indexed makes this a canonical-path
+-- lookup and a rescan of unchanged files, which is cheap.
+function M.start_indexing(opts)
+  opts = vim.tbl_deep_extend("force", {}, config, opts or {})
+  local root = workspace_root(opts)
+  -- Only inside a repository. Indexing whatever directory Neovim happened to
+  -- start in — $HOME, /tmp — is not what anyone means by this option.
+  if not vim.uv.fs_stat(vim.fs.joinpath(root, ".git")) then
+    return false
+  end
+
+  notify.start(opts.executable)
+  -- `add` rather than `search --root`: registration without a query, and it
+  -- returns as soon as the scan is queued instead of blocking on it.
+  vim.system({ opts.executable, "add", root }, { text = true }, function(result)
+    if result.code ~= 0 then
+      local detail = (result.stderr or ""):gsub("%s+$", "")
+      vim.schedule(function()
+        vim.notify("lum could not index this repository: " .. detail, vim.log.levels.WARN)
+      end)
+    end
+  end)
+  return true
 end
 
 function M.lum(opts)

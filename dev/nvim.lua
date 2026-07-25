@@ -20,6 +20,98 @@ local repo = required("LUM_DEV_REPO")
 
 vim.g.mapleader = " "
 
+-- Bare Neovim's vim.notify writes to the message area, which the Telescope
+-- prompt occupies and redraws over — so during a search, which is exactly
+-- when lum has something to say, the messages are invisible. Real users have
+-- fidget/nvim-notify/snacks and see them properly; this stands in for that so
+-- a dev session shows what a real setup would.
+--
+-- Run with --user-config to use your own Neovim instead of this file.
+do
+  local entries, win, buf = {}, nil, nil
+  local highlights = {
+    [vim.log.levels.ERROR] = "ErrorMsg",
+    [vim.log.levels.WARN] = "WarningMsg",
+    [vim.log.levels.INFO] = "Comment",
+  }
+
+  local function close()
+    if win and vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+    win = nil
+  end
+
+  local function render()
+    if #entries == 0 then
+      return close()
+    end
+    local lines, width = {}, 20
+    for _, entry in ipairs(entries) do
+      table.insert(lines, " " .. entry.text .. " ")
+      width = math.max(width, #entry.text + 2)
+    end
+    width = math.min(width, math.floor(vim.o.columns * 0.6))
+
+    if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+      buf = vim.api.nvim_create_buf(false, true)
+    end
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+    for index, entry in ipairs(entries) do
+      vim.api.nvim_buf_set_extmark(buf, vim.api.nvim_create_namespace("lum_notify"), index - 1, 0, {
+        end_row = index,
+        hl_group = highlights[entry.level] or "Comment",
+        hl_eol = true,
+      })
+    end
+
+    local opts = {
+      relative = "editor",
+      anchor = "NE",
+      row = 1,
+      col = vim.o.columns - 1,
+      width = width,
+      height = #lines,
+      style = "minimal",
+      border = "rounded",
+      focusable = false,
+      noautocmd = true,
+      -- Above Telescope's windows, or this solves nothing.
+      zindex = 300,
+    }
+    if win and vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_set_config(win, opts)
+    else
+      win = vim.api.nvim_open_win(buf, false, opts)
+      vim.wo[win].winblend = 10
+    end
+  end
+
+  vim.notify = function(message, level, _)
+    level = level or vim.log.levels.INFO
+    for line in tostring(message):gmatch("[^\n]+") do
+      local entry = { text = line, level = level }
+      table.insert(entries, entry)
+      -- Errors linger; routine progress does not.
+      local ttl = level >= vim.log.levels.ERROR and 20000 or 8000
+      vim.defer_fn(function()
+        for index, candidate in ipairs(entries) do
+          if candidate == entry then
+            table.remove(entries, index)
+            break
+          end
+        end
+        render()
+      end, ttl)
+    end
+    -- Keep :messages working too, so nothing is lost if the float is missed.
+    vim.api.nvim_echo({ { "[lum] " .. tostring(message) } }, true, {})
+    render()
+  end
+end
+
 -- Telescope and its plenary dependency come from the Nix store; they are
 -- fixed inputs here, not something being tested.
 vim.opt.runtimepath:append(required("LUM_DEV_TELESCOPE"))
@@ -44,9 +136,11 @@ require("telescope").setup({
       executable = "lum",
       limit = 50,
       debounce_ms = 200,
-      -- On here, off by default in the plugin: watching indexing happen is
-      -- most of the point of a dev session.
+      -- Both on here, off by default in the plugin: watching indexing happen
+      -- is most of the point of a dev session, and waiting on a cold index
+      -- inside the picker is the thing being avoided.
       notify = true,
+      index_on_open = true,
     },
   },
 })

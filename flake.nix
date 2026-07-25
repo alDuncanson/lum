@@ -140,6 +140,20 @@
             export LUM_DEV_REPO="$root"
             export LUM_DEV_TELESCOPE="${pkgs.vimPlugins.telescope-nvim}"
             export LUM_DEV_PLENARY="${pkgs.vimPlugins.plenary-nvim}"
+
+            # --user-config runs your own Neovim — your plugins, your
+            # notification handler — with the working-tree lum attached,
+            # instead of the isolated config in dev/nvim.lua. Useful once you
+            # want to see the integration the way you actually use it; the
+            # isolated config stays the better place to debug lum itself,
+            # since it has no other plugins to blame.
+            if [ "''${1:-}" = "--user-config" ]; then
+              shift
+              # --cmd runs before init, so the runtimepath is in place if your
+              # own config loads the extension itself.
+              exec nvim --cmd "set runtimepath^=$root" \
+                -c "luafile $root/dev/attach.lua" "$@"
+            fi
             exec nvim -u "$root/dev/nvim.lua" "$@"
           '';
         };

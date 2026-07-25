@@ -79,7 +79,8 @@ require("telescope").setup({
       executable = "lum",
       limit = 50,
       debounce_ms = 200,
-      notify = false,   -- see below
+      notify = false,          -- see below
+      index_on_open = false,   -- see below
     },
   },
 })
@@ -114,6 +115,23 @@ notify = {
   end,
 }
 ```
+
+### Indexing before you ask
+
+`index_on_open = true` registers and indexes the current Git repository when
+Neovim starts, instead of when the picker first opens.
+
+The picker registers its repository through `lum search --root`, which blocks
+until that repository's *first* index finishes — a model download plus a full
+embed on a cold repository. Telescope respawns the search on every keystroke,
+so typing during that window actively restarts the wait and the picker just
+sits empty. Indexing at open moves the work off the critical path, the way an
+LSP attaches when you open a file rather than when you first ask it something.
+
+Off by default because it starts a background daemon in every Neovim session,
+including ones where you never search. Worth turning on if you use lum
+regularly. It does nothing outside a Git repository, and on an already-indexed
+one it costs a path lookup and a rescan of unchanged files.
 
 Nothing here is Neovim-specific. `lum events` streams the same thing as
 newline-delimited JSON for any consumer:
@@ -256,6 +274,7 @@ needs no codegen step; the worker generates its own at build time.
 
 ```sh
 nix run .#nvim                   # build, then open Neovim on the local plugin
+nix run .#nvim -- --user-config  # ... using your own Neovim config instead
 nix develop .#nvim               # or get a shell first, then run: lum-nvim-dev
 ```
 
@@ -264,7 +283,13 @@ prebuilt from Nix (it compiles slowly and is rarely what you are changing), and
 opens Neovim with Telescope plus this repository's `lua/` on the runtimepath —
 so plugin edits need no rebuild at all, just a restart. `<leader>fs` opens the
 picker; `:LumRoot <dir>` searches somewhere else. See [dev/nvim.lua](dev/nvim.lua)
-for the config it uses, which is deliberately minimal rather than yours.
+for the config it uses, which is deliberately minimal rather than yours — when
+a result looks wrong, the only variable should be lum.
+
+`--user-config` starts your own Neovim instead, with the working-tree lum
+attached: your plugins, your notification handler, your keymaps. Use it to see
+the integration the way you actually use it; use the isolated config to debug
+lum itself.
 
 It runs on `127.0.0.1:7421` with its data in `/tmp/lum-dev`, so a dev session
 never collides with an installed lum on the default port or touches a real
