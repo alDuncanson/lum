@@ -157,9 +157,81 @@
             exec nvim -u "$root/dev/nvim.lua" "$@"
           '';
         };
+        # Retrieval evaluation. Same split as the Neovim loop: dispatcher
+        # from the working tree, worker prebuilt.
+        #
+        # It runs against its own data directory so a measurement never
+        # depends on, or disturbs, whatever is in your real index. --fresh
+        # clears it, which is what you want across a chunker or model change
+        # since those invalidate every existing vector.
+        lum-eval = pkgs.writeShellApplication {
+          name = "lum-eval";
+          runtimeInputs = [ pkgs.git pkgs.go_1_26 ];
+          text = ''
+            root=$(git rev-parse --show-toplevel)
+
+            export LUM_HTTP_ADDR="''${LUM_HTTP_ADDR:-127.0.0.1:7422}"
+            export LUM_DATA_DIR="''${LUM_DATA_DIR:-/tmp/lum-eval}"
+            export LUM_WORKER_PATH="''${LUM_WORKER_PATH:-${lum-worker}/bin/lum-worker}"
+
+            # Keep eval/ out of the index. questions.yaml contains the
+            # questions verbatim, so indexing it made the fixture the best
+            # match for its own queries — it appeared in the top five for
+            # half of them, measuring the benchmark against itself. The
+            # first four mirror the built-in defaults, which this replaces.
+            export LUM_EXCLUDE_DIRS="node_modules,vendor,target,__pycache__,eval"
+
+            fresh=0
+            args=()
+            for arg in "$@"; do
+              case "$arg" in
+                --fresh) fresh=1 ;;
+                *) args+=("$arg") ;;
+              esac
+            done
+
+            mkdir -p "$root/bin"
+            (cd "$root/dispatcher" && go build -o "$root/bin/lum" ./cmd/lum)
+            export PATH="$root/bin:$PATH"
+
+            # Stop first either way: a running daemon holds the old binary,
+            # and on --fresh it also holds the index files open, so deleting
+            # the directory underneath it would not actually reset anything.
+            lum stop >/dev/null 2>&1 || true
+            if [ "$fresh" = "1" ]; then
+              echo "clearing $LUM_DATA_DIR (full re-index)"
+              rm -rf "''${LUM_DATA_DIR:?}"
+            fi
+            mkdir -p "$LUM_DATA_DIR"
+
+            # Start the daemon here rather than letting the test trigger the
+            # on-demand spawn. That path re-execs os.Executable(), which under
+            # `go test` is the test binary — so it would try to run the test
+            # as a daemon and funnel its output into daemon.log.
+            lum serve >>"$LUM_DATA_DIR/daemon.log" 2>&1 &
+            serve=$!
+            # shellcheck disable=SC2317
+            cleanup() { lum stop >/dev/null 2>&1 || true; wait "$serve" 2>/dev/null || true; }
+            trap cleanup EXIT
+
+            host="''${LUM_HTTP_ADDR%:*}"
+            port="''${LUM_HTTP_ADDR##*:}"
+            for _ in $(seq 1 100); do
+              if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then exec 3>&- ; break; fi
+              if ! kill -0 "$serve" 2>/dev/null; then
+                echo "lum serve exited during startup; see $LUM_DATA_DIR/daemon.log" >&2
+                exit 1
+              fi
+              sleep 0.2
+            done
+
+            cd "$root/dispatcher"
+            go test -tags eval -v -count=1 -timeout 30m ./internal/eval/ "''${args[@]}"
+          '';
+        };
       in {
         packages = {
-          inherit lum lum-worker lum-nvim lum-nvim-dev;
+          inherit lum lum-worker lum-nvim lum-nvim-dev lum-eval;
           default = lum;
         };
 
@@ -172,6 +244,11 @@
           nvim = flake-utils.lib.mkApp {
             drv = lum-nvim-dev;
             exePath = "/bin/lum-nvim-dev";
+          };
+          # `nix run .#eval` — measure retrieval against eval/questions.yaml.
+          eval = flake-utils.lib.mkApp {
+            drv = lum-eval;
+            exePath = "/bin/lum-eval";
           };
         };
 
