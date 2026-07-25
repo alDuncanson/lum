@@ -2,8 +2,10 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -166,10 +168,11 @@ func TestManagerConcurrentRealOpsCoalesceOntoOneRespawn(t *testing.T) {
 	}
 }
 
-func TestManagerTreatsCrashLikeIdleShedAndRespawnsOnNextRequest(t *testing.T) {
-	// A supervisor whose process has already exited (crashed) must be
-	// treated the same as a deliberate shed: the next real request
-	// respawns it rather than talking to a dead connection.
+func TestManagerReportsCrashDistinctlyAndRespawnsOnNextRequest(t *testing.T) {
+	// A supervisor whose process has already exited must recover exactly
+	// like a deliberate shed — the next real request respawns it rather
+	// than talking to a dead connection — while reporting a state that says
+	// what actually happened.
 	crashedBin := filepath.Join(t.TempDir(), "lum-worker")
 	if err := os.WriteFile(crashedBin, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -195,8 +198,11 @@ func TestManagerTreatsCrashLikeIdleShedAndRespawnsOnNextRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if health.State != StateIdle {
-		t.Fatalf("state after detecting crash = %q, want idle (not yet respawning)", health.State)
+	if health.State != StateCrashed {
+		t.Fatalf("state after detecting crash = %q, want crashed (not idle: nothing asked it to stop)", health.State)
+	}
+	if !strings.Contains(health.Detail, "exit") {
+		t.Errorf("detail = %q, want the exit status so the cause is not a guess", health.Detail)
 	}
 
 	if _, err := m.Search(context.Background(), "q", 10, ""); err != nil {
@@ -279,4 +285,116 @@ func TestManagerAwaitReadyTimesOutWhenRespawnNeverBecomesReady(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error waiting for a worker stuck starting")
 	}
+}
+
+// The failure that motivated splitting crashed from idle: a worker that
+// exits during startup leaves nothing listening on the socket, and polling
+// it for the full startup timeout is how a knowable problem became five
+// minutes of silence.
+func TestAwaitReadyGivesUpWhenTheWorkerExitsDuringStartup(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "lum-worker")
+	// Exits without ever binding the socket, like a bad --grpc-socket.
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	socket := filepath.Join(shortSocketDir(t), "w.sock")
+
+	m := &Manager{
+		startupTimeout: 30 * time.Second, // long enough that polling it out would hang the test
+		spawn:          func() (*Supervisor, error) { return Spawn(bin, dataDir, socket, "standard") },
+		dial:           func() (*Client, error) { return Dial(socket) },
+		done:           make(chan struct{}),
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
+	started := time.Now()
+	_, err := m.awaitReady(context.Background())
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("awaitReady() = nil error for a worker that exited during startup")
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("took %s to notice the worker was gone; the point is not to wait out startupTimeout", elapsed)
+	}
+	if !strings.Contains(err.Error(), "exit") {
+		t.Errorf("error = %q, want the exit status rather than a bare timeout", err)
+	}
+
+	// And the state that follows says it crashed, not that memory was saved.
+	health, healthErr := m.Health(context.Background())
+	if healthErr != nil {
+		t.Fatal(healthErr)
+	}
+	if health.State != StateCrashed {
+		t.Errorf("state = %q, want crashed", health.State)
+	}
+}
+
+// A spawn that fails outright (missing binary) must report as crashed too,
+// rather than as a deliberate shed.
+func TestRespawnFailureReportsCrashedWithTheReason(t *testing.T) {
+	m := &Manager{
+		startupTimeout: 2 * time.Second,
+		spawn:          func() (*Supervisor, error) { return nil, errors.New("lum-worker binary not found") },
+		dial:           func() (*Client, error) { return nil, errors.New("unreachable") },
+		done:           make(chan struct{}),
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
+	if _, err := m.awaitReady(context.Background()); err == nil {
+		t.Fatal("awaitReady() = nil error when the worker cannot be spawned")
+	}
+	health, err := m.Health(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.State != StateCrashed {
+		t.Fatalf("state = %q, want crashed", health.State)
+	}
+	if !strings.Contains(health.Detail, "binary not found") {
+		t.Errorf("detail = %q, want the spawn error", health.Detail)
+	}
+}
+
+// A deliberate shed must keep saying so — the whole point is that the two
+// are now distinguishable, not that everything became a crash.
+func TestIdleShedStillReportsIdle(t *testing.T) {
+	spawn, dial, _ := managerDeps(t, readyHealth())
+	sup, err := spawn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{
+		idleTimeout: time.Nanosecond, startupTimeout: 2 * time.Second,
+		spawn: spawn, dial: dial, sup: sup, client: client,
+		lastActivity: time.Now().Add(-time.Hour), done: make(chan struct{}),
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
+	m.shedIfIdle()
+	health, err := m.Health(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.State != StateIdle {
+		t.Fatalf("state after an idle shed = %q, want idle", health.State)
+	}
+}
+
+// Unix socket paths are length-limited and t.TempDir() is already long on
+// macOS; see config.Validate.
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "lumw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }

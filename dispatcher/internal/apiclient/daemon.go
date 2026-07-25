@@ -87,20 +87,46 @@ func acquireLock(ctx context.Context, file *os.File) error {
 	}
 }
 
+// daemonStartGrace is how long a just-spawned daemon is given to take
+// daemon.lock before a free lock is read as "it is not running". The daemon
+// acquires it within milliseconds of exec, well before opening the catalog
+// or binding the API, so this is generous.
+const daemonStartGrace = 2 * time.Second
+
 func (c *Client) waitReady(ctx context.Context) error {
 	ticker := time.NewTicker(daemonPollInterval)
 	defer ticker.Stop()
 	var lastState, lastDetail string
+	startedWaiting := time.Now()
 	for {
 		state, detail, err := c.daemonStatus(ctx)
 		if err == nil && state == string(worker.StateReady) {
 			return nil
 		}
+		// Crashed is terminal for this wait: the worker is not coming up on
+		// its own, and the daemon has already said why. Polling on would
+		// just replace a specific error with a timeout.
+		if err == nil && state == string(worker.StateCrashed) {
+			return fmt.Errorf("%s (see %s)", detail, c.cfg.DaemonLogPath())
+		}
 		if err == nil {
 			lastState, lastDetail = state, detail
 		}
 		if err != nil && !isConnectionRefused(err) {
-			return fmt.Errorf("waiting for lum daemon readiness: %w", err)
+			// Name the log too: the reason is in that file, not here.
+			return fmt.Errorf("waiting for lum daemon readiness (see %s): %w", c.cfg.DaemonLogPath(), err)
+		}
+		// A refused connection normally means "not listening yet". But the
+		// daemon holds daemon.lock for its entire lifetime, so a lock we can
+		// take means there is no daemon at all — it exited, and waiting the
+		// rest of the startup timeout would only turn its logged reason into
+		// a bare deadline. A daemon whose worker cannot start exits in
+		// milliseconds, which is precisely when this fires.
+		if isConnectionRefused(err) && time.Since(startedWaiting) > daemonStartGrace {
+			if gone, lockErr := tryAcquireAndRelease(c.cfg.DaemonLockPath()); lockErr == nil && gone {
+				return fmt.Errorf(
+					"the lum daemon exited during startup; see %s", c.cfg.DaemonLogPath())
+			}
 		}
 		select {
 		case <-ctx.Done():

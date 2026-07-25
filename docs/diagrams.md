@@ -592,7 +592,7 @@ own ID via `requestIDFrom`, so nothing is ever uncorrelated.
 
 ### 6.1 Worker readiness
 
-Four states come from lum-worker over gRPC; the fifth is synthesized by the
+Four states come from lum-worker over gRPC; the last two are synthesized by the
 dispatcher and never reported by lum-worker itself.
 
 ```mermaid
@@ -603,14 +603,18 @@ stateDiagram-v2
     state "ready" as R
     state "unavailable" as U
     state "idle — synthesized by Manager" as I
+    state "crashed — synthesized by Manager" as X
 
     [*] --> S: Spawn + bind socket
     S --> D: initialize() begins on a detached thread
     D --> R: model loaded + shard open + manifest validated
     D --> U: init failed (e.g. manifest/model mismatch)
     R --> I: 5 min with no ingest/search RPC → Supervisor.Stop
-    R --> I: process crashed (Supervisor.Exited)
+    R --> X: process exited on its own (Supervisor.Exited)
+    S --> X: never started, or exited during startup
+    D --> X: exited while loading the model
     I --> S: EnsureRunning / awaitReady → respawn
+    X --> S: EnsureRunning / awaitReady → respawn
     U --> S: respawn on next request
     R --> [*]: daemon shutdown
 
@@ -618,6 +622,14 @@ stateDiagram-v2
         Health is side-effect-free.
         GET /v1/status never respawns
         and never counts as activity.
+    end note
+
+    note right of X
+        Recovery is identical to idle:
+        the next request respawns.
+        Only the explanation differs,
+        and detail carries the exit
+        status or spawn error.
     end note
 ```
 

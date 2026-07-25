@@ -214,8 +214,9 @@ failures remain visible through `/v1/status` and `lum status`.
 
 On daemon startup, lumd starts its HTTP API immediately while lum-worker loads its
 model and vector store. `/v1/status` reports `worker` as `starting`,
-`downloading-model`, `ready`, `unavailable`, or `idle` — the last synthesized by
-`worker.Manager` rather than reported by lum-worker (see idle shedding below).
+`downloading-model`, `ready`, `unavailable`, `idle`, or `crashed` — the last two
+synthesized by `worker.Manager` rather than reported by lum-worker (see idle
+shedding below).
 Startup watches and scans begin only after readiness.
 
 A scan that gets queued before lum-worker is ready is neither rejected nor failed.
@@ -337,9 +338,26 @@ A request that actually needs the worker (add source, scan, search)
 respawns it lazily and waits for readiness, exactly mirroring the on-demand
 daemon flow above one level down: `lum status` reports `worker: idle`
 while shed, `starting`/`downloading-model` while the respawn is in flight,
-then `ready`. An unexpected lum-worker crash is handled identically — Manager
+then `ready`. An unexpected lum-worker crash *recovers* identically — Manager
 treats a dead supervisor the same as a deliberate shed, so the next request
 respawns it rather than failing until `lum serve` is restarted by hand.
+
+It does not *report* identically, though, and that distinction was learned the
+hard way. Reporting a crash as `idle` meant every startup failure explained
+itself as "worker shed while idle to save memory": confident, specific, and
+wrong, with nothing pointing at the real cause. `Manager` now records why no
+worker is running — `absenceShed` from the idle timer, `absenceExited` from a
+process that ended on its own or never started — and reports `crashed` with the
+exit status or spawn error in `detail` for the latter.
+
+Two waits shortened as a result. `awaitReady` watches `Supervisor.Done()` while
+polling for readiness, so a worker that exits during startup ends the wait
+immediately instead of polling a socket nothing is listening on until
+`StartupTimeout`. And `apiclient` treats `crashed` as terminal rather than
+something to wait out; if the daemon itself exited (its own startup failed), a
+free `daemon.lock` proves it, since the daemon holds that lock for its entire
+lifetime. Both cases used to cost five minutes and produce
+`context deadline exceeded`; they now fail in seconds and name `daemon.log`.
 
 ## Internal event bus
 

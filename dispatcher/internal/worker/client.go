@@ -40,6 +40,15 @@ const (
 	// the worker was deliberately shed while idle and will respawn on
 	// the next request.
 	StateIdle ReadinessState = "idle"
+	// StateCrashed is also synthesized by Manager: the worker is not running
+	// and that was not on purpose — it exited on its own, or could not be
+	// started at all.
+	//
+	// Recovery is identical to StateIdle (the next request respawns it), but
+	// conflating the two made every startup failure report itself as
+	// "shed while idle to save memory", a confident and wrong explanation
+	// that pointed nowhere. Detail carries the exit status or spawn error.
+	StateCrashed ReadinessState = "crashed"
 )
 
 const contentFrameSize = 256 * 1024

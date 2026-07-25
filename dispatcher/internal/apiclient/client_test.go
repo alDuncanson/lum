@@ -432,3 +432,80 @@ func TestUnusableConfigFailsFastWithoutSpawning(t *testing.T) {
 		t.Errorf("took %s to reject an unusable config; expected an immediate failure", elapsed)
 	}
 }
+
+// A crashed worker is terminal for a readiness wait: the daemon already
+// knows why, so the client should relay that instead of polling until the
+// startup timeout turns a specific cause into "context deadline exceeded".
+func TestWaitReadyStopsOnCrashedAndReportsTheCause(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"worker": "crashed",
+			"detail": "worker exited: exit status 1; see the daemon log",
+		})
+	})
+	server := &http.Server{Handler: mux}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	cfg := config.Config{
+		EmbeddingModel: config.DefaultEmbeddingModel, DataDir: shortDataDir(t),
+		HTTPAddr: listener.Addr().String(), StartupTimeout: 30 * time.Second,
+	}
+	client := &Client{base: cfg.BaseURL(), cfg: cfg, httpClient: http.DefaultClient, spawn: func(config.Config) error { return nil }}
+
+	started := time.Now()
+	err = client.waitReady(context.Background())
+	if err == nil {
+		t.Fatal("waitReady() = nil for a crashed worker")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("took %s; a crashed worker should not be waited out", elapsed)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Errorf("error = %q, want the daemon's stated cause", err)
+	}
+	if !strings.Contains(err.Error(), cfg.DaemonLogPath()) {
+		t.Errorf("error = %q, want the daemon log path", err)
+	}
+}
+
+// A daemon that exits during startup (its worker cannot start, the catalog
+// is corrupt, the port is taken) leaves nothing listening. Since it holds
+// daemon.lock for its whole lifetime, a lock we can take proves it is gone,
+// which beats spending the startup timeout to report a bare deadline.
+func TestWaitReadyDetectsADaemonThatExitedDuringStartup(t *testing.T) {
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := reserved.Addr().String()
+	_ = reserved.Close() // nothing listening, and nothing holding daemon.lock
+
+	cfg := config.Config{
+		EmbeddingModel: config.DefaultEmbeddingModel, DataDir: shortDataDir(t),
+		HTTPAddr: addr, StartupTimeout: 60 * time.Second,
+	}
+	client := &Client{base: cfg.BaseURL(), cfg: cfg, httpClient: http.DefaultClient, spawn: func(config.Config) error { return nil }}
+
+	started := time.Now()
+	err = client.waitReady(context.Background())
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("waitReady() = nil when no daemon is running")
+	}
+	if elapsed > 15*time.Second {
+		t.Errorf("took %s; the point is not to wait out StartupTimeout", elapsed)
+	}
+	if elapsed < daemonStartGrace {
+		t.Errorf("gave up after %s, inside the %s grace a real daemon needs to take the lock", elapsed, daemonStartGrace)
+	}
+	if !strings.Contains(err.Error(), cfg.DaemonLogPath()) {
+		t.Errorf("error = %q, want the daemon log path", err)
+	}
+}

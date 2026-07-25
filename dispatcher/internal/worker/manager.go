@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -47,9 +48,27 @@ type Manager struct {
 	stopped      bool
 	lastActivity time.Time
 	inFlight     int
+	// absence records why no worker is running, so Health can tell a
+	// deliberate shed from a crash. Both recover identically; only the
+	// explanation differs, and the explanation is the whole problem when
+	// something is wrong.
+	absence      absenceCause
+	absenceError error
 
 	done chan struct{}
 }
+
+// absenceCause explains why m.sup is nil.
+type absenceCause uint8
+
+const (
+	// absenceNone: a worker is running, or none has been stopped yet.
+	absenceNone absenceCause = iota
+	// absenceShed: stopped on purpose by the idle timer.
+	absenceShed
+	// absenceExited: the process ended on its own, or never started.
+	absenceExited
+)
 
 // NewManager wraps an already-spawned, already-dialed lum-worker. idleTimeout
 // <= 0 disables shedding (lum-worker stays up for the process lifetime, as
@@ -114,11 +133,19 @@ func (m *Manager) Health(ctx context.Context) (HealthResult, error) {
 	m.mu.Lock()
 	m.clearIfExitedLocked()
 	client, spawning := m.client, m.spawning
+	absence, absenceError := m.absence, m.absenceError
 	m.mu.Unlock()
 
 	if client == nil {
 		if spawning {
-			return HealthResult{State: StateStarting, Detail: "worker restarting after idle shed"}, nil
+			return HealthResult{State: StateStarting, Detail: "worker starting"}, nil
+		}
+		if absence == absenceExited {
+			detail := "worker is not running and did not stop on purpose"
+			if absenceError != nil {
+				detail = "worker " + absenceError.Error()
+			}
+			return HealthResult{State: StateCrashed, Detail: detail}, nil
 		}
 		return HealthResult{State: StateIdle, Detail: "worker shed while idle to save memory; will restart on next request"}, nil
 	}
@@ -214,13 +241,43 @@ func (m *Manager) awaitReady(ctx context.Context) (*Client, error) {
 			}
 			m.mu.Lock()
 			client = m.client
+			// A respawn that failed outright will never produce a client, so
+			// surface its error now rather than polling out the timeout.
+			if client == nil && !m.spawning && m.absence == absenceExited && m.absenceError != nil {
+				err := m.absenceError
+				m.mu.Unlock()
+				return nil, fmt.Errorf("worker %w", err)
+			}
 			m.mu.Unlock()
 		}
 	}
 
+	m.mu.Lock()
+	sup := m.sup
+	m.mu.Unlock()
+
 	readyCtx, cancel := context.WithTimeout(ctx, m.startupTimeout)
 	defer cancel()
+	// A worker that exits during startup — a bad socket path, a corrupt
+	// index, a missing model — leaves nothing listening on the socket, and
+	// polling it for the full startup timeout is how a knowable failure
+	// turned into five minutes of silence. Give up as soon as the process is
+	// gone and report why it went.
+	if sup != nil {
+		stopWatching := make(chan struct{})
+		defer close(stopWatching)
+		go func() {
+			select {
+			case <-sup.Done():
+				cancel()
+			case <-stopWatching:
+			}
+		}()
+	}
 	if err := client.WaitReady(readyCtx); err != nil {
+		if sup != nil && sup.Exited() {
+			return nil, fmt.Errorf("worker %w", exitReason(sup.ExitError()))
+		}
 		return nil, fmt.Errorf("waiting for worker readiness: %w", err)
 	}
 	m.mu.Lock()
@@ -250,8 +307,19 @@ func (m *Manager) clearIfExitedLocked() {
 		if m.client != nil {
 			_ = m.client.Close()
 		}
+		m.absence, m.absenceError = absenceExited, exitReason(m.sup.ExitError())
 		m.sup, m.client = nil, nil
 	}
+}
+
+// exitReason turns a child exit status into something a person reads in
+// `lum status`. A nil status still means the worker vanished unexpectedly:
+// nothing asked it to stop, so a clean exit is its own kind of wrong.
+func exitReason(err error) error {
+	if err == nil {
+		return errors.New("exited unexpectedly; see the daemon log")
+	}
+	return fmt.Errorf("exited: %w; see the daemon log", err)
 }
 
 // triggerRespawnLocked starts a new lum-worker in the background if one isn't
@@ -287,9 +355,15 @@ func (m *Manager) respawn() {
 	}
 	if err != nil {
 		slog.Error("worker respawn failed", "error", err)
-		return // Health keeps reporting idle; the next request retries.
+		// Report a failed start as a crash, not an idle shed, and keep the
+		// reason. The next request still retries; meanwhile /v1/status says
+		// what went wrong instead of claiming this saved memory on purpose.
+		m.absence = absenceExited
+		m.absenceError = fmt.Errorf("could not be started: %w", err)
+		return
 	}
 	m.sup, m.client = sup, client
+	m.absence, m.absenceError = absenceNone, nil
 	m.lastActivity = time.Now()
 }
 
@@ -323,6 +397,7 @@ func (m *Manager) shedIfIdle() {
 	}
 	sup, client := m.sup, m.client
 	m.sup, m.client = nil, nil
+	m.absence, m.absenceError = absenceShed, nil
 	m.mu.Unlock()
 
 	slog.Info("worker idle timeout reached; shedding to reclaim memory", "timeout", m.idleTimeout)

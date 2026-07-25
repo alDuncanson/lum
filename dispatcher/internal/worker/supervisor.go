@@ -23,6 +23,9 @@ type Supervisor struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
 	done  chan struct{}
+	// exitErr is written once, before done is closed, so any read that
+	// happens after observing done is safe without further synchronization.
+	exitErr error
 }
 
 // Spawn locates the lum-worker binary, starts it pointed at our data dir and
@@ -67,20 +70,42 @@ func Spawn(explicitPath, dataDir, grpcSocket, embeddingModel string) (*Superviso
 		} else {
 			slog.Info("worker exited", "pid", cmd.Process.Pid)
 		}
+		s.exitErr = err
 		close(s.done)
 	}()
 	return s, nil
 }
 
 // Exited reports whether the child has already terminated, whether from
-// Stop or an unexpected crash, so a Manager can treat both the same way:
-// respawn lazily on the next request.
+// Stop or an unexpected crash. Recovery treats both the same way — respawn
+// lazily on the next request — but reporting does not, so callers pair this
+// with ExitError to say which happened.
 func (s *Supervisor) Exited() bool {
 	select {
 	case <-s.done:
 		return true
 	default:
 		return false
+	}
+}
+
+// Done closes when the child terminates. It lets a caller waiting on
+// readiness give up the moment the process dies, instead of polling a
+// socket nothing is listening on until a timeout expires.
+func (s *Supervisor) Done() <-chan struct{} { return s.done }
+
+// ExitError is the child's exit status once it has terminated: nil for a
+// clean exit (including a graceful Stop), non-nil for a crash or a
+// non-zero status. Meaningless before Exited reports true.
+//
+// The dispatcher used to only log this, which left the API with nothing to
+// say about *why* the worker was gone.
+func (s *Supervisor) ExitError() error {
+	select {
+	case <-s.done:
+		return s.exitErr
+	default:
+		return nil
 	}
 }
 
