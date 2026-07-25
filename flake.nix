@@ -100,9 +100,52 @@
           src = nvimSrc;
           dependencies = [ pkgs.vimPlugins.telescope-nvim ];
         };
+
+        # The Neovim development loop, as one command.
+        #
+        # The split matters for iteration speed: the dispatcher is rebuilt
+        # from the working tree on every launch (seconds), while the worker
+        # comes prebuilt from Nix because compiling it takes minutes and it
+        # is rarely what you are changing. Lua comes from the working tree
+        # too, via the runtimepath, so nothing about the plugin needs a
+        # rebuild at all.
+        lum-nvim-dev = pkgs.writeShellApplication {
+          name = "lum-nvim-dev";
+          runtimeInputs = [ pkgs.git pkgs.go_1_26 pkgs.neovim ];
+          text = ''
+            root=$(git rev-parse --show-toplevel)
+
+            # A dedicated port and data directory, so a dev session is never
+            # served by an installed lum holding the default port, and never
+            # pollutes a real index. Short path: the worker socket lives here
+            # and Unix socket addresses are length-limited.
+            export LUM_HTTP_ADDR="''${LUM_HTTP_ADDR:-127.0.0.1:7421}"
+            export LUM_DATA_DIR="''${LUM_DATA_DIR:-/tmp/lum-dev}"
+            export LUM_WORKER_PATH="''${LUM_WORKER_PATH:-${lum-worker}/bin/lum-worker}"
+
+            echo "building the dispatcher from $root/dispatcher ..."
+            mkdir -p "$root/bin"
+            (cd "$root/dispatcher" && go build -o "$root/bin/lum" ./cmd/lum)
+            export PATH="$root/bin:$PATH"
+
+            # A dev daemon left over from the previous launch still holds the
+            # port, and the CLI talks to whatever answers — so without this,
+            # the build that just finished would not be the one under test.
+            lum stop >/dev/null 2>&1 || true
+
+            echo "lum:    $(command -v lum)"
+            echo "worker: $LUM_WORKER_PATH"
+            echo "data:   $LUM_DATA_DIR   api: $LUM_HTTP_ADDR"
+
+            export LUM_DEV_REPO="$root"
+            export LUM_DEV_TELESCOPE="${pkgs.vimPlugins.telescope-nvim}"
+            export LUM_DEV_PLENARY="${pkgs.vimPlugins.plenary-nvim}"
+            exec nvim -u "$root/dev/nvim.lua" "$@"
+          '';
+        };
       in {
         packages = {
-          inherit lum lum-worker lum-nvim;
+          inherit lum lum-worker lum-nvim lum-nvim-dev;
           default = lum;
         };
 
@@ -111,6 +154,11 @@
         in {
           lum = lumApp;
           default = lumApp;
+          # `nix run .#nvim` — the Neovim loop without entering a shell first.
+          nvim = flake-utils.lib.mkApp {
+            drv = lum-nvim-dev;
+            exePath = "/bin/lum-nvim-dev";
+          };
         };
 
         checks = {
@@ -123,18 +171,45 @@
           '';
         };
 
-        devShells.default = pkgs.mkShell {
-          packages = [
-            pkgs.go_1_26
-            rustToolchain
-            pkgs.cargo
-            pkgs.buf
-            pkgs.curl
-            pkgs.perl
-            pkgs.protobuf
-            pkgs.protoc-gen-go
-            pkgs.protoc-gen-go-grpc
-          ];
+        devShells = {
+          default = pkgs.mkShell {
+            packages = [
+              pkgs.go_1_26
+              rustToolchain
+              pkgs.cargo
+              pkgs.buf
+              pkgs.curl
+              pkgs.perl
+              pkgs.protobuf
+              pkgs.protoc-gen-go
+              pkgs.protoc-gen-go-grpc
+            ];
+            shellHook = ''
+              echo "lum dev shell. Neovim loop: nix develop .#nvim   (or nix run .#nvim)"
+            '';
+          };
+
+          # Kept separate from the default shell so building lum does not pull
+          # in Neovim and Telescope for people who never touch the plugin.
+          #
+          # The hook exports the same environment lum-nvim-dev uses, so `lum`
+          # run directly in this shell and `lum` run from inside Neovim are
+          # the same binary against the same index. Without that, a session
+          # would have two different lums depending on where you typed it.
+          nvim = pkgs.mkShell {
+            packages = [ pkgs.go_1_26 pkgs.neovim pkgs.git lum-nvim-dev ];
+            shellHook = ''
+              export LUM_HTTP_ADDR="''${LUM_HTTP_ADDR:-127.0.0.1:7421}"
+              export LUM_DATA_DIR="''${LUM_DATA_DIR:-/tmp/lum-dev}"
+              export LUM_WORKER_PATH="''${LUM_WORKER_PATH:-${lum-worker}/bin/lum-worker}"
+              if root=$(git rev-parse --show-toplevel 2>/dev/null); then
+                export PATH="$root/bin:$PATH"
+              fi
+              echo "lum Neovim dev shell."
+              echo "  lum-nvim-dev   build the dispatcher and open Neovim with the local plugin"
+              echo "  data $LUM_DATA_DIR   api $LUM_HTTP_ADDR"
+            '';
+          };
         };
       });
 }
