@@ -172,6 +172,16 @@ func tryAcquireAndRelease(path string) (bool, error) {
 	return true, nil
 }
 
+// EventKinds lists every kind the bus can publish, so clients can discover
+// what is filterable without reading the source or guessing at strings.
+func EventKinds() []string {
+	kinds := make([]string, 0, len(events.AllKinds))
+	for _, kind := range events.AllKinds {
+		kinds = append(kinds, string(kind))
+	}
+	return kinds
+}
+
 // Events opens a long-lived connection to GET /v1/events (SSE), starting
 // the daemon on demand exactly like every other command. types optionally
 // narrows the stream to specific event Kinds (server-side ?types= filter);
@@ -179,14 +189,32 @@ func tryAcquireAndRelease(path string) (bool, error) {
 // is cancelled or the connection ends; malformed frames are dropped
 // rather than surfaced, since a stream is inherently best-effort.
 func (c *Client) Events(ctx context.Context, types []string) (<-chan events.Event, error) {
-	path := "/v1/events"
+	return c.events(ctx, types, true)
+}
+
+// EventsLive is Events without the ring-buffer replay: only what happens
+// after subscribing. For clients that act on events rather than display
+// them, replayed history is indistinguishable from news.
+func (c *Client) EventsLive(ctx context.Context, types []string) (<-chan events.Event, error) {
+	return c.events(ctx, types, false)
+}
+
+func (c *Client) events(ctx context.Context, types []string, replay bool) (<-chan events.Event, error) {
+	query := url.Values{}
 	if len(types) > 0 {
-		path += "?types=" + url.QueryEscape(strings.Join(types, ","))
+		query.Set("types", strings.Join(types, ","))
+	}
+	if !replay {
+		query.Set("replay", "false")
+	}
+	path := "/v1/events"
+	if len(query) > 0 {
+		path += "?" + query.Encode()
 	}
 
 	statusCode, status, body, err := c.doStream(ctx, path)
 	if isConnectionRefused(err) {
-		if err := c.ensureDaemon(ctx); err != nil {
+		if err := c.ensureDaemonListening(ctx); err != nil {
 			return nil, err
 		}
 		statusCode, status, body, err = c.doStream(ctx, path)

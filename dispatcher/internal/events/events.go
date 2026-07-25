@@ -50,6 +50,23 @@ const (
 	KindSnapshot Kind = "snapshot"
 )
 
+// AllKinds is every kind the bus publishes, so a client can discover what
+// `?types=` accepts rather than guessing at strings. Keep it in step with
+// the constants above; TestAllKindsIsComplete fails if it drifts.
+var AllKinds = []Kind{
+	KindScanStarted,
+	KindScanFinished,
+	KindDocumentQueued,
+	KindDocumentReading,
+	KindDocumentEmbedding,
+	KindDocumentIngested,
+	KindDocumentFailed,
+	KindDocumentDeleted,
+	KindWorkerStateChanged,
+	KindRPCCompleted,
+	KindSnapshot,
+}
+
 // Event is the one message shape published on the Bus.
 type Event struct {
 	Seq       uint64    `json:"seq"`

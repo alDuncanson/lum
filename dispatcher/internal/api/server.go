@@ -320,8 +320,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ?replay=false subscribes to live events only. The default replays the
+	// ring buffer, which gives a fresh `lum top` immediate context — but a
+	// client that reacts to events rather than displaying them (a Neovim
+	// notifier, a hook) would announce work that finished long before it
+	// connected. Skipping the backlog is the honest fix; the alternative is
+	// every such client reimplementing "is this event stale".
 	ch, backlog, unsubscribe := s.bus.Subscribe(64)
 	defer unsubscribe()
+	if r.URL.Query().Get("replay") == "false" {
+		backlog = nil
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

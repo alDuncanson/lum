@@ -44,6 +44,9 @@ require("telescope").setup({
       executable = "lum",
       limit = 50,
       debounce_ms = 200,
+      -- On here, off by default in the plugin: watching indexing happen is
+      -- most of the point of a dev session.
+      notify = true,
     },
   },
 })

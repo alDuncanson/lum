@@ -20,7 +20,25 @@ import (
 
 const daemonPollInterval = 250 * time.Millisecond
 
+// ensureDaemon starts the daemon if needed and waits for the worker to be
+// ready, which is what a command that is about to search or ingest needs.
 func (c *Client) ensureDaemon(ctx context.Context) error {
+	return c.ensureDaemonUp(ctx, true)
+}
+
+// ensureDaemonListening starts the daemon if needed but returns as soon as
+// the HTTP API answers, without waiting for the worker.
+//
+// /v1/events does not touch the worker, and waiting for readiness would
+// make the one client whose job is to watch startup the one client that
+// cannot see it: the model download and the first scan would both be over
+// before it subscribed. That is exactly the silence this endpoint exists
+// to fill.
+func (c *Client) ensureDaemonListening(ctx context.Context) error {
+	return c.ensureDaemonUp(ctx, false)
+}
+
+func (c *Client) ensureDaemonUp(ctx context.Context, requireWorker bool) error {
 	if !isLoopbackAddress(c.cfg.HTTPAddr) {
 		return fmt.Errorf("refusing to auto-start daemon on non-loopback address %q", c.cfg.HTTPAddr)
 	}
@@ -61,13 +79,45 @@ func (c *Client) ensureDaemon(ctx context.Context) error {
 		if err := c.spawn(c.cfg); err != nil {
 			return fmt.Errorf("starting lum daemon: %w", err)
 		}
-	} else if state == string(worker.StateReady) {
+	} else if !requireWorker || state == string(worker.StateReady) {
+		// Any successful status response means the API is up, which is all a
+		// listening-only caller needs.
 		return nil
 	}
 
+	if !requireWorker {
+		return c.waitListening(ctx)
+	}
 	// Unavailable includes the short interval before lum-worker binds its socket,
 	// so keep polling just like the daemon's own readiness monitor.
 	return c.waitReady(ctx)
+}
+
+// waitListening blocks until the daemon answers /v1/status at all, whatever
+// it says about the worker.
+func (c *Client) waitListening(ctx context.Context) error {
+	ticker := time.NewTicker(daemonPollInterval)
+	defer ticker.Stop()
+	startedWaiting := time.Now()
+	for {
+		if _, _, err := c.daemonStatus(ctx); err == nil {
+			return nil
+		} else if !isConnectionRefused(err) {
+			return fmt.Errorf("waiting for the lum daemon (see %s): %w", c.cfg.DaemonLogPath(), err)
+		}
+		// Same reasoning as waitReady: a free daemon.lock past the startup
+		// grace proves the daemon is gone rather than slow.
+		if time.Since(startedWaiting) > daemonStartGrace {
+			if gone, lockErr := tryAcquireAndRelease(c.cfg.DaemonLockPath()); lockErr == nil && gone {
+				return fmt.Errorf("the lum daemon exited during startup; see %s", c.cfg.DaemonLogPath())
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for the lum daemon (see %s): %w", c.cfg.DaemonLogPath(), ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func acquireLock(ctx context.Context, file *os.File) error {

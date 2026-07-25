@@ -75,9 +75,53 @@ Run it with the mapping or `:Telescope lum`. Optional configuration:
 ```lua
 require("telescope").setup({
   extensions = {
-    lum = { executable = "lum", limit = 50, debounce_ms = 200 },
+    lum = {
+      executable = "lum",
+      limit = 50,
+      debounce_ms = 200,
+      notify = false,   -- see below
+    },
   },
 })
+```
+
+### Knowing what it is doing
+
+`notify = true` reports indexing activity through `vim.notify`, the way an LSP
+reports progress — so whichever notification plugin you use renders it:
+
+```text
+downloading the embedding model (~70 MB, first run only)
+embedding model ready
+64 indexed in 42.1s
+could not index src/huge.json: document exceeds 32 MiB ingest limit
+```
+
+It exists because the first index is otherwise silent, and on a cold start it
+is the one time lum makes you wait. Off by default: subscribing starts the
+daemon, and opening Neovim should not.
+
+Routine events stay quiet on purpose — a warm rescan that changed nothing, idle
+shedding, the respawn after it. A channel that reports non-events is a channel
+you learn to ignore. Tune or replace the rules:
+
+```lua
+notify = {
+  min_scan_ms = 750,          -- ignore faster scans that changed nothing
+  types = { "scan_finished" },-- narrow the subscription (filtered server-side)
+  on_event = function(event)  -- or take the raw stream and do your own thing
+    vim.print(event)
+  end,
+}
+```
+
+Nothing here is Neovim-specific. `lum events` streams the same thing as
+newline-delimited JSON for any consumer:
+
+```sh
+lum events --kinds                        # what can be subscribed to
+lum events --types scan_finished          # filtered server-side
+lum events --no-replay | jq -r .kind      # only what happens from now on
 ```
 
 The extension discovers the current Git root, registers it, and runs

@@ -336,3 +336,55 @@ func TestShutdownRespondsBeforeSignalingAndIsIdempotent(t *testing.T) {
 		t.Fatalf("second request status = %d, want 202", resp2.StatusCode)
 	}
 }
+
+// ?replay=false exists for clients that act on events rather than display
+// them: a replayed backlog is indistinguishable from news, so a Neovim
+// notifier would announce work that finished before it connected.
+func TestEventsReplayFalseSkipsTheBacklog(t *testing.T) {
+	bus := events.NewBus(16)
+	bus.Publish(events.Event{Kind: events.KindScanStarted, SourceID: "before-subscribing"})
+
+	server, _ := newTestServerWithCatalog(t, bus)
+	httpServer := httptest.NewServer(server.Handler(func() {}))
+	defer httpServer.Close()
+
+	for _, tc := range []struct {
+		name        string
+		path        string
+		wantBacklog bool
+	}{
+		{"default replays for context", "/v1/events", true},
+		{"replay=false starts clean", "/v1/events?replay=false", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+
+			// Every subscriber gets a fresh snapshot on connect, so reading
+			// until one arrives is enough to have seen any backlog first.
+			sawBacklog := false
+			scanner := bufio.NewScanner(resp.Body)
+			for scanner.Scan() {
+				line := scanner.Text()
+				if strings.Contains(line, "before-subscribing") {
+					sawBacklog = true
+				}
+				if strings.Contains(line, `"kind":"snapshot"`) {
+					break
+				}
+			}
+			if sawBacklog != tc.wantBacklog {
+				t.Errorf("saw replayed backlog = %v, want %v", sawBacklog, tc.wantBacklog)
+			}
+		})
+	}
+}

@@ -1,10 +1,16 @@
 -- Telescope picker for the lum semantic-search CLI.
 local M = {}
 
+local notify = require("lum.notify")
+
 local config = {
   executable = "lum",
   limit = 50,
   debounce_ms = 200,
+  -- Report indexing activity through vim.notify. Off by default: it starts
+  -- a background subscription, and by extension the lum daemon. See
+  -- lua/lum/notify.lua for the options this accepts.
+  notify = false,
 }
 
 local function workspace_root(opts)
@@ -80,11 +86,28 @@ end
 
 function M.setup(opts)
   config = vim.tbl_deep_extend("force", config, opts or {})
+  -- `notify = true` is shorthand for enabling it with the defaults; a table
+  -- configures it. Anything else (including the default false) leaves the
+  -- subscription off.
+  local notify_opts = config.notify
+  if notify_opts == true then
+    notify_opts = { enabled = true }
+  elseif type(notify_opts) == "table" then
+    notify_opts = vim.tbl_extend("keep", notify_opts, { enabled = true })
+  else
+    notify_opts = { enabled = false }
+  end
+  notify.setup(notify_opts)
 end
 
 function M.lum(opts)
   opts = vim.tbl_deep_extend("force", {}, config, opts or {})
   local root = workspace_root(opts)
+
+  -- Subscribe on first use rather than at startup: this is the moment lum
+  -- is about to be started anyway, and the first index — the slow, silent
+  -- one that prompted all this — is about to run.
+  notify.start(opts.executable)
   local debounce = math.max(0, tonumber(opts.debounce_ms) or 200) / 1000
   local limit = math.min(100, math.max(1, math.floor(tonumber(opts.limit) or 50)))
 
