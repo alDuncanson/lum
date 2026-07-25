@@ -1,9 +1,10 @@
 # Build outputs
 /bin/
-/data-plane/target/
+/worker/target/
 /result
 
-# Local tool installs (protoc plugins, etc.)
+# Local protoc plugin installs. Not needed to build: `nix develop` provides
+# buf and both plugins. Ignored so a stale local copy is never committed.
 /.tools/
 
 # macOS

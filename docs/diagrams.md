@@ -35,16 +35,16 @@ flowchart TB
 
     MCPSRV["lum mcp<br/>internal/mcpserver<br/>stateless adapter"]
 
-    subgraph lumd["lum serve — control plane (Go)"]
+    subgraph lumd["lum serve — the dispatcher"]
         API["internal/api<br/>REST + SSE"]
-        INGEST["internal/ingest<br/>scan planner + 1 document worker"]
+        INGEST["internal/ingest<br/>scan planner + 1 document runner"]
         SRC["internal/source<br/>LocalDir scan · watch · read"]
         CAT["internal/catalog<br/>SQLite bookkeeping"]
         BUS["internal/events.Bus<br/>in-memory pub/sub, ring 512"]
-        MGR["internal/dataplane<br/>Manager + Supervisor + Client"]
+        MGR["internal/worker<br/>Manager + Supervisor + Client"]
     end
 
-    subgraph lumenp["lumen — data plane (Rust, private child process)"]
+    subgraph wkproc["lum-worker — the worker (private child process)"]
         SVC["service.rs<br/>tonic gRPC server"]
         PIPE["pipeline/<br/>parser → chunker → embedder"]
         STORE["store/edge.rs<br/>qdrant-edge shard"]
@@ -75,8 +75,8 @@ flowchart TB
     SRC -->|"E. filesystem: WalkDir + read + sha256, fsnotify"| REPO
     CAT -->|"F. SQL over database/sql, modernc pure-Go driver"| DB
 
-    MGR -->|"D1. gRPC / HTTP-2 / protobuf over AF_UNIX ~/.lum/lumen.sock (0600)"| SVC
-    MGR -->|"D2. process control: fork+exec, stdin pipe as liveness, SIGINT then SIGKILL"| lumenp
+    MGR -->|"D1. gRPC / HTTP-2 / protobuf over AF_UNIX ~/.lum/lum-worker.sock (0600)"| SVC
+    MGR -->|"D2. process control: fork+exec, stdin pipe as liveness, SIGINT then SIGKILL"| wkproc
     MGR -.->|"D3. child stdout/stderr inherited → daemon.log"| LOCKS
 
     SVC --> PIPE
@@ -94,19 +94,19 @@ flowchart TB
 | A | Telescope → CLI | `vim.system`-style job spawn via Telescope `finders.new_job` | argv in; newline-delimited JSON on stdout | `--root <repo> --jsonl --limit N -- <prompt>` out; one `SearchResult` per line back | one-shot, per keystroke batch |
 | B | Agent → `lum mcp` | stdio pipes | JSON-RPC 2.0 (MCP), schemas inferred from Go structs | 4 tools: `search`, `add_source`, `list_sources`, `status` | bidirectional, long-lived |
 | C | Any client → daemon | loopback TCP, `127.0.0.1:7420` (`LUM_HTTP_ADDR`) | JSON request/response; `text/event-stream` for `/v1/events` | the entire public API | request/response + one long-lived stream |
-| D1 | Control plane → lumen | Unix domain socket `~/.lum/lumen.sock`, mode 0600 in a 0700 dir | gRPC over HTTP/2, protobuf (`proto/lum/v1/dataplane.proto`) | 5 RPCs; `x-request-id` metadata on every call | request/response + one client-streaming RPC |
-| D2 | Control plane → lumen | POSIX process control | — | `--grpc-socket`, `--data-dir`, `--embedding-model` argv; stdin pipe held open as a parent-liveness signal (EOF ⇒ exit); `SIGINT`, escalating to `SIGKILL` after 10s | out only |
-| D3 | lumen → control plane | inherited stdout/stderr | `tracing` text lines | logs, merged into `lum serve`'s stream or `daemon.log` | out only |
-| E | Control plane → repository | filesystem | raw bytes | `WalkDir` + `os.ReadFile` + SHA-256; `fsnotify` inotify/FSEvents watches | read only, never writes |
-| F | Control plane → catalog | in-process `database/sql` | SQL, `modernc.org/sqlite` (pure Go, no cgo) | sources, documents, hashes, chunk counts, ingest failures | read/write |
-| G | lumen → model cache | filesystem + HTTPS on first run only | ONNX | `BAAI/bge-small-en-v1.5` (~70 MB) or the `-Q` quantized variant | download once, then read only |
-| H | lumen → vector index | in-process library (qdrant-edge) | qdrant-edge storage files + a sidecar `vectors.manifest.json` | 384-dim vectors + self-describing chunk payloads | read/write, `flush()` before every ack |
+| D1 | Dispatcher → lum-worker | Unix domain socket `~/.lum/lum-worker.sock`, mode 0600 in a 0700 dir | gRPC over HTTP/2, protobuf (`proto/lum/v1/worker.proto`) | 5 RPCs; `x-request-id` metadata on every call | request/response + one client-streaming RPC |
+| D2 | Dispatcher → lum-worker | POSIX process control | — | `--grpc-socket`, `--data-dir`, `--embedding-model` argv; stdin pipe held open as a parent-liveness signal (EOF ⇒ exit); `SIGINT`, escalating to `SIGKILL` after 10s | out only |
+| D3 | lum-worker → dispatcher | inherited stdout/stderr | `tracing` text lines | logs, merged into `lum serve`'s stream or `daemon.log` | out only |
+| E | Dispatcher → repository | filesystem | raw bytes | `WalkDir` + `os.ReadFile` + SHA-256; `fsnotify` inotify/FSEvents watches | read only, never writes |
+| F | Dispatcher → catalog | in-process `database/sql` | SQL, `modernc.org/sqlite` (pure Go, no cgo) | sources, documents, hashes, chunk counts, ingest failures | read/write |
+| G | lum-worker → model cache | filesystem + HTTPS on first run only | ONNX | `BAAI/bge-small-en-v1.5` (~70 MB) or the `-Q` quantized variant | download once, then read only |
+| H | lum-worker → vector index | in-process library (qdrant-edge) | qdrant-edge storage files + a sidecar `vectors.manifest.json` | 384-dim vectors + self-describing chunk payloads | read/write, `flush()` before every ack |
 
 Three properties follow from this table and are worth stating out loud:
 
 - **No client has a privileged side channel.** Telescope shells out to the CLI;
   the CLI and MCP both go through `internal/apiclient`; nothing but the daemon
-  opens `catalog.db`, `vectors/`, or `lumen.sock`.
+  opens `catalog.db`, `vectors/`, or `lum-worker.sock`.
 - **Nothing binds a network interface except loopback.** The private hop is a
   filesystem socket, so it is reachable only by the owning Unix user, and no
   fixed private port can collide.
@@ -129,7 +129,7 @@ sequenceDiagram
     participant C as "any lum client command"
     participant L as "daemon-start.lock (flock)"
     participant D as "lum serve (daemon)"
-    participant W as "lumen (worker)"
+    participant W as "lum-worker (worker)"
 
     C->>D: HTTP request
     D--xC: ECONNREFUSED
@@ -142,16 +142,16 @@ sequenceDiagram
     activate D
     D->>D: mkdir 0700 data dir, then flock daemon.lock for the full lifetime
     D->>D: catalog.Open (schema + identity migration)
-    D->>W: Spawn lumen (argv + stdin liveness pipe)
+    D->>W: Spawn lum-worker (argv + stdin liveness pipe)
     activate W
-    D->>W: Dial unix://~/.lum/lumen.sock (lazy)
+    D->>W: Dial unix://~/.lum/lum-worker.sock (lazy)
     D->>D: bind 127.0.0.1:7420, serve HTTP immediately
     W->>W: bind socket first, then load model on a detached OS thread
     loop until ready or 5 min
         C->>D: GET /v1/status
         D->>W: gRPC Health
         W-->>D: state = starting / downloading-model / ready
-        D-->>C: {"data_plane": "..."}
+        D-->>C: {"worker": "..."}
     end
     W-->>D: ready
     D->>D: for each source: WatchSource + EnqueueScan (startup reconciliation)
@@ -162,9 +162,9 @@ sequenceDiagram
     deactivate D
 ```
 
-Key detail: lumen **binds its socket before it loads the model**, so `Health`
-is answerable during a multi-minute first-run download. And the control plane
-serves HTTP before lumen is ready, so `lum status` works throughout startup.
+Key detail: lum-worker **binds its socket before it loads the model**, so `Health`
+is answerable during a multi-minute first-run download. And the dispatcher
+serves HTTP before lum-worker is ready, so `lum status` works throughout startup.
 
 ### 2.2 Startup and shutdown ordering
 
@@ -175,10 +175,10 @@ flowchart LR
     subgraph up["Startup — cli/serve.go run(), top to bottom"]
         U1["1. data dir 0700"] --> U2["2. flock daemon.lock<br/>(held for the whole lifetime)"]
         U2 --> U3["3. catalog.Open"]
-        U3 --> U4["4. Spawn lumen"]
+        U3 --> U4["4. Spawn lum-worker"]
         U4 --> U5["5. Dial gRPC (lazy)"]
         U5 --> U6["6. events.Bus"]
-        U6 --> U7["7. dataplane.Manager"]
+        U6 --> U7["7. worker.Manager"]
         U7 --> U8["8. net.Listen — must succeed<br/>before any scan starts"]
         U8 --> U9["9. ingest.New + snapshot loop"]
         U9 --> U10["10. serve HTTP"]
@@ -186,9 +186,9 @@ flowchart LR
     end
 
     subgraph down["Shutdown — reverse, via defers"]
-        D1["cancelDaemon(): stop planner,<br/>document worker, watchers, debouncers"] --> D2["server.Shutdown (5s drain)"]
+        D1["cancelDaemon(): stop planner,<br/>document runner, watchers, debouncers"] --> D2["server.Shutdown (5s drain)"]
         D2 --> D3["defer server.Close / listener.Close"]
-        D3 --> D4["dp.Close(): SIGINT lumen,<br/>wait ≤10s, else SIGKILL"]
+        D3 --> D4["dp.Close(): SIGINT lum-worker,<br/>wait ≤10s, else SIGKILL"]
         D4 --> D5["cat.Close()"]
         D5 --> D6["release daemon.lock — the only<br/>authoritative 'fully gone' signal"]
     end
@@ -219,8 +219,8 @@ sequenceDiagram
     participant A as "internal/apiclient"
     participant API as "internal/api"
     participant I as "internal/ingest"
-    participant M as "dataplane.Manager"
-    participant W as lumen
+    participant M as "worker.Manager"
+    participant W as lum-worker
     participant V as "qdrant-edge"
 
     U->>C: lum search --root . "where are retries handled?"
@@ -244,14 +244,14 @@ sequenceDiagram
     A->>API: GET /v1/search?q=...&limit=10&source=SOURCE_ID
     API->>API: validate q non-empty, limit in [1,100]
     API->>M: Search(ctx, query, limit, sourceID)
-    M->>M: awaitReady — respawn lumen if shed/crashed, wait ≤5 min
+    M->>M: awaitReady — respawn lum-worker if shed/crashed, wait ≤5 min
     M->>W: gRPC Search{query, limit, source_id} + x-request-id
     W->>W: embed_query("query: " + text) → 384-dim f32
     W->>V: nearest-neighbour, cosine, WithPayload, optional source_id filter
     V-->>W: scored points
     W-->>M: repeated SearchResult (document_id, source_id, uri,<br/>chunk_index, score, text, start_line, end_line)
     M->>M: publish rpc_completed{transport: grpc, method: Search}
-    M-->>API: []dataplane.SearchResult
+    M-->>API: []worker.SearchResult
     API-->>A: 200 {"query": ..., "results": [...]}
     A-->>C: []apiv1.SearchResult
     C-->>U: human table / --json envelope / --jsonl lines
@@ -376,7 +376,7 @@ sequenceDiagram
         T->>T: topModel.apply — one switch on Kind, no derived semantics
     end
     loop every 15s
-        API->>API: onRequest() — a connected observer counts as<br/>daemon activity, but NOT as data-plane activity
+        API->>API: onRequest() — a connected observer counts as<br/>daemon activity, but NOT as worker activity
         API->>A: ": heartbeat\n\n"
     end
 ```
@@ -386,18 +386,18 @@ Publishers into the bus, and what each contributes:
 ```mermaid
 flowchart LR
     HTTP["api.withRequestID<br/>every HTTP request"] -->|"rpc_completed transport=http"| BUS[("events.Bus<br/>ring 512")]
-    GRPC["dataplane.Manager.recordRPC"] -->|"rpc_completed transport=grpc"| BUS
+    GRPC["worker.Manager.recordRPC"] -->|"rpc_completed transport=grpc"| BUS
     PLAN["ingest planner"] -->|"scan_started / scan_finished"| BUS
-    WORK["ingest document worker"] -->|"document_queued → reading →<br/>embedding → ingested / failed / deleted"| BUS
+    WORK["ingest document runner"] -->|"document_queued → reading →<br/>embedding → ingested / failed / deleted"| BUS
     LOOP["cli.runSnapshotLoop<br/>every 2s"] -->|"snapshot"| BUS
-    LOOP -->|"dataplane_state_changed on transition"| BUS
+    LOOP -->|"worker_state_changed on transition"| BUS
 
     BUS --> SSE["GET /v1/events<br/>optional ?types=k1,k2"]
     SSE --> TOP["lum top"]
     SSE --> JQ["curl -N | jq"]
 ```
 
-The control plane never reaches inside lumen for finer-grained progress. From
+The dispatcher never reaches inside lum-worker for finer-grained progress. From
 outside, an `IngestBatch` RPC's duration *is* the embedding phase for the batch
 it carried — the same opacity the gRPC boundary has everywhere else.
 
@@ -411,16 +411,16 @@ it carried — the same opacity the gRPC boundary has everywhere else.
 flowchart LR
     REPO[("repository files")]
 
-    subgraph cp["control plane"]
+    subgraph cp["dispatcher"]
         SCAN["LocalDir.Scan<br/>WalkDir + .gitignore + ext allow-list + sha256"]
         DIFF["planScan<br/>diff snapshot against catalog"]
         Q(["documentJob channel<br/>buffered 256"])
-        WORKER["documentWorker<br/>read · batch · commit"]
+        WORKER["documentRunner<br/>read · batch · commit"]
     end
 
     CATDB[("catalog.db<br/>documents(source_id, uri, content_hash, chunk_count)")]
 
-    subgraph dp["data plane"]
+    subgraph dp["worker"]
         PARSE["ParserRegistry.parse"]
         CHUNK["WordWindowChunker"]
         EMBED["FastEmbedder.embed_passages"]
@@ -478,7 +478,7 @@ flowchart TB
     PLANNER --> DONE(["jobScanComplete: the barrier"])
     DONE --> CHAN
 
-    CHAN --> WORKER["documentWorker — exactly one"]
+    CHAN --> WORKER["documentRunner — exactly one"]
     WORKER --> RD["jobUpsert: setActiveWork reading → Source.Read"]
     RD --> LIMIT{"len > 32 MiB?"}
     LIMIT -->|"yes"| FAIL["failDocument"]
@@ -489,7 +489,8 @@ flowchart TB
     WORKER --> FIN["jobScanComplete: flush, finishScan,<br/>publish scan_finished, schedule retry"]
 ```
 
-Why one worker: throughput is bounded by the embedding model, so competing
+Why a single document runner: throughput is bounded by the embedding model,
+so competing
 workers would fight over cores rather than add parallelism. The job channel is
 "the event bus in miniature" — a real broker could replace it without changing
 what flows through it.
@@ -507,7 +508,7 @@ while keeping many small files cheap.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant CP as "dataplane.Client.IngestBatch"
+    participant CP as "worker.Client.IngestBatch"
     participant DP as "service.rs ingest_batch"
 
     CP->>DP: metadata x-request-id (appended manually —<br/>the unary interceptor does not cover streams)
@@ -540,7 +541,7 @@ Two design choices visible here:
   batch still commits. Stages are `PARSE`, `RESOURCE_LIMIT`, `STORE`. A
   transport-level error, by contrast, fails all documents in the batch, each
   recorded as its own retryable ingest failure.
-- If lumen answers `Unimplemented`, the client silently falls back to
+- If lum-worker answers `Unimplemented`, the client silently falls back to
   per-document unary `IngestDocument` calls.
 
 ---
@@ -554,13 +555,13 @@ The same file content wears eight different shapes between disk and screen.
 | 1 | repository | `[]byte` on disk | file bytes | — |
 | 2 | `LocalDir.Scan` | `source.DocumentRef` | `{URI, MimeType, ContentHash}` | extension → MIME lookup; SHA-256 of full content; `.gitignore` and hidden-dir exclusion. Deliberately content-free so unchanged files cost no read downstream. |
 | 3 | `ingest.planScan` | `catalog.Document` + `documentJob` | `{ID, SourceID, URI}` + job kind | hash diff against `(source_id, uri)`; document ID minted as `UUIDv5(ns, source_id + "\x00" + uri)` — stable across re-ingests |
-| 4 | `documentWorker` | `dataplane.IngestBatchDocument` | `{DocumentID, SourceID, URI, MimeType, Content}` | lazy `os.ReadFile`; 32 MiB reject; SHA-256 recomputed on the bytes actually sent; batched by count and byte target |
+| 4 | `documentRunner` | `worker.IngestBatchDocument` | `{DocumentID, SourceID, URI, MimeType, Content}` | lazy `os.ReadFile`; 32 MiB reject; SHA-256 recomputed on the bytes actually sent; batched by count and byte target |
 | 5 | gRPC wire | protobuf frames | header + N×256 KiB content + end | length-declared framing; `x-request-id` metadata |
 | 6 | `pipeline/parser.rs` | `ParsedText` | `{text: String, starting_line: u32}` | UTF-8 lossy decode; markdown strips YAML front matter and advances `starting_line` so line provenance survives |
 | 7 | `pipeline/chunker.rs` | `Vec<Chunk>` | `{index, text, start_line, end_line}` | 220-word window, 40-word overlap, whitespace-normalized; per-word line tracking yields inclusive 1-based ranges |
 | 8 | `pipeline/embedder.rs` | `Vec<Vec<f32>>` | 384-dim, cosine-normalized | `"passage: " + text` prefix; sub-batched at 64 so an interactive query can take the model mutex between batches |
 | 9 | `store/edge.rs` | qdrant-edge `PointStruct` | id `UUIDv5(ns, "{document_id}/{chunk_index}")`, payload `{document_id, source_id, uri, chunk_index, text, start_line, end_line}` | keyword payload indexes on `document_id` and `source_id`; `flush()` before ack |
-| 10 | search return | `store::Hit` → `pb::SearchResult` → `dataplane.SearchResult` → `apiv1.SearchResult` | same 8 fields all the way up | payload round-tripped through `serde_json::Value` so lumen depends only on the serialized shape, not qdrant-edge internals. Missing `start_line`/`end_line` degrade to `0` = unknown, for points written by an older data plane. |
+| 10 | search return | `store::Hit` → `pb::SearchResult` → `worker.SearchResult` → `apiv1.SearchResult` | same 8 fields all the way up | payload round-tripped through `serde_json::Value` so lum-worker depends only on the serialized shape, not qdrant-edge internals. Missing `start_line`/`end_line` degrade to `0` = unknown, for points written by an older worker. |
 | 11 | client output | text / JSON / JSONL / Lua table | `uri:start_line  score  snippet` | Telescope maps `uri`→path, `start_line`→`lnum`, `end_line`→`end_lnum` |
 
 Query text takes a much shorter path: `"query: " + text` → 384-dim vector →
@@ -578,8 +579,8 @@ flowchart LR
     CTX --> SCAN["scanRun.requestID<br/>survives the async hop into the planner"]
     SCAN --> EV["every events.Event.RequestID"]
     SCAN --> GRPC["gRPC metadata x-request-id<br/>unary interceptor + manual on IngestBatch"]
-    GRPC --> RS["lumen tracing::info!(request_id, ...)"]
-    CTX --> GLOG["slog 'HTTP request' / 'data plane RPC'"]
+    GRPC --> RS["lum-worker tracing::info!(request_id, ...)"]
+    CTX --> GLOG["slog 'HTTP request' / 'worker RPC'"]
 ```
 
 Background work with no HTTP origin (watch-triggered scans, retries) mints its
@@ -589,10 +590,10 @@ own ID via `requestIDFrom`, so nothing is ever uncorrelated.
 
 ## 6. State machines
 
-### 6.1 Data-plane readiness
+### 6.1 Worker readiness
 
-Four states come from lumen over gRPC; the fifth is synthesized by the control
-plane and never reported by lumen itself.
+Four states come from lum-worker over gRPC; the fifth is synthesized by the
+dispatcher and never reported by lum-worker itself.
 
 ```mermaid
 stateDiagram-v2
@@ -621,7 +622,7 @@ stateDiagram-v2
 ```
 
 `Client.Health` also fails closed on a **contract version mismatch**: if
-lumen's `contract_version` is not `"2"`, the result is `unavailable` with a
+lum-worker's `contract_version` is not `"2"`, the result is `unavailable` with a
 fatal `ContractMismatchError` rather than an optimistic "ready". That guards
 against a mixed-build pair where a stale chunk-count field would silently leave
 orphaned vectors behind.
@@ -663,14 +664,14 @@ flowchart TB
     subgraph outer["lumd — 15 min idle timeout (config.DefaultIdleTimeout)"]
         direction TB
         OA["Resets on: ANY HTTP request<br/>including GET /v1/status<br/>including each 15s SSE heartbeat"]
-        subgraph inner["lumen — 5 min idle timeout (LUM_DATAPLANE_IDLE_TIMEOUT)"]
+        subgraph inner["lum-worker — 5 min idle timeout (LUM_WORKER_IDLE_TIMEOUT)"]
             IA["Resets on: IngestBatch · DeleteDocument · Search only"]
             IB["Does NOT reset on: Health, /v1/status, snapshots, SSE"]
         end
     end
 
     OA -->|"expires → ordered shutdown; next client request<br/>starts a fresh daemon"| OFF(["no lum processes"])
-    IA -->|"expires → SIGINT lumen, reclaim hundreds of MB<br/>of ONNX model + index"| SHED(["data plane: idle"])
+    IA -->|"expires → SIGINT lum-worker, reclaim hundreds of MB<br/>of ONNX model + index"| SHED(["worker: idle"])
     SHED -->|"next add/scan/search: lazy respawn,<br/>awaitReady ≤5 min"| IA
 ```
 
@@ -688,8 +689,8 @@ sequenceDiagram
     participant CL as client
     participant API as "handleDeleteSource"
     participant I as "ingest.DeleteSource"
-    participant W as "documentWorker"
-    participant DP as lumen
+    participant W as "documentRunner"
+    participant DP as lum-worker
     participant CAT as catalog
 
     CL->>API: DELETE /v1/sources/{id}
@@ -740,13 +741,13 @@ take its final flush.
 
 ```mermaid
 flowchart TB
-    subgraph cpown["Control plane owns WHAT EXISTS"]
+    subgraph cpown["Dispatcher owns WHAT EXISTS"]
         S1["sources(id, type, uri UNIQUE, created_at)"]
         S2["documents(id, source_id, uri, content_hash,<br/>chunk_count, ingested_at)<br/>UNIQUE(source_id, uri)"]
         S3["ingest_failures(source_id, uri, attempts, error, failed_at)<br/>PK(source_id, uri)"]
     end
 
-    subgraph dpown["Data plane owns WHAT IT MEANS"]
+    subgraph dpown["Worker owns WHAT IT MEANS"]
         V1["one point per chunk<br/>384-dim vector + self-describing payload"]
         V2["keyword payload indexes: document_id, source_id"]
         V3["vectors.manifest.json — {model, dimension}"]
@@ -776,7 +777,7 @@ and `document_id` / `source_id` are the only values that cross.
 | document id | `UUIDv5(ns, source_id + "\x00" + uri)` | deterministic, so re-registering a repository re-derives the same IDs and re-ingest overwrites in place |
 | document uniqueness | `UNIQUE(source_id, uri)`, **not** `uri` alone | a globally unique `uri` let a second overlapping source's scan find and silently adopt the first source's rows — misattributed provenance with no error raised |
 | vector point id | `UUIDv5(ns, "{document_id}/{chunk_index}")` | re-ingest overwrites points in place rather than churning new ones |
-| vector deletion | filtered delete on the `document_id` payload index | removes the cross-plane invariant "catalog `chunk_count` must exactly match points on disk", which could drift after a hard crash |
+| vector deletion | filtered delete on the `document_id` payload index | removes the cross-process invariant "catalog `chunk_count` must exactly match points on disk", which could drift after a hard crash |
 | index compatibility | `vectors.manifest.json` `{model, dimension}`, plus an explicit legacy identity for pre-manifest indexes | standard and quantized bge produce incompatible vectors; a mismatch must be a startup error, not silently degraded recall |
 | contract compatibility | `ContractVersion = "2"` checked on every `Health` | a mixed-build pair could leave stale chunks behind on a shrinking re-ingest |
 
@@ -802,7 +803,7 @@ implementation are not yet the same shape.
   parse → chunk → payload → gRPC → REST → CLI, never reconstructed by clients.
   That is what makes the Telescope jump-to-line and previewer work, and it is
   the single most repository-specific thing in the pipeline.
-- **Packaging as one product.** The Nix wrapper pins `LUM_LUMEN_PATH` to a
+- **Packaging as one product.** The Nix wrapper pins `LUM_WORKER_PATH` to a
   store path, so the private worker is not a PATH lookup or a second install.
 
 ### Still prose-shaped underneath
@@ -861,7 +862,7 @@ These are the real quality ceiling for code search, in rough order of impact:
 ### Documentation drift found while diagramming
 
 - **Fixed.** `architecture.md` described a 503 gate on scan-triggering
-  endpoints for the "data plane still loading" case. That gate
+  endpoints for the "worker still loading" case. That gate
   (`requireDataPlaneReady`) was real but was removed in `e3c8e4a`, replaced by
   `EnsureRunning()` plus a blocking `Manager.awaitReady` one level down; the
   prose had not been updated. The described *behavior* — a transient startup

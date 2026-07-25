@@ -1,6 +1,7 @@
 # CI is paused while the repository-semantic-search direction is still being
-# built out: `nix flake check` builds both planes plus the ONNX runtime on two
-# runners, which is a slow signal to wait on for exploratory commits.
+# built out: `nix flake check` builds the dispatcher and the worker plus the
+# ONNX runtime on two runners, which is a slow signal to wait on for
+# exploratory commits.
 #
 # The job below is unchanged and still runnable by hand from the Actions tab
 # (or `gh workflow run ci.yml`). To resume automatic runs, restore:

@@ -25,24 +25,24 @@
         rustToolchain = pkgs.rust-bin.stable."1.97.1".default;
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # The Rust build script reads ../proto, so retain both the Cargo
+        # The worker build script reads ../proto, so retain both the Cargo
         # project and the shared protocol contract in Crane's source tree.
         rustSrc = lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
             let rel = lib.removePrefix "${toString ./.}/" (toString path);
-            in rel == "data-plane" || lib.hasPrefix "data-plane/" rel
+            in rel == "worker" || lib.hasPrefix "worker/" rel
               || rel == "proto" || lib.hasPrefix "proto/" rel;
         };
         rustArgs = {
-          pname = "lumen";
+          pname = "lum-worker";
           inherit version;
           src = rustSrc;
-          cargoLock = ./data-plane/Cargo.lock;
+          cargoLock = ./worker/Cargo.lock;
           # Crane installs the lockfile's dependency set through its vendored
           # fixed-output derivation. It stages that lock at the source root, so
           # Cargo cannot also use --locked with this nested manifest path.
-          cargoExtraArgs = "--manifest-path data-plane/Cargo.toml";
+          cargoExtraArgs = "--manifest-path worker/Cargo.toml";
           # Keep build and install paths stable even though Cargo is driven
           # through a nested manifest.
           CARGO_TARGET_DIR = "target";
@@ -51,41 +51,41 @@
           ORT_LIB_LOCATION = "${lib.getLib pkgs.onnxruntime}/lib";
           ORT_PREFER_DYNAMIC_LINK = "1";
         };
-        lumen = craneLib.buildPackage (rustArgs // {
+        lum-worker = craneLib.buildPackage (rustArgs // {
           # Dummification does not understand this nested manifest and would
-          # compile lumen itself in the dependency derivation. A single build
+          # compile lum-worker itself in the dependency derivation. A single build
           # is both faster and substantially smaller on disk.
           cargoArtifacts = null;
           doCheck = false;
           # Crane's default installer asks Cargo for root-manifest metadata;
-          # this repository deliberately keeps the manifest in data-plane.
+          # this repository deliberately keeps the manifest in worker/.
           doNotPostBuildInstallCargoBinaries = true;
           installPhaseCommand = ''
             mkdir -p $out/bin
-            cp target/release/lumen $out/bin/lumen
+            cp target/release/lum-worker $out/bin/lum-worker
           '';
         });
 
         lum-unwrapped = pkgs.buildGoModule {
           pname = "lum";
           inherit version;
-          src = ./control-plane;
+          src = ./dispatcher;
           vendorHash = "sha256-e02pNlwlTXjnK9Kg9TKI73nUqDuHD75ZlaU39jaaT9k=";
           subPackages = [ "cmd/lum" ];
           ldflags = [
-            "-X github.com/alDuncanson/lum/control-plane/internal/version.Value=${version}"
+            "-X github.com/alDuncanson/lum/dispatcher/internal/version.Value=${version}"
           ];
         };
 
-        # Lum is one product even though its implementation uses a private
-        # Rust worker. Pin that worker by store path instead of relying on
-        # symlink resolution or the caller's PATH.
+        # Lum is one product even though it runs as two processes. Pin the
+        # worker by store path instead of relying on symlink resolution or the
+        # caller's PATH.
         lum = pkgs.runCommand "lum-${version}" {
           nativeBuildInputs = [ pkgs.makeWrapper ];
         } ''
           mkdir -p $out/bin
           makeWrapper ${lum-unwrapped}/bin/lum $out/bin/lum \
-            --set-default LUM_LUMEN_PATH ${lumen}/bin/lumen
+            --set-default LUM_WORKER_PATH ${lum-worker}/bin/lum-worker
         '';
 
         nvimSrc = lib.cleanSourceWith {
@@ -102,7 +102,7 @@
         };
       in {
         packages = {
-          inherit lum lum-nvim;
+          inherit lum lum-worker lum-nvim;
           default = lum;
         };
 

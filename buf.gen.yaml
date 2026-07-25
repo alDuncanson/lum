@@ -1,17 +1,16 @@
 # Code generation config for the Go side of the proto contract.
 #
-# `make proto` installs the two protoc plugins into .tools/bin and runs
-# `buf generate`, which invokes them. Output is committed to git under
-# control-plane/internal/gen/ so that plain `go build` works without any
-# codegen step. (The Rust side generates its code at build time instead —
-# see data-plane/build.rs.)
+# Run `nix develop -c buf generate` — the dev shell provides buf and both
+# protoc plugins. Output is committed to git under dispatcher/internal/gen/
+# so that plain `go build` works without any codegen step. The worker
+# generates its own code at build time instead — see worker/build.rs.
 version: v2
 plugins:
   # Message types (structs, marshaling).
   - local: protoc-gen-go
-    out: control-plane/internal/gen
+    out: dispatcher/internal/gen
     opt: paths=source_relative
   # gRPC client + server stubs.
   - local: protoc-gen-go-grpc
-    out: control-plane/internal/gen
+    out: dispatcher/internal/gen
     opt: paths=source_relative

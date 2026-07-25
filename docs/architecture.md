@@ -2,10 +2,16 @@
 
 Lum's product boundary is local semantic code search for a repository. Users
 interact through `lum search --root <repo>`, the Neovim/Telescope extension,
-REST/SSE, or MCP. They install and operate one product. Internally, Lum splits
-coordination and compute into a Go process and a private, supervised Rust worker;
-the terms control plane and data plane below describe that implementation, not
-separately deployed user-facing services.
+REST/SSE, or MCP. They install and operate one product. Internally it runs as
+two processes: a **dispatcher** (`lum`) that owns orchestration and every public
+interface, and a **worker** (`lum-worker`) that owns compute. The worker is
+private — the dispatcher starts, supervises, and recovers it, and users never
+install or run it themselves.
+
+A note on vocabulary: earlier revisions called these the control plane and the
+data plane, borrowed from distributed-systems writing. The split is real but the
+terms oversold it — nothing here is deployed separately or independently
+scalable. Dispatcher and worker describe what the two processes actually do.
 
 This document explains that multi-process design and, more importantly, *why*.
 It is written alongside the code; every section names the files it describes.
@@ -20,14 +26,14 @@ state machines.
 These were chosen up front and drive everything else:
 
 1. **Local-only.** Not "local-first with a cloud story" — local, period.
-   The public API binds loopback and the private inter-plane hop uses an
+   The public API binds loopback and the private inter-process hop uses an
    owner-only Unix socket. This deletes entire problem classes (auth, TLS,
    multi-tenancy) and buys a zero-dependency UX.
-2. **One product, two internal processes.** A Go control plane for orchestration
-   (concurrency, servers, tooling — Go's home turf) and a Rust data
-   plane for compute (parsing, embedding, vector search — where
-   performance and memory control matter). The latter is a private worker
-   started, stopped, and recovered by the former.
+2. **One product, two internal processes.** A dispatcher for orchestration
+   (concurrency, servers, scheduling) and a worker for compute (parsing,
+   embedding, vector search — where performance and memory control
+   matter). The worker is private: started, stopped, and recovered by the
+   dispatcher, never installed or run by the user.
 3. **API-first.** The CLI is a pure client of the REST API. If a feature
    isn't reachable over HTTP, the CLI can't have it — which keeps the
    API honest and makes every client (CLI, MCP, curl, a future TUI)
@@ -42,7 +48,7 @@ These were chosen up front and drive everything else:
 
 ## Internal processes
 
-### Control plane — `control-plane/` (Go, binary: `lum`)
+### Dispatcher — `dispatcher/` (Go, binary: `lum`)
 
 Owns *what and when*: which sources exist, what documents they contained
 at last scan, what changed, what to (re)ingest, and the public API.
@@ -56,11 +62,11 @@ at last scan, what changed, what to (re)ingest, and the public API.
 | `internal/mcpserver` | MCP stdio server: four tools, each a thin wrapper over the REST API |
 | `internal/source` | the `Source` interface, URI → implementation dispatch, `localdir` |
 | `internal/catalog` | SQLite bookkeeping: sources, documents, hashes, chunk counts, ingest failures |
-| `internal/ingest` | scan planner + document worker: diff source state, batch jobs, retry failures |
-| `internal/dataplane` | lumen child-process supervisor + typed gRPC client wrapper |
+| `internal/ingest` | scan planner + document runner: diff source state, batch jobs, retry failures |
+| `internal/worker` | lum-worker child-process supervisor + typed gRPC client wrapper |
 | `internal/gen` | generated proto code (committed, so `go build` just works) |
 
-### Data plane — `data-plane/` (private Rust worker)
+### Worker — `worker/` (private, binary: `lum-worker`)
 
 Owns *bytes and math*: parse → chunk → embed → store/search. Spawned by
 `lum serve` as a child process; users never run it directly.
@@ -73,12 +79,12 @@ Owns *bytes and math*: parse → chunk → embed → store/search. Spawned by
 | `pipeline/embedder.rs` | `Embedder` trait + fastembed (bge-small-en-v1.5) |
 | `store/` | `VectorStore` trait + qdrant-edge implementation |
 
-The data plane is **stateless between calls**: every RPC carries all
+The worker is **stateless between calls**: every RPC carries all
 context it needs (document IDs, source IDs, content). It can be killed
 and restarted at any time without coordination — its only persistent
 artifacts are the vector index and the model cache.
 
-## The contract — `proto/lum/v1/dataplane.proto`
+## The contract — `proto/lum/v1/worker.proto`
 
 Five RPCs: `Health`, `IngestDocument`, `IngestBatch`, `DeleteDocument`, and
 `Search`. The narrowness is the point: repository discovery, file watching,
@@ -92,9 +98,9 @@ Codegen is available in `nix develop` without a system protobuf toolchain:
 ## Data ownership: one home per fact
 
 ```
-catalog.db  (control plane)   WHAT EXISTS   sources, documents, content
-                                            hashes, chunk counts, failures
-vectors/    (data plane)      WHAT IT MEANS embeddings + chunk payloads
+catalog.db  (dispatcher)  WHAT EXISTS    sources, documents, content
+                                          hashes, chunk counts, failures
+vectors/    (worker)      WHAT IT MEANS   embeddings + chunk payloads
 ```
 
 The catalog is never asked "what matches this query?"; the vector store
@@ -112,12 +118,12 @@ Deletion (a shrinking re-ingest's stale tail, or an explicit
 `DeleteDocument`) is a **filtered delete** on a payload index over
 `document_id` (`qdrant-edge`'s `DeletePointsByFilter`), not a chunk
 count. Earlier, the wire contract carried `previous_chunk_count` /
-`chunk_count` so the data plane could derive exactly which point IDs to
+`chunk_count` so the worker could derive exactly which point IDs to
 remove — a physical detail of the vector store's layout leaking across
-the plane boundary, and a cross-plane invariant ("catalog chunk_count
-must exactly match points on disk") that could drift after a hard
-crash. The filtered delete removes that invariant entirely: the control
-plane no longer tracks or echoes back a count for this to work (#3).
+the process boundary, and a cross-process invariant ("catalog
+chunk_count must exactly match points on disk") that could drift after a
+hard crash. The filtered delete removes that invariant entirely: the
+dispatcher no longer tracks or echoes back a count for this to work (#3).
 
 ### Document identity and source deletion
 
@@ -131,7 +137,7 @@ source that produced it makes that impossible; each source's rows are
 independent even at an identical URI (#4).
 
 `DELETE /v1/sources/{id}` walks every document the source owns, deletes
-its vectors from the data plane, *then* deletes its catalog row —
+its vectors from the worker, *then* deletes its catalog row —
 deliberately in that order and synchronously, unlike the fire-and-forget
 `POST /v1/sources`. The schema's `ON DELETE CASCADE` only ever cleans up
 catalog rows; deleting the source row first, before vectors are
@@ -144,7 +150,7 @@ lingering vectors.
 ### Durability ordering
 
 `EdgeStore` flushes qdrant-edge **before** acking an ingest, because the
-control plane writes its catalog row (hash + chunk count) after the ack.
+dispatcher writes its catalog row (hash + chunk count) after the ack.
 If vectors could be lost after that row is written, the next scan would
 see a matching hash, skip the document forever, and search would
 silently miss it. Rule: durability before bookkeeping.
@@ -169,7 +175,7 @@ lum add ~/Documents
                        ├─ new/changed ─┐
                        └─ vanished ────┴▶ document job queue
                                              │
-                                  one document worker
+                                  one document runner
                                   ├─ Read → gRPC IngestBatch
                                   │          └▶ parse→chunk→embed→upsert
                                   │    → catalog upsert (hash, count)
@@ -193,8 +199,9 @@ immediately; fsnotify change notifications have a one-second debounce path.
 Local directory watches are recursive (new directories are added dynamically),
 skip the same hidden trees as scans, and degrade to five-minute full rescans if
 OS watch limits or event delivery fail. A planner turns each authoritative
-source snapshot into document upsert/delete jobs. Those jobs are consumed by one worker — single
-because ingestion throughput is bounded by the embedding model anyway — and
+source snapshot into document upsert/delete jobs. Those jobs are consumed by a single document runner —
+single because ingestion throughput is bounded by the embedding model
+anyway — and
 small documents are combined into cross-document batches. The job channel is
 the "event bus" in miniature; a real broker could replace it without changing
 what flows through it.
@@ -205,16 +212,16 @@ Already-successful documents hash-skip during those retries. The failure is
 cleared on success (or when a never-indexed document disappears); exhausted
 failures remain visible through `/v1/status` and `lum status`.
 
-On daemon startup, lumd starts its HTTP API immediately while lumen loads its
-model and vector store. `/v1/status` reports `data_plane` as `starting`,
+On daemon startup, lumd starts its HTTP API immediately while lum-worker loads its
+model and vector store. `/v1/status` reports `worker` as `starting`,
 `downloading-model`, `ready`, `unavailable`, or `idle` — the last synthesized by
-`dataplane.Manager` rather than reported by lumen (see idle shedding below).
+`worker.Manager` rather than reported by lum-worker (see idle shedding below).
 Startup watches and scans begin only after readiness.
 
-A scan that gets queued before lumen is ready is neither rejected nor failed.
-The planner takes its filesystem snapshot regardless (that needs no data plane),
-and the document worker then blocks inside `dataplane.Manager.awaitReady` until
-lumen reports ready, bounded by `StartupTimeout`. That is what keeps a
+A scan that gets queued before lum-worker is ready is neither rejected nor failed.
+The planner takes its filesystem snapshot regardless (that needs no worker),
+and the document runner then blocks inside `worker.Manager.awaitReady` until
+lum-worker reports ready, bounded by `StartupTimeout`. That is what keeps a
 transient startup state from being persisted as an ingestion failure. Earlier,
 a `requireDataPlaneReady` gate returned 503 from every scan-triggering endpoint
 to achieve the same thing; blocking one level down replaced it, so callers no
@@ -222,10 +229,10 @@ longer have to distinguish "not ready yet" from a real error. `apiclient` still
 treats a 503 like a refused connection — wait for readiness, then replay the
 request — which is also what makes on-demand daemon startup invisible.
 
-The control plane and lumen communicate over `lumen.sock` inside the 0700 data
+The dispatcher and the worker communicate over `lum-worker.sock` inside the 0700 data
 directory, avoiding a fixed private port and preventing other local users from
-bypassing the HTTP API. lumen also watches a pipe on stdin and shuts down when
-the control plane disappears, including after an ungraceful parent exit.
+bypassing the HTTP API. lum-worker also watches a pipe on stdin and shuts down when
+the dispatcher disappears, including after an ungraceful parent exit.
 
 ## Search flow
 
@@ -285,13 +292,13 @@ connection takes an exclusive `daemon-start.lock` flock, rechecks the API, and
 starts a detached `lum serve` only when still needed. This makes concurrent
 commands converge on one daemon. The daemon itself holds `daemon.lock` until
 all resources finish shutting down, preventing a replacement from overlapping
-the old lumen process. Calls poll `/v1/status` through model startup before
+the old lum-worker process. Calls poll `/v1/status` through model startup before
 replaying the original request; waits are bounded at five minutes and detached
 output goes to `daemon.log`.
 
 Every HTTP request resets a 15-minute idle timer. When it expires, the normal
 ordered shutdown path stops ingestion, drains HTTP, and gracefully terminates
-lumen. The next client request starts a fresh daemon.
+lum-worker. The next client request starts a fresh daemon.
 
 `lum stop` (`POST /v1/shutdown`) ends the daemon on demand rather than
 waiting out the idle timer, going through the identical ordered path: the
@@ -300,7 +307,7 @@ answer, then the daemon's main loop selects on that signal exactly like
 an OS SIGINT or the idle timer firing. `apiclient.Client.Stop` then waits
 for `daemon.lock` to actually release before returning — deliberately
 *not* for the HTTP port to stop answering, since `listener.Close()` runs
-before `dp.Close()` (stops lumen) and `cat.Close()` in the shutdown
+before `dp.Close()` (stops lum-worker) and `cat.Close()` in the shutdown
 sequence, so the port can go quiet while the process is still mid
 cleanup (confirmed by hand: the PID stayed alive nearly a second after
 `/v1/status` started refusing connections). The flock is the same
@@ -316,21 +323,21 @@ alive by inode regardless, so it keeps serving the old state and
 `lum status`/`lum search` look completely unaffected by the deletion
 until the process holding them exits.
 
-## Data plane idle shedding
+## Worker idle shedding
 
-lumen carries its own, independent (and shorter) idle lifetime nested
-inside lumd's: `dataplane.Manager` tracks the last ingest/search RPC and, by
-default, gracefully stops lumen after 5 minutes without one — reclaiming the
+lum-worker carries its own, independent (and shorter) idle lifetime nested
+inside lumd's: `worker.Manager` tracks the last ingest/search RPC and, by
+default, gracefully stops lum-worker after 5 minutes without one — reclaiming the
 hundreds of MB the ONNX model and qdrant-edge hold resident, the sleeper
-benefit of splitting the two planes into separate processes in the first
+benefit of splitting the two processes into separate processes in the first
 place. Deliberately excluded from "activity": `/v1/status` and other health
 checks, so monitoring lum doesn't itself keep the model warm.
 
-A request that actually needs the data plane (add source, scan, search)
+A request that actually needs the worker (add source, scan, search)
 respawns it lazily and waits for readiness, exactly mirroring the on-demand
-daemon flow above one level down: `lum status` reports `data plane: idle`
+daemon flow above one level down: `lum status` reports `worker: idle`
 while shed, `starting`/`downloading-model` while the respawn is in flight,
-then `ready`. An unexpected lumen crash is handled identically — Manager
+then `ready`. An unexpected lum-worker crash is handled identically — Manager
 treats a dead supervisor the same as a deliberate shed, so the next request
 respawns it rather than failing until `lum serve` is restarted by hand.
 
@@ -348,17 +355,17 @@ two kinds of message:
 - **Discrete events**: `scan_started`/`scan_finished` bracket a source
   scan; `document_queued → document_reading → document_embedding →
   document_ingested`/`document_failed` trace one document through the
-  pipeline (`document_deleted` for the delete path); `dataplane_state_changed`
-  fires on every lumen readiness transition; `rpc_completed` covers
-  whole-RPC latency for both the data-plane gRPC hop and the public HTTP
+  pipeline (`document_deleted` for the delete path); `worker_state_changed`
+  fires on every lum-worker readiness transition; `rpc_completed` covers
+  whole-RPC latency for both the worker gRPC hop and the public HTTP
   API.
 - **Periodic snapshots** (`kind: snapshot`, every 2s): scan queue depth,
-  the document worker's current document and stage, data plane state,
+  the document runner's current document and stage, worker state,
   and index totals — a heartbeat for anything that wants a gauge reading
   rather than tracking discrete events itself.
 
 Every event carries the request ID (#11) so it correlates with logs. The
-control plane doesn't reach into lumen for finer-grained visibility: it
+dispatcher doesn't reach into lum-worker for finer-grained visibility: it
 knows when it sent an IngestBatch RPC and when it returned, and treats
 that duration as the "embedding" phase from outside, the same opaque
 treatment of the gRPC boundary described above. This bus is a
@@ -401,7 +408,7 @@ No semantics live in the TUI that aren't already in the event schema
 | fastembed / ONNX | Ollama or API embeddings | in-process, auto-downloaded, offline after first run |
 | SQLite via modernc (pure Go) | mattn/go-sqlite3 (cgo) | `go build` works without a C toolchain |
 | channel + worker | NATS/Kafka | right-sized for local-only; interface allows upgrading |
-| REST between CLI and daemon | gRPC everywhere | curl-ability; gRPC learning happens on the inter-plane hop |
+| REST between CLI and daemon | gRPC everywhere | curl-ability; gRPC learning happens on the inter-process hop |
 
 ## Hardening nits (#7)
 
@@ -416,9 +423,9 @@ Small fixes from an architecture review:
   during a scan instead of silently continuing. One bad permission still
   doesn't hide every document, but now it's diagnosable instead of an
   invisible gap in the index.
-- **gRPC error taxonomy**: `run_blocking` (data-plane) mapped every
+- **gRPC error taxonomy**: `run_blocking` (worker) mapped every
   pipeline error to `Status::internal`, including "no parser registered
-  for MIME type," which is the caller's fault, not lumen's. A small
+  for MIME type," which is the caller's fault, not lum-worker's. A small
   `InvalidArgument` marker error (downcast from the `anyhow::Error`) lets
   it choose `Status::invalid_argument` instead — a first step toward
   distinguishing retryable from permanent failures, not a full

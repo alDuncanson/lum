@@ -1,5 +1,5 @@
 # buf configuration (v2). `buf` compiles our .proto files without a
-# protoc install and runs lint checks against them. See `make proto`.
+# protoc install and runs lint checks against them. Run `nix develop -c buf generate`.
 version: v2
 modules:
   - path: proto

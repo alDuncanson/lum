@@ -1,25 +1,13 @@
 # lum
 
-Lum is local semantic code search for repositories. Point it at a repository,
-search by meaning from the CLI or Neovim, and jump to the matching line range.
-Source code, embeddings, and the index stay on your machine.
+Lum is a local semantic code-search engine, with a Telescope integration for
+Neovim. Point it at a repository, search by meaning instead of by pattern, and
+jump to the matching line range. Your code, the embeddings, and the index never
+leave the machine.
 
 ```sh
 lum search --root ~/code/my-project "where are retries handled?"
 ```
-
-`--root` discovers and idempotently registers the repository, so there is no
-separate setup step. Lum indexes Markdown and common Go, Rust, Lua, Nix,
-Python, JavaScript/TypeScript, JVM, C/C++, shell, SQL, configuration, and web
-source extensions. It honors nested `.gitignore` files (including negation
-rules), watches the repository for changes, and returns inclusive, 1-based
-source line ranges with each result.
-
-Lum is one product with a multi-process implementation: the `lum` CLI and Go
-coordinator own the public interfaces and repository lifecycle, while a private
-Rust worker performs parsing, embedding, and vector search. The coordinator
-starts and supervises that worker; users do not install, configure, or run two
-services.
 
 ## Install
 
@@ -29,14 +17,11 @@ With [Nix](https://nixos.org/) flakes enabled:
 nix profile install github:alDuncanson/lum
 ```
 
-This installs the complete wrapped product. Nix and Home Manager configurations
-can select the flake's `lum-nvim` output to add the Neovim/Telescope integration.
+That is the whole install — no containers, no API keys, no service to operate.
 The embedding model (BAAI/bge-small-en-v1.5, about 70 MB) downloads on first use
-and is then cached locally. First use requires network access for that download;
-subsequent use is local. No containers, API keys, or services to operate are
-required.
+and is cached locally; everything after that is offline.
 
-For example, with this repository available as a flake input named `lum`:
+With this repository as a flake input named `lum`:
 
 ```nix
 home.packages = [ inputs.lum.packages.${pkgs.system}.lum ];
@@ -46,17 +31,24 @@ programs.neovim.plugins = [
 ];
 ```
 
-## CLI
+Flake outputs: `lum` (the product), `lum-nvim` (the Neovim plugin), and
+`lum-worker` (exposed for debugging; `lum` already pins its own).
 
-Search a repository directly:
+## Search
 
 ```sh
 lum search --root . "where is daemon startup coordinated?"
-lum search --root . --json "daemon startup"   # one JSON document
-lum search --root . --jsonl "daemon startup"  # one result per line
+lum search --root . --json  "daemon startup"   # one JSON document
+lum search --root . --jsonl "daemon startup"   # one result per line
 ```
 
-Repositories may also be managed explicitly:
+`--root` discovers and idempotently registers the repository, so there is no
+separate setup step. Lum indexes Markdown and common source extensions across
+~20 languages plus configuration and web formats. It honors nested `.gitignore`
+files including negation rules, watches the repository for changes, and returns
+inclusive, 1-based line ranges with every result.
+
+Repositories can also be managed explicitly:
 
 ```sh
 lum add ~/code/my-project
@@ -65,19 +57,11 @@ lum top                         # live indexing activity
 lum stop
 ```
 
-CLI and MCP requests start Lum on demand. It keeps registered repositories
-current with recursive file watching; startup and periodic full scans provide a
-correctness backstop if watch delivery fails.
+Lum starts on demand — the first search, tool call, or `curl` brings it up. It
+keeps registered repositories current with recursive file watching; startup and
+periodic full scans are the correctness backstop if watch delivery fails.
 
 ## Neovim / Telescope
-
-The Telescope extension in `lua/` discovers the current Git root, registers it
-idempotently, and invokes `lum search --root <repo> --jsonl`. It uses the line
-provenance in each result to preview and open the matching code. It never reads
-Lum's database, vector index, or private worker protocol directly.
-
-Install the `lum-nvim` Nix output (or add this repository's `lua/` directory to
-Neovim's runtime path with your plugin manager), then load the extension:
 
 ```lua
 require("telescope").load_extension("lum")
@@ -96,9 +80,20 @@ require("telescope").setup({
 })
 ```
 
-## REST, events, and MCP
+The extension discovers the current Git root, registers it, and runs
+`lum search --root <repo> --jsonl`, using the line provenance in each result to
+preview and open the matching code. Install the `lum-nvim` flake output, or put
+this repository's `lua/` directory on Neovim's runtime path with your plugin
+manager.
 
-The CLI is a client of the loopback REST API. For example:
+Notably, it is an ordinary CLI client. It reads no database, no vector index, and
+no private socket — which is the same deal every other integration gets.
+
+## Built to be extended
+
+Lum is API-first, and that is a constraint rather than a slogan: the CLI is a
+pure client of the REST API, so a capability that is not reachable over HTTP
+cannot exist in the CLI either. Every integration is peer to every other one.
 
 ```sh
 curl 'localhost:7420/v1/search?q=retry+backoff&limit=3'
@@ -107,16 +102,16 @@ curl -X DELETE localhost:7420/v1/sources/<source-id>
 ```
 
 Server-Sent Events expose scans, document lifecycle, worker readiness, queue
-depth, current work, and index totals:
+depth, current work, and index totals — no client library required:
 
 ```sh
 curl -N localhost:7420/v1/events
 curl -N 'localhost:7420/v1/events?types=document_ingested,document_failed'
 ```
 
-`lum mcp` serves MCP over stdio with `search`, `add_source`, `list_sources`, and
-`status` tools. Each delegates to the same REST API, and the first tool call
-starts Lum if needed:
+`lum mcp` serves the Model Context Protocol over stdio with `search`,
+`add_source`, `list_sources`, and `status` tools, each delegating to that same
+REST API:
 
 ```json
 {
@@ -129,28 +124,40 @@ starts Lum if needed:
 }
 ```
 
+Internally, the extension points are interfaces rather than forks: a new file
+format is a `Parser`, a new chunking strategy is a `Chunker`, a new embedding
+model is an `Embedder`, a different index is a `VectorStore`, and a new thing to
+index is a `Source`. Adding one is an implementation, not an architecture change.
+
 ## How it runs
 
 ```text
-CLI / Telescope / MCP / curl
-              │ REST (MCP uses stdio, then REST)
+CLI · Telescope · MCP · curl
+              │ REST + SSE over loopback (MCP speaks stdio, then REST)
               ▼
-      lum — Go coordinator
+      lum — the dispatcher
       repository scans · watching · catalog · public API
-              │ private gRPC over ~/.lum/lumen.sock
+              │ private gRPC over ~/.lum/lum-worker.sock
               ▼
-      supervised Rust worker
+      lum-worker — the worker
       parse → line-aware chunks → embed → vector search
 ```
 
-The HTTP API listens on `127.0.0.1:7420` (`LUM_HTTP_ADDR` overrides it).
-The private worker opens no TCP port. The coordinator exits after 15 minutes
-without an HTTP request. Its worker is shed after 5 minutes without an
-ingest/search RPC to release model and index memory, then respawned lazily; a
-worker crash is handled the same way. `lum serve` runs the product in the
-foreground for debugging. See [docs/architecture.md](docs/architecture.md) for
-the detailed design and [docs/diagrams.md](docs/diagrams.md) for data flow,
-architecture, and protocol-boundary diagrams.
+Two processes, one product. The dispatcher owns orchestration and every public
+interface; the worker owns parsing, embedding, and vector search. The dispatcher
+starts and supervises the worker, so there is never a second thing to install or
+run.
+
+The HTTP API listens on `127.0.0.1:7420` (`LUM_HTTP_ADDR` overrides it) and the
+worker opens no TCP port at all. The dispatcher exits after 15 minutes without a
+request. Its worker is shed after 5 minutes without an ingest or search, which
+releases the model and index memory, then respawned on demand; a worker crash is
+handled the same way. `lum serve` runs everything in the foreground for
+debugging.
+
+See [docs/architecture.md](docs/architecture.md) for the design and
+[docs/diagrams.md](docs/diagrams.md) for data flow, architecture, and
+protocol-boundary diagrams.
 
 ## State and reset
 
@@ -158,50 +165,40 @@ Everything lives under `~/.lum` (override with `LUM_DATA_DIR`):
 
 ```text
 ~/.lum/
-├── catalog.db          # repositories, documents, hashes, chunk counts, failures
-├── daemon.log          # detached coordinator and worker logs
-├── daemon.lock         # held for the coordinator's complete lifetime
-├── daemon-start.lock   # coordinates concurrent on-demand starts
-├── lumen.sock          # private coordinator-to-worker gRPC socket
-├── models/             # downloaded embedding model cache
-└── vectors/            # qdrant-edge index and chunk payloads
+├── catalog.db              # repositories, documents, hashes, chunk counts, failures
+├── daemon.log              # detached logs from both processes
+├── daemon.lock             # held for the dispatcher's complete lifetime
+├── daemon-start.lock       # coordinates concurrent on-demand starts
+├── lum-worker.sock         # private dispatcher-to-worker gRPC socket
+├── models/                 # downloaded embedding model cache
+├── vectors/                # qdrant-edge index and chunk payloads
+└── vectors.manifest.json   # model and dimension the index was built with
 ```
 
-To reset Lum, run `lum stop` before deleting the directory. `lum stop` waits
-until all files are released; deleting state while Lum is running does not reset
-open SQLite/vector files on Unix.
+Run `lum stop` before deleting that directory. `lum stop` waits until every file
+is released; on Unix, deleting state while Lum is running does not reset the open
+SQLite and vector files.
 
-The full-precision model is the default. For higher CPU throughput with a small
-retrieval-quality tradeoff, use `lum serve --embedding-model quantized` or set
-`LUM_EMBEDDING_MODEL=quantized`. The models produce incompatible vectors. When
+The full-precision model is the default. For higher CPU throughput at a small
+retrieval-quality cost, use `lum serve --embedding-model quantized` or set
+`LUM_EMBEDDING_MODEL=quantized`. The two produce incompatible vectors, so when
 switching, stop Lum and remove `catalog.db`, `vectors/`, and
-`vectors.manifest.json`, then re-index; keep `models/` to avoid another download.
+`vectors.manifest.json`, then re-index — keep `models/` to avoid another
+download.
 
-## Development and benchmarks
+## Development
 
-Lum targets Unix-like systems because its private transport is a Unix domain
-socket.
-
-```sh
-nix develop                    # pinned Go and Rust development shell
-(cd control-plane && go test ./...)
-(cd data-plane && cargo test)
-buf generate                   # regenerate committed Go protobufs
-nix flake check
-nix run . -- serve             # build and run in the foreground
-```
-
-For repeatable local measurements:
+Lum targets Unix-like systems; its private transport is a Unix domain socket.
 
 ```sh
-nix build
-bash scripts/benchmark.sh --lum ./result/bin/lum --model-cache ~/.lum/models .
+nix develop                      # pinned toolchains for both processes
+(cd dispatcher && go test ./...)
+(cd worker && cargo test)
+nix develop -c buf generate      # regenerate the committed protobuf stubs
+nix flake check                  # build and test everything
+nix run . -- serve               # build and run in the foreground
 ```
 
-The harness emits JSON with cold-start latency, initial index-and-search time,
-warm query latency (min/median/p95/max), indexed document/chunk counts, and a
-resident-memory snapshot of both internal processes. It uses a temporary
-`LUM_DATA_DIR`; an existing model cache only excludes the one-time download.
-Results depend on machine and repository, so the project records the procedure
-rather than a fixed headline number. Use `--runs`, `--query`, or `--addr` to
-adjust it.
+`proto/lum/v1/worker.proto` is the contract between the two processes. The
+dispatcher's stubs are generated by `buf` and committed, so a plain `go build`
+needs no codegen step; the worker generates its own at build time.
