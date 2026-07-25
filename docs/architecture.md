@@ -1,8 +1,14 @@
 # lum architecture
 
-This document explains how lum is put together and, more importantly,
-*why*. It is written to be read alongside the code; every section names
-the files it describes.
+Lum's product boundary is local semantic code search for a repository. Users
+interact through `lum search --root <repo>`, the Neovim/Telescope extension,
+REST/SSE, or MCP. They install and operate one product. Internally, Lum splits
+coordination and compute into a Go process and a private, supervised Rust worker;
+the terms control plane and data plane below describe that implementation, not
+separately deployed user-facing services.
+
+This document explains that multi-process design and, more importantly, *why*.
+It is written alongside the code; every section names the files it describes.
 
 ## Design constraints
 
@@ -12,10 +18,11 @@ These were chosen up front and drive everything else:
    The public API binds loopback and the private inter-plane hop uses an
    owner-only Unix socket. This deletes entire problem classes (auth, TLS,
    multi-tenancy) and buys a zero-dependency UX.
-2. **Two planes, two languages.** A Go control plane for orchestration
+2. **One product, two internal processes.** A Go control plane for orchestration
    (concurrency, servers, tooling — Go's home turf) and a Rust data
    plane for compute (parsing, embedding, vector search — where
-   performance and memory control matter).
+   performance and memory control matter). The latter is a private worker
+   started, stopped, and recovered by the former.
 3. **API-first.** The CLI is a pure client of the REST API. If a feature
    isn't reachable over HTTP, the CLI can't have it — which keeps the
    API honest and makes every client (CLI, MCP, curl, a future TUI)
@@ -23,10 +30,12 @@ These were chosen up front and drive everything else:
 4. **Interface-driven extension points.** New source types, parsers,
    chunkers, embedders, and vector stores are new implementations of
    existing interfaces, never architectural changes.
-5. **No runtime dependencies.** No Docker, no protoc, no model API keys.
-   Two toolchains to build; two binaries to run.
+5. **No services to operate.** No Docker, no protoc, no model API
+   keys, and no second service for the user to operate. The package contains
+   all executables and native runtime libraries; first use requires network
+   access to download the embedding model.
 
-## The planes
+## Internal processes
 
 ### Control plane — `control-plane/` (Go, binary: `lum`)
 
@@ -46,7 +55,7 @@ at last scan, what changed, what to (re)ingest, and the public API.
 | `internal/dataplane` | lumen child-process supervisor + typed gRPC client wrapper |
 | `internal/gen` | generated proto code (committed, so `go build` just works) |
 
-### Data plane — `data-plane/` (Rust, binary: `lumen`)
+### Data plane — `data-plane/` (private Rust worker)
 
 Owns *bytes and math*: parse → chunk → embed → store/search. Spawned by
 `lum serve` as a child process; users never run it directly.
@@ -66,10 +75,10 @@ artifacts are the vector index and the model cache.
 
 ## The contract — `proto/lum/v1/dataplane.proto`
 
-Five RPCs: `Health`, `IngestDocument`, `IngestBatch`, `DeleteDocument`, and `Search`. The
-narrowness is the point: features above this line (MCP, and planned RSS
-sources and file watching) reuse these RPCs untouched — MCP shipped
-without changing a single one.
+Five RPCs: `Health`, `IngestDocument`, `IngestBatch`, `DeleteDocument`, and
+`Search`. The narrowness is the point: repository discovery, file watching,
+CLI output formats, Telescope, and MCP all live above this line and reuse these
+RPCs.
 
 Codegen is available in `nix develop` without a system protobuf toolchain:
 - Go: `buf generate` → protoc-gen-go(-grpc), output committed.
@@ -165,6 +174,15 @@ lum add ~/Documents
 Scans are idempotent and cheap when nothing changed, which makes the
 recovery story trivial: rescan everything on daemon startup.
 
+For the repository-oriented path, `lum search --root <path>` canonicalizes that
+directory and ensures its source exists before searching. The Telescope
+extension first discovers the current Git root and passes it through the same
+CLI path, so neither interface requires a prior `lum add`. Directory discovery
+recognizes the supported source and configuration extensions and applies
+`.gitignore` rules at each directory level, including nested files and
+negations. Hidden trees that Lum excludes are skipped consistently by both scans
+and watches.
+
 Pending scans are deduplicated by source. Explicit and startup scans run
 immediately; fsnotify change notifications have a one-second debounce path.
 Local directory watches are recursive (new directories are added dynamically),
@@ -196,9 +214,11 @@ the control plane disappears, including after an ungraceful parent exit.
 ## Search flow
 
 ```
-lum search "..." ──▶ GET /v1/search ──▶ gRPC Search
-                                          └▶ embed("query: ...") → qdrant-edge
-                                             nearest-neighbor (cosine) → hits
+lum search --root <repo> "..."
+  ├─▶ discover/register repository (idempotent)
+  └─▶ GET /v1/search ──▶ gRPC Search
+                           └▶ embed("query: ...") → qdrant-edge
+                              nearest-neighbor (cosine) → hits
 ```
 
 Chunks are embedded as `"passage: ..."` and queries as `"query: ..."` —
@@ -206,6 +226,15 @@ the asymmetric-prefix convention bge models are trained with. An
 optional `?source=<id>` restricts results to one source, applied as a
 payload-indexed filter on `source_id` (the same mechanism `document_id`
 filtering uses for deletes, see below) (#7).
+
+Chunking tracks the source offsets consumed by each chunk. Those inclusive,
+1-based start/end lines are stored in vector payloads and returned through gRPC,
+REST, and the CLI rather than reconstructed by clients. Human CLI output uses
+them directly; `--json` emits a single JSON result document and `--jsonl` emits
+one result per line. The Telescope extension in `lua/` runs
+`lum search --root <workspace> --jsonl`, parses that stream, and uses each hit's
+URI and line range for preview and selection. It remains an ordinary CLI client
+and has no access to the catalog, vector files, or private gRPC socket.
 
 ## MCP — `internal/mcpserver`
 

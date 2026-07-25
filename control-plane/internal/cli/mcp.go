@@ -4,11 +4,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/alDuncanson/lum/control-plane/internal/mcpserver"
+	productversion "github.com/alDuncanson/lum/control-plane/internal/version"
 )
-
-// Version is the version string reported to MCP clients. Bumped by
-// hand for now; a release process could stamp it via -ldflags later.
-const Version = "0.1.0"
 
 // mcpCmd serves the Model Context Protocol over stdio so local AI
 // agents (Claude Desktop, Amp, ...) can call lum as a set of tools.
@@ -28,7 +25,7 @@ client (configure it with command "lum" and args ["mcp"]); the first
 tool call starts the daemon when needed.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return mcpserver.Run(cmd.Context(), Version)
+			return mcpserver.Run(cmd.Context(), productversion.Value)
 		},
 	}
 }

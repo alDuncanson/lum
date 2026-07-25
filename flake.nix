@@ -21,6 +21,7 @@
           overlays = [ rust-overlay.overlays.default ];
         };
         lib = pkgs.lib;
+        version = "0.1.0";
         rustToolchain = pkgs.rust-bin.stable."1.97.1".default;
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
@@ -35,7 +36,7 @@
         };
         rustArgs = {
           pname = "lumen";
-          version = "0.1.0";
+          inherit version;
           src = rustSrc;
           cargoLock = ./data-plane/Cargo.lock;
           # Crane installs the lockfile's dependency set through its vendored
@@ -65,33 +66,61 @@
           '';
         });
 
-        lum = pkgs.buildGoModule {
+        lum-unwrapped = pkgs.buildGoModule {
           pname = "lum";
-          version = "0.1.0";
+          inherit version;
           src = ./control-plane;
           vendorHash = "sha256-e02pNlwlTXjnK9Kg9TKI73nUqDuHD75ZlaU39jaaT9k=";
           subPackages = [ "cmd/lum" ];
+          ldflags = [
+            "-X github.com/alDuncanson/lum/control-plane/internal/version.Value=${version}"
+          ];
         };
 
-        lum-full = pkgs.symlinkJoin {
-          name = "lum-full-0.1.0";
-          paths = [ lum lumen ];
+        # Lum is one product even though its implementation uses a private
+        # Rust worker. Pin that worker by store path instead of relying on
+        # symlink resolution or the caller's PATH.
+        lum = pkgs.runCommand "lum-${version}" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+        } ''
+          mkdir -p $out/bin
+          makeWrapper ${lum-unwrapped}/bin/lum $out/bin/lum \
+            --set-default LUM_LUMEN_PATH ${lumen}/bin/lumen
+        '';
+
+        nvimSrc = lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            let rel = lib.removePrefix "${toString ./.}/" (toString path);
+            in rel == "lua" || lib.hasPrefix "lua/" rel;
+        };
+        lum-nvim = pkgs.vimUtils.buildVimPlugin {
+          pname = "lum-nvim";
+          inherit version;
+          src = nvimSrc;
+          dependencies = [ pkgs.vimPlugins.telescope-nvim ];
         };
       in {
         packages = {
-          inherit lum lumen lum-full;
-          default = lum-full;
+          inherit lum lum-nvim;
+          default = lum;
         };
 
-        apps = {
-          lum = flake-utils.lib.mkApp { drv = lum; };
-          lumen = flake-utils.lib.mkApp { drv = lumen; };
-          default = flake-utils.lib.mkApp { drv = lum-full; exePath = "/bin/lum"; };
+        apps = let
+          lumApp = flake-utils.lib.mkApp { drv = lum; exePath = "/bin/lum"; };
+        in {
+          lum = lumApp;
+          default = lumApp;
         };
 
         checks = {
-          go-tests = lum.overrideAttrs (_: { subPackages = [ "..." ]; });
+          go-tests = lum-unwrapped.overrideAttrs (_: { subPackages = [ "..." ]; });
           rust-tests = craneLib.cargoTest (rustArgs // { cargoArtifacts = null; });
+          nvim-plugin = lum-nvim;
+          packaged-version = pkgs.runCommand "lum-packaged-version-${version}" { } ''
+            test "$(${lum}/bin/lum version --json)" = '${builtins.toJSON { inherit version; }}'
+            touch $out
+          '';
         };
 
         devShells.default = pkgs.mkShell {
