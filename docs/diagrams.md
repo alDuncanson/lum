@@ -860,13 +860,13 @@ These are the real quality ceiling for code search, in rough order of impact:
 
 ### Documentation drift found while diagramming
 
-- `architecture.md` states that "scan-triggering API calls return 503 while
-  loading, so a temporary startup state is not persisted as an ingestion
-  failure." The API no longer returns 503 for that case — the only 503 is
-  `GET /v1/events` with a nil bus. The behavior it describes is still correct,
-  but it is now achieved differently: `dataplane.Manager.awaitReady` blocks the
-  document worker until lumen is ready (bounded by `StartupTimeout`), so no
-  failure is recorded. `apiclient.call` still retries on 503 defensively.
+- **Fixed.** `architecture.md` described a 503 gate on scan-triggering
+  endpoints for the "data plane still loading" case. That gate
+  (`requireDataPlaneReady`) was real but was removed in `e3c8e4a`, replaced by
+  `EnsureRunning()` plus a blocking `Manager.awaitReady` one level down; the
+  prose had not been updated. The described *behavior* — a transient startup
+  state never becoming a persisted ingestion failure — was correct throughout.
+  The only 503 the API emits today is `GET /v1/events` with a nil bus.
 - The README's `~/.lum/` tree omits `vectors.manifest.json`, which the
   model-switching paragraph further down does mention.
 

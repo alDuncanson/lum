@@ -207,9 +207,20 @@ failures remain visible through `/v1/status` and `lum status`.
 
 On daemon startup, lumd starts its HTTP API immediately while lumen loads its
 model and vector store. `/v1/status` reports `data_plane` as `starting`,
-`downloading-model`, `ready`, or `unavailable`. Startup watches and scans begin
-only after readiness; scan-triggering API calls return 503 while loading, so a
-temporary startup state is not persisted as an ingestion failure.
+`downloading-model`, `ready`, `unavailable`, or `idle` — the last synthesized by
+`dataplane.Manager` rather than reported by lumen (see idle shedding below).
+Startup watches and scans begin only after readiness.
+
+A scan that gets queued before lumen is ready is neither rejected nor failed.
+The planner takes its filesystem snapshot regardless (that needs no data plane),
+and the document worker then blocks inside `dataplane.Manager.awaitReady` until
+lumen reports ready, bounded by `StartupTimeout`. That is what keeps a
+transient startup state from being persisted as an ingestion failure. Earlier,
+a `requireDataPlaneReady` gate returned 503 from every scan-triggering endpoint
+to achieve the same thing; blocking one level down replaced it, so callers no
+longer have to distinguish "not ready yet" from a real error. `apiclient` still
+treats a 503 like a refused connection — wait for readiness, then replay the
+request — which is also what makes on-demand daemon startup invisible.
 
 The control plane and lumen communicate over `lumen.sock` inside the 0700 data
 directory, avoiding a fixed private port and preventing other local users from
