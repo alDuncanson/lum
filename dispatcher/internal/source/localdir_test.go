@@ -282,3 +282,178 @@ func TestScanSkipsUnreadableSubtreeButLogsAndKeepsOtherFiles(t *testing.T) {
 		t.Fatalf("log output = %q, want a warning naming the unreadable path", logs.String())
 	}
 }
+
+func TestLocalDirScanSkipsGeneratedDirectories(t *testing.T) {
+	root := t.TempDir()
+	// No .gitignore at all — these must be skipped on name alone, which is
+	// the whole point: a repository that forgets to ignore its dependency
+	// tree should not cost a full index of it.
+	for _, dir := range defaultExcludedDirectories {
+		nested := filepath.Join(root, dir, "deep")
+		if err := os.MkdirAll(nested, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nested, "dep.go"), []byte("package dep"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	src, err := NewLocalDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || filepath.Base(refs[0].URI) != "main.go" {
+		var got []string
+		for _, ref := range refs {
+			got = append(got, ref.URI)
+		}
+		t.Fatalf("scanned %v, want only main.go", got)
+	}
+}
+
+// A source rooted at an excluded name must still index: "vendor" only means
+// "generated" relative to a repository that contains it.
+func TestLocalDirScanIndexesARootWithAnExcludedName(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vendor")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src, err := NewLocalDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("scanned %d refs, want 1 — an explicitly added directory is never self-excluded", len(refs))
+	}
+}
+
+func TestLoadExcludedDirectories(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		value      string
+		set        bool
+		wantHas    []string
+		wantHasNot []string
+	}{
+		{name: "unset uses defaults", set: false, wantHas: []string{"node_modules", "vendor"}, wantHasNot: []string{"build"}},
+		{name: "set replaces defaults", value: "build,dist", set: true, wantHas: []string{"build", "dist"}, wantHasNot: []string{"node_modules"}},
+		{name: "whitespace is trimmed", value: " build , dist ", set: true, wantHas: []string{"build", "dist"}},
+		{name: "empty disables exclusion", value: "", set: true, wantHasNot: []string{"node_modules", "vendor", "target", "__pycache__"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := loadExcludedDirectories(func(string) (string, bool) { return tc.value, tc.set })
+			for _, name := range tc.wantHas {
+				if _, ok := got[name]; !ok {
+					t.Errorf("%q missing from the exclusion set", name)
+				}
+			}
+			for _, name := range tc.wantHasNot {
+				if _, ok := got[name]; ok {
+					t.Errorf("%q unexpectedly present in the exclusion set", name)
+				}
+			}
+		})
+	}
+}
+
+// The point of the fingerprint: a settled file is reported without being
+// read, so a scan of a quiet tree costs stats rather than a full read.
+func TestLocalDirScanFingerprintsSettledFilesWithoutHashing(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "main.go")
+	if err := os.WriteFile(path, []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate past the race window so the fingerprint is trusted.
+	settled := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, settled, settled); err != nil {
+		t.Fatal(err)
+	}
+
+	src, err := NewLocalDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("scanned %d refs, want 1", len(refs))
+	}
+	if refs[0].Fingerprint == "" {
+		t.Error("Fingerprint is empty; nothing downstream can skip the read")
+	}
+	if refs[0].ContentHash != "" {
+		t.Errorf("ContentHash = %q for a settled file, want empty (the read is what we are avoiding)", refs[0].ContentHash)
+	}
+}
+
+// The racily-clean case: a file modified moments ago could be modified
+// again inside the same mtime tick, so its fingerprint cannot be trusted
+// and Scan must pay for the hash up front.
+func TestLocalDirScanHashesRecentlyModifiedFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src, err := NewLocalDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("scanned %d refs, want 1", len(refs))
+	}
+	if refs[0].ContentHash == "" {
+		t.Error("ContentHash is empty for a just-written file; an edit inside the same mtime tick would be invisible")
+	}
+}
+
+// Size is part of the fingerprint precisely so a same-length rewrite is not
+// the only thing standing between a change and being missed.
+func TestFingerprintChangesWithSizeAndModTime(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "f.go")
+	write := func(content string, mod time.Time) string {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fingerprint(info)
+	}
+	base := time.Now().Add(-time.Hour)
+	original := write("aaaa", base)
+	if same := write("aaaa", base); same != original {
+		t.Errorf("fingerprint changed for identical size and mtime: %q != %q", same, original)
+	}
+	if bigger := write("aaaaa", base); bigger == original {
+		t.Error("fingerprint unchanged after the size changed")
+	}
+	if later := write("aaaa", base.Add(time.Second)); later == original {
+		t.Error("fingerprint unchanged after the mtime changed")
+	}
+}

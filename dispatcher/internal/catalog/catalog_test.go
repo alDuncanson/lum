@@ -354,3 +354,99 @@ func TestMalformedTimestampsSurfaceAsErrors(t *testing.T) {
 		t.Fatal("IngestFailuresBySource with a malformed failed_at returned no error")
 	}
 }
+
+// A catalog written before fingerprints existed must gain the column
+// without losing rows, and its documents must come back with an empty
+// fingerprint so the next scan re-establishes one instead of trusting a
+// value it never recorded.
+func TestOpenMigratesACatalogWithoutFingerprints(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "catalog.db")
+
+	// Build the pre-fingerprint shape by hand, including the scoped identity
+	// constraint so this exercises only the fingerprint migration.
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE sources (id TEXT PRIMARY KEY, type TEXT NOT NULL, uri TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+		CREATE TABLE documents (
+			id TEXT PRIMARY KEY,
+			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+			uri TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			chunk_count INTEGER NOT NULL DEFAULT 0,
+			ingested_at TEXT NOT NULL,
+			UNIQUE (source_id, uri)
+		);
+		INSERT INTO sources VALUES ('s', 'localdir', '/repo', '2026-01-01T00:00:00Z');
+		INSERT INTO documents VALUES ('d', 's', '/repo/main.go', 'hash', 4, '2026-01-01T00:00:00Z');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cat, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() on a pre-fingerprint catalog: %v", err)
+	}
+	defer cat.Close()
+
+	doc, err := cat.DocumentByURI(ctx, "s", "/repo/main.go")
+	if err != nil {
+		t.Fatalf("document did not survive the migration: %v", err)
+	}
+	if doc.ContentHash != "hash" || doc.ChunkCount != 4 {
+		t.Errorf("migration altered the row: hash=%q chunks=%d", doc.ContentHash, doc.ChunkCount)
+	}
+	if doc.Fingerprint != "" {
+		t.Errorf("Fingerprint = %q, want empty so the next scan establishes one", doc.Fingerprint)
+	}
+
+	// And the migration must be idempotent across restarts.
+	if err := cat.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopening an already-migrated catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+}
+
+func TestUpdateDocumentFingerprintLeavesIngestBookkeepingAlone(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(filepath.Join(t.TempDir(), "catalog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	if _, _, err := cat.AddSource(ctx, Source{ID: "s", Type: "localdir", URI: "/repo", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	ingestedAt := time.Now().UTC().Truncate(time.Second)
+	if err := cat.UpsertDocument(ctx, Document{
+		ID: "d", SourceID: "s", URI: "/repo/main.go",
+		ContentHash: "hash", Fingerprint: "1:1", ChunkCount: 3, IngestedAt: ingestedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cat.UpdateDocumentFingerprint(ctx, "d", "2:2"); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := cat.DocumentByURI(ctx, "s", "/repo/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Fingerprint != "2:2" {
+		t.Errorf("Fingerprint = %q, want 2:2", doc.Fingerprint)
+	}
+	if doc.ContentHash != "hash" || doc.ChunkCount != 3 || !doc.IngestedAt.Equal(ingestedAt) {
+		t.Errorf("ingest bookkeeping changed: hash=%q chunks=%d ingestedAt=%s",
+			doc.ContentHash, doc.ChunkCount, doc.IngestedAt)
+	}
+}

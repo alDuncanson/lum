@@ -20,10 +20,24 @@ type DocumentRef struct {
 	URI string
 	// MimeType tells the worker which parser to use.
 	MimeType string
-	// ContentHash fingerprints the current content (sha256 hex). The
-	// ingest worker compares it against the catalog to skip unchanged
-	// documents — lum's change detection in one field.
+	// ContentHash is the authoritative sha256 hex of the current content,
+	// or empty when the source could not determine it without reading the
+	// document. Empty is the normal case for local files: reading every
+	// file on every scan is the cost Fingerprint exists to avoid, so the
+	// hash is computed once downstream, from the bytes the ingest runner
+	// reads anyway.
 	ContentHash string
+	// Fingerprint is a cheap, source-defined stand-in for content identity
+	// (for local files, size and mtime). Equal fingerprints mean "almost
+	// certainly unchanged" and let a scan skip the document without
+	// reading it; different fingerprints mean "read it and compare hashes",
+	// never "re-embed it". Empty means the source offers no cheap check,
+	// in which case ContentHash is the only signal.
+	//
+	// A fingerprint is never treated as proof of change, only of sameness.
+	// That asymmetry is what makes it safe: the failure mode of a stale
+	// fingerprint is one wasted read, not a missing document.
+	Fingerprint string
 }
 
 // Source enumerates and fetches documents from one registered location.

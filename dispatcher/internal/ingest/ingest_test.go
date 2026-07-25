@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -780,4 +781,115 @@ func TestFailedDeleteRestoresWatcherAndReleasesScanGate(t *testing.T) {
 	if !pending {
 		t.Fatal("scan gate remained held after failed deletion")
 	}
+}
+
+func TestUnchangedPrefersContentHashOverFingerprint(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing catalog.Document
+		ref      source.DocumentRef
+		want     bool
+	}{{
+		name:     "matching hash wins even when the fingerprint moved",
+		existing: catalog.Document{ContentHash: "h", Fingerprint: "1:1"},
+		ref:      source.DocumentRef{ContentHash: "h", Fingerprint: "2:2"},
+		want:     true,
+	}, {
+		// The hash is authoritative: a matching fingerprint must not
+		// override it, or a real edit that happened to preserve size and
+		// mtime would be dismissed.
+		name:     "differing hash loses to a matching fingerprint",
+		existing: catalog.Document{ContentHash: "old", Fingerprint: "1:1"},
+		ref:      source.DocumentRef{ContentHash: "new", Fingerprint: "1:1"},
+		want:     false,
+	}, {
+		name:     "fingerprint decides when no hash was supplied",
+		existing: catalog.Document{ContentHash: "h", Fingerprint: "1:1"},
+		ref:      source.DocumentRef{Fingerprint: "1:1"},
+		want:     true,
+	}, {
+		name:     "moved fingerprint never concludes unchanged",
+		existing: catalog.Document{ContentHash: "h", Fingerprint: "1:1"},
+		ref:      source.DocumentRef{Fingerprint: "2:2"},
+		want:     false,
+	}, {
+		// Rows predating fingerprints have none stored. Two empty strings
+		// must not read as a match, or such a document would never be
+		// re-examined and could never acquire a fingerprint.
+		name:     "two absent fingerprints do not match",
+		existing: catalog.Document{ContentHash: "h"},
+		ref:      source.DocumentRef{},
+		want:     false,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unchanged(tc.existing, tc.ref); got != tc.want {
+				t.Errorf("unchanged() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A branch switch rewrites mtimes without changing bytes. That must cost one
+// read and a fingerprint update — never a re-embed of the whole repository.
+func TestTouchedButUnchangedDocumentRefreshesFingerprintWithoutReingesting(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cat := newDeleteSourceTestCatalog(t, "source")
+	content := []byte("unchanged bytes")
+	hash := fmt.Sprintf("%x", sha256.Sum256(content))
+	ingestedAt := time.Now().UTC().Truncate(time.Second)
+	if err := cat.UpsertDocument(ctx, catalog.Document{
+		ID: "document", SourceID: "source", URI: "/document",
+		ContentHash: hash, Fingerprint: "10:100", ChunkCount: 7, IngestedAt: ingestedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	worker := &countingWorker{}
+	ing := &Ingestor{catalog: cat, dp: worker, jobs: make(chan documentJob, 2)}
+	run := &scanRun{sourceID: "source", requestID: "request", started: time.Now(), done: make(chan struct{})}
+	existing, err := cat.DocumentByURI(ctx, "source", "/document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go ing.documentRunner(ctx)
+	ing.jobs <- documentJob{
+		kind: jobUpsert, run: run, source: changingSource{content: content},
+		ref:      source.DocumentRef{URI: "/document", Fingerprint: "10:999"},
+		document: existing,
+	}
+	ing.jobs <- documentJob{kind: jobScanComplete, run: run}
+	select {
+	case <-run.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("document run did not finish")
+	}
+
+	if n := worker.ingestBatches.Load(); n != 0 {
+		t.Errorf("sent %d IngestBatch RPC(s), want 0 — identical content must not be re-embedded", n)
+	}
+	if run.ingested != 0 || run.unchanged != 1 {
+		t.Errorf("run totals: ingested=%d unchanged=%d, want 0 and 1", run.ingested, run.unchanged)
+	}
+	doc, err := cat.DocumentByURI(ctx, "source", "/document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Fingerprint != "10:999" {
+		t.Errorf("fingerprint = %q, want the refreshed 10:999 so the next scan skips the read", doc.Fingerprint)
+	}
+	if doc.ChunkCount != 7 || doc.ContentHash != hash {
+		t.Errorf("re-ingest bookkeeping was touched: chunks=%d hash=%q", doc.ChunkCount, doc.ContentHash)
+	}
+}
+
+// countingWorker records whether the embedding path was reached at all.
+type countingWorker struct {
+	stubWorker
+	ingestBatches atomic.Int32
+}
+
+func (c *countingWorker) IngestBatch(ctx context.Context, documents []worker.IngestBatchDocument) ([]worker.IngestBatchResult, error) {
+	c.ingestBatches.Add(1)
+	return c.stubWorker.IngestBatch(ctx, documents)
 }

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	dotignore "github.com/codeglyph/go-dotignore/v2"
 	"github.com/fsnotify/fsnotify"
@@ -81,6 +82,54 @@ var indexableExtensions = map[string]string{
 	".svg":      "text/xml",
 }
 
+// defaultExcludedDirectories are skipped by name wherever they appear,
+// independent of `.gitignore`.
+//
+// Honoring `.gitignore` already covers well-kept repositories, but it is
+// not a safety net: a repository that forgets to ignore its dependency
+// tree makes Lum walk, read, and embed thousands of files nobody wants to
+// search, and node_modules in particular is mostly indexable extensions.
+//
+// The list is deliberately short and limited to names that are generated
+// or vendored by universal convention. Riskier candidates (build, dist,
+// out, bin) are left off: a repository can plausibly keep real sources
+// there, and silently skipping sources is worse than indexing junk.
+// LUM_EXCLUDE_DIRS replaces this list for anyone who disagrees.
+var defaultExcludedDirectories = []string{
+	"node_modules", // npm/yarn/pnpm dependencies
+	"vendor",       // Go, PHP composer, Ruby bundler
+	"target",       // Cargo, Maven, sbt
+	"__pycache__",  // CPython bytecode
+}
+
+// excludedDirectories is resolved once at process start. LUM_EXCLUDE_DIRS
+// replaces (rather than extends) the defaults, so the effective list is
+// always exactly what the variable says; setting it empty disables
+// name-based exclusion entirely and leaves only `.gitignore` and hidden
+// directories.
+var excludedDirectories = loadExcludedDirectories(os.LookupEnv)
+
+// loadExcludedDirectories takes a lookup func rather than reading the
+// environment directly so tests can cover the unset / empty / listed cases;
+// LookupEnv rather than Getenv because "set but empty" means "exclude
+// nothing", which is distinct from "unset".
+func loadExcludedDirectories(lookup func(string) (string, bool)) map[string]struct{} {
+	names := defaultExcludedDirectories
+	if raw, set := lookup("LUM_EXCLUDE_DIRS"); set {
+		names = nil
+		for _, name := range strings.Split(raw, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}
+
 // LocalDir indexes a directory tree on the local filesystem.
 type LocalDir struct {
 	root string
@@ -105,12 +154,33 @@ func NewLocalDir(root string) (*LocalDir, error) {
 
 func (l *LocalDir) Type() string { return TypeLocalDir }
 
+// fingerprintRaceWindow is how recently a file must have been modified for
+// its size+mtime fingerprint to be considered untrustworthy.
+//
+// The hole a size+mtime fingerprint has is the one git calls "racily
+// clean": if a file is modified again inside the same mtime tick we
+// observed it in, and its size does not change, the fingerprint is
+// identical and the edit is invisible. Some filesystems (HFS+, a few
+// network mounts) only keep whole-second mtimes, which makes that window
+// wide enough to hit in practice — an editor writing twice in a second, or
+// a scripted in-place substitution that preserves length.
+//
+// So Scan hashes anything modified within this window and lets the
+// fingerprint stand only for files that have been quiet longer than any
+// plausible mtime granularity. The cost is bounded by how many files
+// changed in the last couple of seconds, which is approximately zero on
+// every scan except the ones immediately following an edit.
+const fingerprintRaceWindow = 2 * time.Second
+
 // Scan walks the tree and returns a ref for every indexable file.
 //
-// Hashing note: we read every file to fingerprint its content, which is
-// simple and exact. For very large trees, a cheaper first-pass
-// fingerprint (size + mtime) with hashing only on suspicion of change
-// is the classic optimization — a good future exercise.
+// Scans are frequent — startup, every debounced watch event, a periodic
+// fallback ticker, and every ingest retry — so Scan is deliberately
+// stat-only in the common case. It reports a size+mtime fingerprint and
+// leaves ContentHash empty; the ingest planner reads and hashes only the
+// documents whose fingerprint moved. Previously this hashed the entire
+// tree on every scan, which made watching a large repository cost a full
+// read of it per change.
 func (l *LocalDir) Scan(ctx context.Context) ([]DocumentRef, error) {
 	var refs []DocumentRef
 	ignores, err := dotignore.NewRepositoryMatcher(l.root)
@@ -130,9 +200,9 @@ func (l *LocalDir) Scan(ctx context.Context) ([]DocumentRef, error) {
 			return ctx.Err()
 		}
 		if d.IsDir() {
-			// Don't descend into hidden directories (.git, .obsidian,
-			// node_modules-style caches are out of scope for v1).
-			if hiddenDirectory(l.root, path, d.Name()) {
+			// Hidden trees (.git, .obsidian) and generated trees
+			// (node_modules, vendor, ...) are never indexed.
+			if skipDirectory(l.root, path, d.Name()) {
 				return filepath.SkipDir
 			}
 			ignored, matchErr := ignoredPath(ignores, path, true)
@@ -155,11 +225,20 @@ func (l *LocalDir) Scan(ctx context.Context) ([]DocumentRef, error) {
 		if !ok {
 			return nil
 		}
-		hash, err := hashFile(path)
+		info, err := d.Info()
 		if err != nil {
 			return nil // racing deletes etc.; skip
 		}
-		refs = append(refs, DocumentRef{URI: path, MimeType: mime, ContentHash: hash})
+		ref := DocumentRef{URI: path, MimeType: mime, Fingerprint: fingerprint(info)}
+		if time.Since(info.ModTime()) < fingerprintRaceWindow {
+			// Too fresh to trust a fingerprint; pay for the read now.
+			hash, err := hashFile(path)
+			if err != nil {
+				return nil
+			}
+			ref.ContentHash = hash
+		}
+		refs = append(refs, ref)
 		return nil
 	})
 	if err != nil {
@@ -226,7 +305,7 @@ func (l *LocalDir) Watch(ctx context.Context) (<-chan struct{}, <-chan error, er
 				_, isDirectory := directories[event.Name]
 				if event.Has(fsnotify.Create) {
 					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-						if hiddenDirectory(l.root, event.Name, info.Name()) {
+						if skipDirectory(l.root, event.Name, info.Name()) {
 							continue
 						}
 						isDirectory = true
@@ -298,7 +377,7 @@ func (l *LocalDir) addWatchTree(watcher *fsnotify.Watcher, root string, director
 		if !d.IsDir() {
 			return nil
 		}
-		if hiddenDirectory(l.root, path, d.Name()) {
+		if skipDirectory(l.root, path, d.Name()) {
 			return filepath.SkipDir
 		}
 		ignored, matchErr := ignoredPath(ignores, path, true)
@@ -341,12 +420,38 @@ func ignoredPath(ignores *dotignore.RepositoryMatcher, path string, directory bo
 	return ignores.Matches(path)
 }
 
-func hiddenDirectory(root, path, name string) bool {
-	return path != root && strings.HasPrefix(name, ".")
+// skipDirectory reports whether a directory should be excluded from both
+// scans and watches. Scans and watches must agree: a directory watched but
+// not scanned produces change events that reconcile to nothing, and one
+// scanned but not watched goes stale until the next periodic rescan.
+//
+// The root itself is never skipped — `lum add ~/code/vendor` should index
+// that directory, and the name only means "generated" relative to a
+// repository containing it.
+func skipDirectory(root, path, name string) bool {
+	if path == root {
+		return false
+	}
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	_, excluded := excludedDirectories[name]
+	return excluded
 }
 
 func (l *LocalDir) Read(_ context.Context, ref DocumentRef) ([]byte, error) {
 	return os.ReadFile(ref.URI)
+}
+
+// fingerprint is the cheap change signal for a local file: size plus
+// mtime in nanoseconds. Both come from the stat the directory walk already
+// performed, so producing it costs nothing beyond formatting.
+//
+// Size is included because mtime alone is the weaker signal — a write that
+// lands in the same mtime tick is common, whereas one that also preserves
+// length is much less so.
+func fingerprint(info fs.FileInfo) string {
+	return fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
 }
 
 func hashFile(path string) (string, error) {

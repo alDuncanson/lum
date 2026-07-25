@@ -613,6 +613,29 @@ func (i *Ingestor) nextScan() (*scanRun, bool) {
 	return nil, false
 }
 
+// unchanged decides whether a scanned document can be skipped without
+// reading it.
+//
+// Two signals, in order of authority. A ContentHash the source supplied is
+// definitive, so it decides on its own. Otherwise an equal Fingerprint is
+// trusted as "unchanged" — the whole point of the fingerprint, since
+// trusting it is what avoids the read.
+//
+// Note what is deliberately absent: a differing fingerprint never concludes
+// "changed", it only declines to conclude "unchanged". The document goes to
+// the runner, which reads it and compares hashes before embedding anything.
+// So a fingerprint that moved without the content moving costs one read,
+// not a re-embed.
+func unchanged(existing catalog.Document, ref source.DocumentRef) bool {
+	if ref.ContentHash != "" {
+		return existing.ContentHash == ref.ContentHash
+	}
+	// existing.Fingerprint is "" for documents indexed before fingerprints
+	// existed, which must not match a ref that has none either — those need
+	// a read to establish one.
+	return ref.Fingerprint != "" && existing.Fingerprint == ref.Fingerprint
+}
+
 // planScan turns one authoritative source snapshot into document jobs. It
 // queues deletes only after the complete snapshot has been obtained.
 func (i *Ingestor) planScan(ctx context.Context, run *scanRun) error {
@@ -629,15 +652,15 @@ func (i *Ingestor) planScan(ctx context.Context, run *scanRun) error {
 	for _, ref := range refs {
 		seen[ref.URI] = true
 		existing, err := i.catalog.DocumentByURI(ctx, run.sourceID, ref.URI)
-		switch {
-		case err == nil && existing.ContentHash == ref.ContentHash:
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil && unchanged(existing, ref) {
 			if err := i.catalog.ClearIngestFailure(ctx, run.sourceID, ref.URI); err != nil {
 				return err
 			}
 			run.unchanged++
 			continue
-		case err != nil && !errors.Is(err, sql.ErrNoRows):
-			return err
 		}
 
 		doc := existing
@@ -737,11 +760,22 @@ func (i *Ingestor) documentRunner(ctx context.Context) {
 					i.failDocument(ctx, job, err)
 					continue
 				}
+				contentHash := fmt.Sprintf("%x", sha256.Sum256(content))
+				// The fingerprint moved but the bytes did not. Common and
+				// worth catching: a branch switch or checkout rewrites
+				// mtimes across the tree, and re-embedding an unchanged
+				// repository is the single most expensive thing Lum could
+				// do for no benefit. Record the new fingerprint so the next
+				// scan is cheap again, and skip the embed.
+				if job.document.ContentHash != "" && job.document.ContentHash == contentHash {
+					i.refreshFingerprint(ctx, job)
+					continue
+				}
 				if len(pending) > 0 && (len(pending) >= batchDocumentLimit || pendingBytes+len(content) > batchContentTarget) {
 					flush()
 				}
 				pending = append(pending, pendingDocument{
-					job: job, contentHash: fmt.Sprintf("%x", sha256.Sum256(content)),
+					job: job, contentHash: contentHash,
 					input: worker.IngestBatchDocument{
 						DocumentID: job.document.ID, SourceID: job.run.sourceID,
 						URI: job.ref.URI, MimeType: job.ref.MimeType, Content: content,
@@ -799,6 +833,7 @@ func (i *Ingestor) flushBatch(ctx context.Context, pending []pendingDocument) {
 			continue
 		}
 		item.job.document.ContentHash = item.contentHash
+		item.job.document.Fingerprint = item.job.ref.Fingerprint
 		item.job.document.ChunkCount = result.ChunkCount
 		item.job.document.IngestedAt = time.Now().UTC()
 		if err := i.catalog.UpsertDocument(batchCtx, item.job.document); err != nil {
@@ -816,6 +851,23 @@ func (i *Ingestor) flushBatch(ctx context.Context, pending []pendingDocument) {
 			ChunkCount: int(result.ChunkCount),
 		})
 	}
+}
+
+// refreshFingerprint records a new cheap change signal for a document whose
+// content turned out to be identical, and counts it as unchanged so scan
+// totals report what actually happened rather than an ingest that did not.
+func (i *Ingestor) refreshFingerprint(ctx context.Context, job documentJob) {
+	run := job.run
+	jobCtx := requestid.WithValue(ctx, run.requestID)
+	if err := i.catalog.UpdateDocumentFingerprint(jobCtx, job.document.ID, job.ref.Fingerprint); err != nil {
+		run.err = err
+		return
+	}
+	if err := i.catalog.ClearIngestFailure(jobCtx, run.sourceID, job.document.URI); err != nil {
+		run.err = err
+		return
+	}
+	run.unchanged++
 }
 
 func (i *Ingestor) deleteDocument(ctx context.Context, job documentJob) {

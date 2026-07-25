@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS documents (
 	source_id    TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
 	uri          TEXT NOT NULL,              -- e.g. absolute file path
 	content_hash TEXT NOT NULL,              -- sha256 of content at last ingest
+	fingerprint  TEXT NOT NULL DEFAULT '',   -- cheap change signal (size:mtime); '' means unknown
 	chunk_count  INTEGER NOT NULL DEFAULT 0, -- points stored in the vector index
 	ingested_at  TEXT NOT NULL,              -- RFC 3339
 	-- Scoped to source, not globally unique: a URI is only ever
@@ -77,6 +78,7 @@ type Document struct {
 	SourceID    string    `json:"source_id"`
 	URI         string    `json:"uri"`
 	ContentHash string    `json:"content_hash"`
+	Fingerprint string    `json:"fingerprint"`
 	ChunkCount  uint32    `json:"chunk_count"`
 	IngestedAt  time.Time `json:"ingested_at"`
 }
@@ -117,6 +119,10 @@ func Open(path string) (*Catalog, error) {
 	if err := migrateDocumentIdentity(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrating document identity: %w", err)
+	}
+	if err := migrateDocumentFingerprint(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrating document fingerprint: %w", err)
 	}
 	return &Catalog{db: db}, nil
 }
@@ -160,6 +166,37 @@ CREATE INDEX documents_by_source ON documents(source_id);
 		return err
 	}
 	return tx.Commit()
+}
+
+// migrateDocumentFingerprint adds the cheap change-signal column to
+// catalogs created before it existed. CREATE TABLE IF NOT EXISTS does not
+// add columns to an existing table, so this is an explicit ALTER.
+//
+// Existing rows default to the empty string, which no real fingerprint
+// equals. That is
+// exactly the desired behavior: the first scan after upgrading cannot trust
+// a fingerprint it never recorded, so it reads and hashes each document
+// once, finds the content unchanged, and stores the fingerprint — the index
+// is never rebuilt, only re-fingerprinted.
+func migrateDocumentFingerprint(db *sql.DB) error {
+	has, err := hasColumn(db, "documents", "fingerprint")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE documents ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, table, column)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	return rows.Next(), rows.Err()
 }
 
 func hasScopedDocumentIdentity(tx *sql.Tx) (bool, error) {
@@ -285,7 +322,7 @@ func (c *Catalog) ListSources(ctx context.Context) ([]Source, error) {
 // never be attributed to the wrong one (#4).
 func (c *Catalog) DocumentByURI(ctx context.Context, sourceID, uri string) (Document, error) {
 	row := c.db.QueryRowContext(ctx,
-		`SELECT id, source_id, uri, content_hash, chunk_count, ingested_at
+		`SELECT id, source_id, uri, content_hash, fingerprint, chunk_count, ingested_at
 		 FROM documents WHERE source_id = ? AND uri = ?`, sourceID, uri)
 	return scanDocument(row)
 }
@@ -293,7 +330,7 @@ func (c *Catalog) DocumentByURI(ctx context.Context, sourceID, uri string) (Docu
 // DocumentsBySource lists all documents belonging to a source.
 func (c *Catalog) DocumentsBySource(ctx context.Context, sourceID string) ([]Document, error) {
 	rows, err := c.db.QueryContext(ctx,
-		`SELECT id, source_id, uri, content_hash, chunk_count, ingested_at
+		`SELECT id, source_id, uri, content_hash, fingerprint, chunk_count, ingested_at
 		 FROM documents WHERE source_id = ?`, sourceID)
 	if err != nil {
 		return nil, err
@@ -313,15 +350,31 @@ func (c *Catalog) DocumentsBySource(ctx context.Context, sourceID string) ([]Doc
 // UpsertDocument records a successful ingest.
 func (c *Catalog) UpsertDocument(ctx context.Context, d Document) error {
 	_, err := c.db.ExecContext(ctx,
-		`INSERT INTO documents (id, source_id, uri, content_hash, chunk_count, ingested_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO documents (id, source_id, uri, content_hash, fingerprint, chunk_count, ingested_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(source_id, uri) DO UPDATE SET
 		   content_hash = excluded.content_hash,
+		   fingerprint  = excluded.fingerprint,
 		   chunk_count  = excluded.chunk_count,
 		   ingested_at  = excluded.ingested_at`,
-		d.ID, d.SourceID, d.URI, d.ContentHash, d.ChunkCount,
+		d.ID, d.SourceID, d.URI, d.ContentHash, d.Fingerprint, d.ChunkCount,
 		d.IngestedAt.Format(time.RFC3339),
 	)
+	return err
+}
+
+// UpdateDocumentFingerprint refreshes only the cheap change signal, for a
+// document whose size or mtime moved but whose bytes did not — a `touch`, a
+// branch switch, or a rewrite that produced identical content.
+//
+// This is what keeps a fingerprint miss cheap. Without it, every such
+// document would be re-read on every subsequent scan forever, because the
+// stored fingerprint would stay stale no matter how many times we confirmed
+// the content matches. It deliberately leaves content_hash, chunk_count,
+// and ingested_at alone: nothing was re-ingested, so nothing else changed.
+func (c *Catalog) UpdateDocumentFingerprint(ctx context.Context, id, fingerprint string) error {
+	_, err := c.db.ExecContext(ctx,
+		`UPDATE documents SET fingerprint = ? WHERE id = ?`, fingerprint, id)
 	return err
 }
 
@@ -436,7 +489,7 @@ func scanSource(r rowScanner) (Source, error) {
 func scanDocument(r rowScanner) (Document, error) {
 	var d Document
 	var ingested string
-	if err := r.Scan(&d.ID, &d.SourceID, &d.URI, &d.ContentHash, &d.ChunkCount, &ingested); err != nil {
+	if err := r.Scan(&d.ID, &d.SourceID, &d.URI, &d.ContentHash, &d.Fingerprint, &d.ChunkCount, &ingested); err != nil {
 		return Document{}, err
 	}
 	var err error
