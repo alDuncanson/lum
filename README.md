@@ -179,6 +179,11 @@ Run `lum stop` before deleting that directory. `lum stop` waits until every file
 is released; on Unix, deleting state while Lum is running does not reset the open
 SQLite and vector files.
 
+`LUM_DATA_DIR` has to be shallow enough to hold the worker socket: a Unix domain
+socket address caps out at 104 bytes on macOS and 108 on Linux, path included.
+Lum checks this at startup and tells you if the path is too deep, so the default
+`~/.lum` and anything comparable is fine.
+
 The full-precision model is the default. For higher CPU throughput at a small
 retrieval-quality cost, use `lum serve --embedding-model quantized` or set
 `LUM_EMBEDDING_MODEL=quantized`. The two produce incompatible vectors, so when

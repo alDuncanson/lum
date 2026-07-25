@@ -7,10 +7,21 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+// maxSocketPathLen is the longest path a Unix domain socket address can
+// carry on this platform. sun_path is a fixed-size array in
+// sockaddr_un — 104 bytes on Darwin, 108 on Linux — and the path must be
+// NUL-terminated inside it, so one byte is reserved. Deriving the number
+// from x/sys/unix keeps it right on both rather than hardcoding one and
+// being quietly wrong on the other.
+var maxSocketPathLen = len(unix.RawSockaddrUnix{}.Path) - 1
 
 const (
 	// DefaultHTTPAddr is where lumd serves its REST API and where the
@@ -68,6 +79,43 @@ func Load() Config {
 		WorkerPath:        os.Getenv("LUM_WORKER_PATH"),
 		EmbeddingModel:    envOr("LUM_EMBEDDING_MODEL", DefaultEmbeddingModel),
 	}
+}
+
+// Validate rejects configuration that cannot possibly work, before
+// anything is started. Both entry points call it: `lum serve` so it fails
+// with one clear line instead of spawning a worker that exits, and the
+// on-demand client spawn so a CLI command reports the problem immediately
+// rather than starting a daemon that dies and then polling /v1/status for
+// the full startup timeout.
+func (c Config) Validate() error {
+	if err := c.validateSocketPath(); err != nil {
+		return err
+	}
+	if c.EmbeddingModel != "standard" && c.EmbeddingModel != "quantized" {
+		return fmt.Errorf("invalid embedding model %q: must be standard or quantized", c.EmbeddingModel)
+	}
+	return nil
+}
+
+// validateSocketPath catches a data directory too deep to hold the worker
+// socket. Without this the failure surfaces as the worker exiting with a
+// bare "path must be shorter than SUN_LEN" in daemon.log, while the
+// dispatcher reports the worker as idle — the state it also uses for a
+// deliberate memory shed, so nothing points at the real cause.
+func (c Config) validateSocketPath() error {
+	socket := c.GRPCSocketPath()
+	// Dial resolves the socket to an absolute path, so that is the length
+	// the kernel actually sees; a relative DataDir is only ever longer.
+	if abs, err := filepath.Abs(socket); err == nil {
+		socket = abs
+	}
+	if len(socket) > maxSocketPathLen {
+		return fmt.Errorf(
+			"data directory path is too long: the worker socket %q needs %d bytes, but a Unix domain socket address holds at most %d on this platform; point LUM_DATA_DIR at a shorter path",
+			socket, len(socket), maxSocketPathLen,
+		)
+	}
+	return nil
 }
 
 // BaseURL is the HTTP API root used by CLI clients.

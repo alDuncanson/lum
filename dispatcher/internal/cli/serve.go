@@ -57,8 +57,8 @@ func serveCmd() *cobra.Command {
 
 func run(ctx context.Context, cfg config.Config) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	if cfg.EmbeddingModel != "standard" && cfg.EmbeddingModel != "quantized" {
-		return fmt.Errorf("invalid embedding model %q: must be standard or quantized", cfg.EmbeddingModel)
+	if err := cfg.Validate(); err != nil {
+		return err
 	}
 
 	// Root context cancelled by SIGINT/SIGTERM; everything hangs off it.

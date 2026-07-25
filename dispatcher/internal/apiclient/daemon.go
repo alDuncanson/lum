@@ -24,6 +24,11 @@ func (c *Client) ensureDaemon(ctx context.Context) error {
 	if !isLoopbackAddress(c.cfg.HTTPAddr) {
 		return fmt.Errorf("refusing to auto-start daemon on non-loopback address %q", c.cfg.HTTPAddr)
 	}
+	// Fail before spawning: a daemon that cannot start would otherwise leave
+	// this call polling /v1/status until the startup timeout expires.
+	if err := c.cfg.Validate(); err != nil {
+		return err
+	}
 	timeout := c.cfg.StartupTimeout
 	if timeout <= 0 {
 		timeout = config.DefaultStartupTimeout

@@ -22,6 +22,22 @@ import (
 	"github.com/alDuncanson/lum/dispatcher/internal/events"
 )
 
+// shortDataDir returns a temporary data directory shallow enough to hold
+// the worker socket. t.TempDir() is unusable for this on macOS: its
+// /var/folders/... root plus a test-name-derived suffix routinely exceeds
+// what a Unix domain socket address can carry, which config.Validate now
+// correctly rejects. worker/supervisor_test.go works around the same limit
+// the same way.
+func shortDataDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "lum")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestConcurrentClientsSpawnDaemonOnce(t *testing.T) {
 	reserved, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -30,7 +46,7 @@ func TestConcurrentClientsSpawnDaemonOnce(t *testing.T) {
 	addr := reserved.Addr().String()
 	_ = reserved.Close()
 
-	cfg := config.Config{DataDir: t.TempDir(), HTTPAddr: addr, StartupTimeout: 2 * time.Second}
+	cfg := config.Config{EmbeddingModel: config.DefaultEmbeddingModel, DataDir: shortDataDir(t), HTTPAddr: addr, StartupTimeout: 2 * time.Second}
 	var spawnCount atomic.Int32
 	var server *http.Server
 	t.Cleanup(func() {
@@ -117,7 +133,7 @@ func TestServiceUnavailableWaitsAndReplaysRequestBody(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 
 	cfg := config.Config{
-		DataDir: t.TempDir(), HTTPAddr: listener.Addr().String(), StartupTimeout: 2 * time.Second,
+		EmbeddingModel: config.DefaultEmbeddingModel, DataDir: shortDataDir(t), HTTPAddr: listener.Addr().String(), StartupTimeout: 2 * time.Second,
 	}
 	client := &Client{
 		base: cfg.BaseURL(), cfg: cfg, httpClient: http.DefaultClient,
@@ -144,7 +160,7 @@ func TestStartupFailureTimesOutWithLogPath(t *testing.T) {
 	addr := reserved.Addr().String()
 	_ = reserved.Close()
 	cfg := config.Config{
-		DataDir: t.TempDir(), HTTPAddr: addr, StartupTimeout: 50 * time.Millisecond,
+		EmbeddingModel: config.DefaultEmbeddingModel, DataDir: shortDataDir(t), HTTPAddr: addr, StartupTimeout: 50 * time.Millisecond,
 	}
 	client := &Client{
 		base: cfg.BaseURL(), cfg: cfg, httpClient: http.DefaultClient,
@@ -172,7 +188,7 @@ func TestEventsParsesSSEFramesInOrderWithoutSpawning(t *testing.T) {
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
-	cfg := config.Config{DataDir: t.TempDir()}
+	cfg := config.Config{EmbeddingModel: config.DefaultEmbeddingModel, DataDir: shortDataDir(t)}
 	client := &Client{
 		base: server.URL, cfg: cfg, httpClient: http.DefaultClient,
 		spawn: func(config.Config) error {
@@ -206,7 +222,7 @@ func TestEventsTriggersDaemonSpawnOnConnectionRefused(t *testing.T) {
 	addr := reserved.Addr().String()
 	_ = reserved.Close()
 
-	cfg := config.Config{DataDir: t.TempDir(), HTTPAddr: addr, StartupTimeout: 2 * time.Second}
+	cfg := config.Config{EmbeddingModel: config.DefaultEmbeddingModel, DataDir: shortDataDir(t), HTTPAddr: addr, StartupTimeout: 2 * time.Second}
 	var server *http.Server
 	t.Cleanup(func() {
 		if server != nil {
@@ -261,7 +277,7 @@ func TestEventsAppliesTypesFilterAsQueryParam(t *testing.T) {
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
-	cfg := config.Config{DataDir: t.TempDir()}
+	cfg := config.Config{EmbeddingModel: config.DefaultEmbeddingModel, DataDir: shortDataDir(t)}
 	client := &Client{
 		base: server.URL, cfg: cfg, httpClient: http.DefaultClient,
 		spawn: func(config.Config) error {
@@ -292,7 +308,7 @@ func TestStopReturnsErrNoDaemonRunningWhenNothingIsListening(t *testing.T) {
 	addr := reserved.Addr().String()
 	_ = reserved.Close()
 
-	cfg := config.Config{DataDir: t.TempDir(), HTTPAddr: addr}
+	cfg := config.Config{EmbeddingModel: config.DefaultEmbeddingModel, DataDir: shortDataDir(t), HTTPAddr: addr}
 	client := &Client{
 		base: cfg.BaseURL(), cfg: cfg, httpClient: http.DefaultClient,
 		spawn: func(config.Config) error {
@@ -314,7 +330,7 @@ func TestStopReturnsErrNoDaemonRunningWhenNothingIsListening(t *testing.T) {
 // authoritative signal the on-demand daemon spawn (#13) already relies
 // on -- not just that the port went quiet.
 func TestStopWaitsForTheDaemonLockToActuallyRelease(t *testing.T) {
-	cfg := config.Config{DataDir: t.TempDir()}
+	cfg := config.Config{EmbeddingModel: config.DefaultEmbeddingModel, DataDir: shortDataDir(t)}
 
 	// Simulate the real daemon: it holds daemon.lock for its entire
 	// lifetime and only releases it once fully shut down.
@@ -375,4 +391,44 @@ func TestStopWaitsForTheDaemonLockToActuallyRelease(t *testing.T) {
 		t.Fatal("background lock-release goroutine never finished")
 	}
 	_ = lockFile.Close()
+}
+
+// A config that cannot produce a working daemon must be reported before
+// anything is spawned. Otherwise the daemon starts, dies, and this call
+// polls /v1/status until StartupTimeout expires — five minutes of silence
+// for a problem knowable up front.
+func TestUnusableConfigFailsFastWithoutSpawning(t *testing.T) {
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := reserved.Addr().String()
+	_ = reserved.Close() // nothing is listening, so the client will try to spawn
+
+	cfg := config.Config{
+		DataDir:        "/" + strings.Repeat("d", 120), // socket path exceeds sun_path
+		HTTPAddr:       addr,
+		StartupTimeout: 30 * time.Second,
+		EmbeddingModel: "standard",
+	}
+	var spawned atomic.Int32
+	client := &Client{
+		base: cfg.BaseURL(), cfg: cfg, httpClient: http.DefaultClient,
+		spawn: func(config.Config) error { spawned.Add(1); return nil },
+	}
+
+	started := time.Now()
+	_, err = client.ListSources(context.Background())
+	if err == nil {
+		t.Fatal("ListSources() = nil error, want a configuration error")
+	}
+	if !strings.Contains(err.Error(), "LUM_DATA_DIR") {
+		t.Errorf("error %q does not explain how to fix it", err)
+	}
+	if n := spawned.Load(); n != 0 {
+		t.Errorf("spawned %d daemon(s), want 0 for a config that cannot work", n)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("took %s to reject an unusable config; expected an immediate failure", elapsed)
+	}
 }
