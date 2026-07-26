@@ -44,6 +44,13 @@ const (
 	// embedding phase for the batch it carried.
 	KindRPCCompleted Kind = "rpc_completed"
 
+	// KindWorkerProgress reports how far a phase inside the worker has got:
+	// chunks embedded, documents stored. It exists because the worker's RPCs
+	// are otherwise opaque while they run, and the slowest one — embedding a
+	// whole batch — reports nothing for as long as it takes. From outside,
+	// silence is indistinguishable from a hang.
+	KindWorkerProgress Kind = "worker_progress"
+
 	// KindSnapshot is a periodic point-in-time gauge reading, for
 	// late-joining subscribers and anything that wants a heartbeat rather
 	// than tracking discrete events itself.
@@ -63,6 +70,7 @@ var AllKinds = []Kind{
 	KindDocumentFailed,
 	KindDocumentDeleted,
 	KindWorkerStateChanged,
+	KindWorkerProgress,
 	KindRPCCompleted,
 	KindSnapshot,
 }
@@ -92,6 +100,12 @@ type Event struct {
 	Method    string `json:"method,omitempty"`
 	Code      string `json:"code,omitempty"`
 	TookMS    int64  `json:"took_ms,omitempty"`
+
+	// worker_progress.
+	Phase string `json:"phase,omitempty"`
+	Done  uint64 `json:"done,omitempty"`
+	Total uint64 `json:"total,omitempty"`
+	Unit  string `json:"unit,omitempty"`
 
 	// worker_state_changed and snapshot.
 	WorkerState string `json:"worker_state,omitempty"`

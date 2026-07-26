@@ -57,6 +57,7 @@ const (
 	Worker_IngestBatch_FullMethodName    = "/lum.v1.Worker/IngestBatch"
 	Worker_DeleteDocument_FullMethodName = "/lum.v1.Worker/DeleteDocument"
 	Worker_Search_FullMethodName         = "/lum.v1.Worker/Search"
+	Worker_Events_FullMethodName         = "/lum.v1.Worker/Events"
 )
 
 // WorkerClient is the client API for Worker service.
@@ -89,6 +90,23 @@ type WorkerClient interface {
 	DeleteDocument(ctx context.Context, in *DeleteDocumentRequest, opts ...grpc.CallOption) (*DeleteDocumentResponse, error)
 	// Search embeds the query text and returns the nearest chunks.
 	Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error)
+	// Events streams progress from inside long-running work.
+	//
+	// Added because the RPCs above are opaque while they run, and the slow
+	// one is very opaque: IngestBatch hands over a whole batch and answers
+	// once, so a 45-second embed reports nothing until it is finished. From
+	// outside that is indistinguishable from a hang.
+	//
+	// A standing subscription rather than a streaming response on
+	// IngestBatch, for two reasons. Changing that RPC's response would be a
+	// breaking wire change, and it could never report the other invisible
+	// wait — the first-run model download, which happens when no ingest is
+	// in flight at all.
+	//
+	// Events are advisory: dropping them loses a progress update, never
+	// correctness. The dispatcher opens one subscription per worker process
+	// and forwards onto its own event bus.
+	Events(ctx context.Context, in *WorkerEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkerEvent], error)
 }
 
 type workerClient struct {
@@ -152,6 +170,25 @@ func (c *workerClient) Search(ctx context.Context, in *SearchRequest, opts ...gr
 	return out, nil
 }
 
+func (c *workerClient) Events(ctx context.Context, in *WorkerEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkerEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Worker_ServiceDesc.Streams[1], Worker_Events_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WorkerEventsRequest, WorkerEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_EventsClient = grpc.ServerStreamingClient[WorkerEvent]
+
 // WorkerServer is the server API for Worker service.
 // All implementations must embed UnimplementedWorkerServer
 // for forward compatibility.
@@ -182,6 +219,23 @@ type WorkerServer interface {
 	DeleteDocument(context.Context, *DeleteDocumentRequest) (*DeleteDocumentResponse, error)
 	// Search embeds the query text and returns the nearest chunks.
 	Search(context.Context, *SearchRequest) (*SearchResponse, error)
+	// Events streams progress from inside long-running work.
+	//
+	// Added because the RPCs above are opaque while they run, and the slow
+	// one is very opaque: IngestBatch hands over a whole batch and answers
+	// once, so a 45-second embed reports nothing until it is finished. From
+	// outside that is indistinguishable from a hang.
+	//
+	// A standing subscription rather than a streaming response on
+	// IngestBatch, for two reasons. Changing that RPC's response would be a
+	// breaking wire change, and it could never report the other invisible
+	// wait — the first-run model download, which happens when no ingest is
+	// in flight at all.
+	//
+	// Events are advisory: dropping them loses a progress update, never
+	// correctness. The dispatcher opens one subscription per worker process
+	// and forwards onto its own event bus.
+	Events(*WorkerEventsRequest, grpc.ServerStreamingServer[WorkerEvent]) error
 	mustEmbedUnimplementedWorkerServer()
 }
 
@@ -206,6 +260,9 @@ func (UnimplementedWorkerServer) DeleteDocument(context.Context, *DeleteDocument
 }
 func (UnimplementedWorkerServer) Search(context.Context, *SearchRequest) (*SearchResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Search not implemented")
+}
+func (UnimplementedWorkerServer) Events(*WorkerEventsRequest, grpc.ServerStreamingServer[WorkerEvent]) error {
+	return status.Error(codes.Unimplemented, "method Events not implemented")
 }
 func (UnimplementedWorkerServer) mustEmbedUnimplementedWorkerServer() {}
 func (UnimplementedWorkerServer) testEmbeddedByValue()                {}
@@ -307,6 +364,17 @@ func _Worker_Search_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Worker_Events_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WorkerEventsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(WorkerServer).Events(m, &grpc.GenericServerStream[WorkerEventsRequest, WorkerEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_EventsServer = grpc.ServerStreamingServer[WorkerEvent]
+
 // Worker_ServiceDesc is the grpc.ServiceDesc for Worker service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -336,6 +404,11 @@ var Worker_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "IngestBatch",
 			Handler:       _Worker_IngestBatch_Handler,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "Events",
+			Handler:       _Worker_Events_Handler,
+			ServerStreams: true,
 		},
 	},
 	Metadata: "lum/v1/worker.proto",

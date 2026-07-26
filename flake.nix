@@ -133,11 +133,13 @@
             # them. --user-config selects your own Neovim. Either order, and
             # anything else is passed through to nvim.
             fresh=0
+            freshModel=0
             userConfig=0
             args=()
             for arg in "$@"; do
               case "$arg" in
                 --fresh) fresh=1 ;;
+                --fresh-model) fresh=1; freshModel=1 ;;
                 --user-config) userConfig=1 ;;
                 *) args+=("$arg") ;;
               esac
@@ -154,9 +156,17 @@
             # It also holds the index files open, which is why --fresh has to
             # stop it before deleting anything.
             lum stop >/dev/null 2>&1 || true
-            if [ "$fresh" = "1" ]; then
-              echo "clearing $LUM_DATA_DIR (cold start: model load + full index)"
+            if [ "$freshModel" = "1" ]; then
+              echo "clearing $LUM_DATA_DIR including the model (~70 MB will download again)"
               rm -rf "''${LUM_DATA_DIR:?}"
+            elif [ "$fresh" = "1" ]; then
+              # models/ survives. It is 70 MB that never changes, and
+              # re-fetching it on every iteration makes the loop slow for no
+              # benefit; --fresh-model is there for exercising the download.
+              echo "clearing the index in $LUM_DATA_DIR (keeping the model; --fresh-model to re-download)"
+              if [ -d "''${LUM_DATA_DIR:?}" ]; then
+                find "''${LUM_DATA_DIR:?}" -mindepth 1 -maxdepth 1 ! -name models -exec rm -rf {} +
+              fi
             fi
 
             echo "lum:    $(command -v lum)"
@@ -216,10 +226,12 @@
             export LUM_EXCLUDE_DIRS="node_modules,vendor,target,__pycache__,eval"
 
             fresh=0
+            freshModel=0
             args=()
             for arg in "$@"; do
               case "$arg" in
                 --fresh) fresh=1 ;;
+                --fresh-model) fresh=1; freshModel=1 ;;
                 *) args+=("$arg") ;;
               esac
             done
@@ -232,9 +244,16 @@
             # and on --fresh it also holds the index files open, so deleting
             # the directory underneath it would not actually reset anything.
             lum stop >/dev/null 2>&1 || true
-            if [ "$fresh" = "1" ]; then
-              echo "clearing $LUM_DATA_DIR (full re-index)"
+            if [ "$freshModel" = "1" ]; then
+              echo "clearing $LUM_DATA_DIR including the model"
               rm -rf "''${LUM_DATA_DIR:?}"
+            elif [ "$fresh" = "1" ]; then
+              # Keep models/: a re-download adds 70 MB to a measurement that
+              # is not measuring downloads.
+              echo "clearing the index in $LUM_DATA_DIR (keeping the model)"
+              if [ -d "''${LUM_DATA_DIR:?}" ]; then
+                find "''${LUM_DATA_DIR:?}" -mindepth 1 -maxdepth 1 ! -name models -exec rm -rf {} +
+              fi
             fi
             mkdir -p "$LUM_DATA_DIR"
 

@@ -67,6 +67,48 @@ service Worker {
 
   // Search embeds the query text and returns the nearest chunks.
   rpc Search(SearchRequest) returns (SearchResponse);
+
+  // Events streams progress from inside long-running work.
+  //
+  // Added because the RPCs above are opaque while they run, and the slow
+  // one is very opaque: IngestBatch hands over a whole batch and answers
+  // once, so a 45-second embed reports nothing until it is finished. From
+  // outside that is indistinguishable from a hang.
+  //
+  // A standing subscription rather than a streaming response on
+  // IngestBatch, for two reasons. Changing that RPC's response would be a
+  // breaking wire change, and it could never report the other invisible
+  // wait — the first-run model download, which happens when no ingest is
+  // in flight at all.
+  //
+  // Events are advisory: dropping them loses a progress update, never
+  // correctness. The dispatcher opens one subscription per worker process
+  // and forwards onto its own event bus.
+  rpc Events(WorkerEventsRequest) returns (stream WorkerEvent);
+}
+
+message WorkerEventsRequest {}
+
+// WorkerEvent is one progress report from inside the worker.
+message WorkerEvent {
+  // The x-request-id of the RPC doing the work, so progress correlates
+  // with the scan that caused it. A standing stream is not per-call, so
+  // unlike every other RPC this cannot come from gRPC metadata.
+  string request_id = 1;
+  // Which stage is running: "parsing", "embedding", "storing", or
+  // "loading-model".
+  string phase = 2;
+  // Units completed and expected for this phase. Zero total means the
+  // total is not knowable yet.
+  uint64 done = 3;
+  uint64 total = 4;
+  // What is being counted — "chunks", "documents". Progress in chunks is
+  // deliberate for embedding: chunks are the unit the embedder actually
+  // works in, and they are far more uniform than documents, so the count
+  // advances smoothly instead of lurching at document boundaries.
+  string unit = 5;
+  // Optional human-readable detail, e.g. the current file.
+  string detail = 6;
 }
 
 message HealthRequest {}

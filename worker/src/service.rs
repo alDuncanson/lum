@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
 use crate::pb;
@@ -132,9 +135,40 @@ struct Pipeline {
     store: Box<dyn VectorStore>,
 }
 
+/// How many progress events a subscriber may fall behind before the oldest
+/// are dropped. Progress is advisory: losing an update costs a stale bar for
+/// a moment, whereas blocking the embedder to deliver one would trade the
+/// work itself for a report about the work.
+const PROGRESS_CHANNEL_CAPACITY: usize = 256;
+
 #[derive(Clone)]
 pub struct WorkerService {
     state: Arc<RwLock<ServiceState>>,
+    progress: broadcast::Sender<pb::WorkerEvent>,
+}
+
+/// Reports progress from inside blocking pipeline work.
+///
+/// Cloned into the blocking closure, so it must be cheap and usable off the
+/// async runtime — `broadcast::Sender::send` is both, and returns an error
+/// only when nobody is listening, which is not a problem worth handling.
+#[derive(Clone)]
+struct Progress {
+    sender: broadcast::Sender<pb::WorkerEvent>,
+    request_id: String,
+}
+
+impl Progress {
+    fn report(&self, phase: &str, done: usize, total: usize, unit: &str, detail: &str) {
+        let _ = self.sender.send(pb::WorkerEvent {
+            request_id: self.request_id.clone(),
+            phase: phase.to_owned(),
+            done: done as u64,
+            total: total as u64,
+            unit: unit.to_owned(),
+            detail: detail.to_owned(),
+        });
+    }
 }
 
 struct ServiceState {
@@ -145,12 +179,21 @@ struct ServiceState {
 
 impl WorkerService {
     pub fn starting() -> Self {
+        let (progress, _) = broadcast::channel(PROGRESS_CHANNEL_CAPACITY);
         Self {
             state: Arc::new(RwLock::new(ServiceState {
                 phase: pb::ReadinessState::Starting,
                 detail: "starting".to_owned(),
                 pipeline: None,
             })),
+            progress,
+        }
+    }
+
+    fn progress_for(&self, request_id: &str) -> Progress {
+        Progress {
+            sender: self.progress.clone(),
+            request_id: request_id.to_owned(),
         }
     }
 
@@ -244,6 +287,7 @@ impl pb::worker_server::Worker for WorkerService {
     ) -> Result<Response<pb::IngestDocumentResponse>, Status> {
         let request_id = log_request(&request, "IngestDocument");
         let _ = self.pipeline()?;
+        let progress = self.progress_for(&request_id);
         let req = request.into_inner();
         let chunk_count = self
             .run_blocking(move |p| {
@@ -289,7 +333,10 @@ impl pb::worker_server::Worker for WorkerService {
                     .collect();
                 let batch_size = texts.len();
                 let started = Instant::now();
-                let vectors = p.embedder.embed_passages(&texts)?;
+                let total_chunks = texts.len();
+                let vectors = p.embedder.embed_passages_with_progress(&texts, &|done| {
+                    progress.report("embedding", done, total_chunks, "chunks", &req.display_path);
+                })?;
                 let embed_duration = started.elapsed();
 
                 let started = Instant::now();
@@ -330,6 +377,7 @@ impl pb::worker_server::Worker for WorkerService {
     ) -> Result<Response<pb::IngestBatchResponse>, Status> {
         let request_id = log_request(&request, "IngestBatch");
         let pipeline = self.pipeline()?;
+        let progress = self.progress_for(&request_id);
         let mut stream = request.into_inner();
         let mut documents = Vec::new();
         let mut current: Option<BatchDocument> = None;
@@ -494,9 +542,13 @@ impl pb::worker_server::Worker for WorkerService {
             // Complete every parse/chunk before mutating the store. An
             // embedding failure therefore leaves every old document intact.
             let started = Instant::now();
+            let total_chunks = texts.len();
+            progress.report("embedding", 0, total_chunks, "chunks", "");
             let vectors = pipeline
                 .embedder
-                .embed_passages(&texts)
+                .embed_passages_with_progress(&texts, &|done| {
+                    progress.report("embedding", done, total_chunks, "chunks", "");
+                })
                 .map_err(|error| Status::internal(format!("embedding batch: {error:#}")))?;
             let embed_duration = started.elapsed();
             if vectors.len() != texts.len() {
@@ -507,6 +559,8 @@ impl pb::worker_server::Worker for WorkerService {
 
             let total_chunks = texts.len();
             let mut vectors = vectors.into_iter();
+            let total_documents = prepared.len();
+            let mut stored = 0usize;
             for prepared_document in prepared {
                 let PreparedDocument {
                     request_index,
@@ -535,6 +589,14 @@ impl pb::worker_server::Worker for WorkerService {
                         }
                     });
                 store_duration += started.elapsed();
+                stored += 1;
+                progress.report(
+                    "storing",
+                    stored,
+                    total_documents,
+                    "documents",
+                    &document.header.display_path,
+                );
                 results[request_index] = Some(match store_result {
                     Ok(()) => pb::IngestBatchDocumentResult {
                         document_id,
@@ -600,6 +662,26 @@ impl pb::worker_server::Worker for WorkerService {
         self.run_blocking(move |p| p.store.delete_document(&req.document_id))
             .await?;
         Ok(Response::new(pb::DeleteDocumentResponse {}))
+    }
+
+    type EventsStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<pb::WorkerEvent, Status>> + Send + 'static>,
+    >;
+
+    async fn events(
+        &self,
+        request: Request<pb::WorkerEventsRequest>,
+    ) -> Result<Response<Self::EventsStream>, Status> {
+        let _ = log_request(&request, "Events");
+        // Subscribing from here means only events published after this point
+        // are delivered — correct for progress, which is worthless late.
+        let receiver = self.progress.subscribe();
+        let stream = BroadcastStream::new(receiver)
+            // A lagged subscriber has missed updates. Skipping them is the
+            // whole reason the channel is bounded: a slow reader must not be
+            // able to stall the embedder.
+            .filter_map(|event| event.ok().map(Ok));
+        Ok(Response::new(Box::pin(stream) as Self::EventsStream))
     }
 
     async fn search(

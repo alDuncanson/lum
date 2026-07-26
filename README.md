@@ -96,17 +96,18 @@ not.
 ```text
 downloading the embedding model (~70 MB, first run only)
 embedding model ready
-⠹ indexing 68 files · embedding
+⠹ embedding ▕█████████░░░░░░░▏ 256/443 chunks
+⠼ storing ▕█████████████░░░▏ 57/68 documents
 68 indexed in 48.9s
 1 indexed in 0.3s          <- after you save a file
 worker crashed: exited: exit status 3
 ```
 
-The progress line updates in place while work is in flight. Documents are
-embedded a whole batch at a time and the dispatcher only learns any of them
-finished when that batch returns, so on a small repository nothing completes
-until everything does — the spinner, not a counter, is what tells you it is
-alive. Once more than one batch is involved a bar appears and fills.
+The progress line updates in place while work is in flight, counting whatever
+unit the current phase advances in. Embedding counts chunks rather than files
+on purpose: the worker embeds a whole batch at once, so no file finishes until
+they all do, but chunks complete steadily throughout — and they are far more
+uniform in cost than files, so the bar moves smoothly instead of lurching.
 
 It needs a notifier that can replace a message rather than stack one. That is
 settled on the second update by checking whether the same handle comes back;
@@ -301,10 +302,16 @@ needs no codegen step; the worker generates its own at build time.
 ### Neovim loop
 
 ```sh
-nix run .#nvim                   # build, then open Neovim on the local plugin
-nix run .#nvim -- --user-config  # ... using your own Neovim config instead
-nix develop .#nvim               # or get a shell first, then run: lum-nvim-dev
+nix run .#nvim                    # build, then open Neovim on the local plugin
+nix run .#nvim -- --user-config   # ... using your own Neovim config instead
+nix run .#nvim -- --fresh         # ... on an empty index (keeps the model)
+nix run .#nvim -- --fresh-model   # ... and re-download the model too
+nix develop .#nvim                # or get a shell first: lum-nvim-dev
 ```
+
+Flags combine in any order. `--fresh` keeps `models/`, because re-fetching
+70 MB on every iteration is slow for no benefit; `--fresh-model` is there for
+exercising the download and the notifications around it.
 
 Either one rebuilds the dispatcher from the working tree, takes the worker
 prebuilt from Nix (it compiles slowly and is rarely what you are changing), and

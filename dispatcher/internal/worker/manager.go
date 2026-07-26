@@ -55,6 +55,11 @@ type Manager struct {
 	absence      absenceCause
 	absenceError error
 
+	// forward cancels the progress subscription tied to the current worker
+	// process. Each respawn gets a new one, because the stream belongs to
+	// the process, not to the Manager.
+	forward context.CancelFunc
+
 	done chan struct{}
 }
 
@@ -91,7 +96,50 @@ func NewManager(
 	if idleTimeout > 0 {
 		go m.idleLoop()
 	}
+	m.subscribeProgress(client)
 	return m
+}
+
+// subscribeProgress republishes the worker's progress onto the event bus.
+//
+// Re-established per worker process: the stream dies with the process, and a
+// shed-then-respawn is a new process. Failure is ignored on purpose — a
+// worker without the RPC (or one that drops the stream) costs progress
+// updates, never correctness, and nothing downstream waits on them.
+func (m *Manager) subscribeProgress(client *Client) {
+	if m.bus == nil || client == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.forward = cancel
+	go func() {
+		stream, err := client.Events(ctx)
+		if err != nil {
+			// Not fatal and not worth retrying here: WaitForReady already
+			// covers "not up yet", so an error means the peer has no such
+			// RPC or the context ended.
+			slog.Debug("worker progress unavailable", "error", err)
+			return
+		}
+		// Ends when the worker exits or this subscription is cancelled. A
+		// respawn gets a fresh one, so there is nothing to reconnect.
+		for progress := range stream {
+			m.bus.Publish(events.Event{
+				Kind: events.KindWorkerProgress, RequestID: progress.RequestID,
+				Phase: progress.Phase, Done: progress.Done, Total: progress.Total,
+				Unit: progress.Unit, Detail: progress.Detail,
+			})
+		}
+	}()
+}
+
+// stopProgressLocked ends the subscription belonging to a worker that is
+// going away. Caller holds m.mu.
+func (m *Manager) stopProgressLocked() {
+	if m.forward != nil {
+		m.forward()
+		m.forward = nil
+	}
 }
 
 // Close stops any running lum-worker and prevents further respawns. Safe to
@@ -106,6 +154,7 @@ func (m *Manager) Close() error {
 	m.stopped = true
 	sup, client := m.sup, m.client
 	m.sup, m.client = nil, nil
+	m.stopProgressLocked()
 	m.mu.Unlock()
 
 	close(m.done)
@@ -309,6 +358,7 @@ func (m *Manager) clearIfExitedLocked() {
 		}
 		m.absence, m.absenceError = absenceExited, exitReason(m.sup.ExitError())
 		m.sup, m.client = nil, nil
+		m.stopProgressLocked()
 	}
 }
 
@@ -365,6 +415,7 @@ func (m *Manager) respawn() {
 	m.sup, m.client = sup, client
 	m.absence, m.absenceError = absenceNone, nil
 	m.lastActivity = time.Now()
+	m.subscribeProgress(client)
 }
 
 // idleLoop periodically sheds lum-worker once idleTimeout has elapsed since the
@@ -398,6 +449,7 @@ func (m *Manager) shedIfIdle() {
 	sup, client := m.sup, m.client
 	m.sup, m.client = nil, nil
 	m.absence, m.absenceError = absenceShed, nil
+	m.stopProgressLocked()
 	m.mu.Unlock()
 
 	slog.Info("worker idle timeout reached; shedding to reclaim memory", "timeout", m.idleTimeout)

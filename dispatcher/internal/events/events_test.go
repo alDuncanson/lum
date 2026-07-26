@@ -167,7 +167,8 @@ func TestAllKindsIsComplete(t *testing.T) {
 		"KindDocumentEmbedding": KindDocumentEmbedding, "KindDocumentIngested": KindDocumentIngested,
 		"KindDocumentFailed": KindDocumentFailed, "KindDocumentDeleted": KindDocumentDeleted,
 		"KindWorkerStateChanged": KindWorkerStateChanged, "KindRPCCompleted": KindRPCCompleted,
-		"KindSnapshot": KindSnapshot,
+		"KindWorkerProgress": KindWorkerProgress,
+		"KindSnapshot":       KindSnapshot,
 	}
 	for name := range declared {
 		kind, known := byName[name]

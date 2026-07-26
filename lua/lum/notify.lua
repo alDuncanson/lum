@@ -56,6 +56,15 @@ local function new_progress(supported)
     stage = nil,
     timer = nil,
     rendered = 0,
+    -- Progress reported from inside the worker, which is where the slow
+    -- part happens. Counted in whatever unit the phase works in — chunks
+    -- while embedding, documents while storing — because those are the
+    -- units that actually advance. File counts cannot: a whole batch is
+    -- handed over at once and none of it resolves until all of it does.
+    phase = nil,
+    phase_done = 0,
+    phase_total = 0,
+    phase_unit = nil,
   }
 end
 
@@ -135,20 +144,29 @@ local function render_progress(force)
   end
   p.last_render = now
 
-  -- Until something completes, a bar is definitionally empty and reads as
-  -- stuck. Documents are embedded a whole batch at a time and none of them
-  -- resolve until the batch returns, so on a small repository that is the
-  -- entire run. Show the count of files in flight instead, and switch to a
-  -- bar once there is real movement to draw.
+  -- Prefer the worker's own progress when it is reporting: it counts the
+  -- unit the current phase actually advances in, so the bar moves smoothly
+  -- instead of waiting for a whole batch to land.
   local message
-  if p.done == 0 then
+  if p.phase and p.phase_total > 0 then
+    message = ("%s %s ▕%s▏ %d/%d %s"):format(
+      SPINNER_FRAMES[p.frame],
+      p.phase,
+      progress_bar(p.phase_done, p.phase_total),
+      p.phase_done,
+      p.phase_total,
+      p.phase_unit or ""
+    )
+  elseif p.done == 0 then
+    -- No worker progress (an older worker, or between phases). A bar over
+    -- files would be empty for the whole run, which reads as stuck.
     message = ("%s indexing %d files"):format(SPINNER_FRAMES[p.frame], p.total)
+    if p.stage and p.stage ~= "" then
+      message = message .. (" · %s"):format(p.stage)
+    end
   else
-    message = ("%s indexing ▕%s▏ %d/%d")
+    message = ("%s indexing ▕%s▏ %d/%d files")
       :format(SPINNER_FRAMES[p.frame], progress_bar(p.done, p.total), p.done, p.total)
-  end
-  if p.stage and p.stage ~= "" then
-    message = message .. (" · %s"):format(p.stage)
   end
   if p.failed > 0 then
     message = message .. (" (%d failed)"):format(p.failed)
@@ -294,6 +312,20 @@ function M.describe(event)
     return
   end
 
+  if kind == "worker_progress" then
+    local p = state.progress
+    p.phase, p.phase_done, p.phase_total, p.phase_unit =
+      event.phase, event.done or 0, event.total or 0, event.unit
+    -- A phase can report before any document has been queued (the worker
+    -- starts embedding as soon as it has the batch), so make sure the bar
+    -- is running.
+    if p.total == 0 then
+      p.total = math.max(p.total, 1)
+    end
+    render_progress(false)
+    return
+  end
+
   if kind == "document_queued" then
     state.progress.total = state.progress.total + 1
     render_progress(false)
@@ -374,7 +406,15 @@ end
 local function subscribed_types()
   local types = { "scan_started", "scan_finished", "worker_state_changed", "snapshot" }
   if config.progress then
-    vim.list_extend(types, { "document_queued", "document_ingested", "document_deleted", "document_failed" })
+    vim.list_extend(types, {
+      "document_queued",
+      "document_ingested",
+      "document_deleted",
+      "document_failed",
+      -- The one that actually moves: chunks embedded and documents stored,
+      -- reported from inside the worker while a batch is in flight.
+      "worker_progress",
+    })
   elseif config.verbose then
     table.insert(types, "document_failed")
   end

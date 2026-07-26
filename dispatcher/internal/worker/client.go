@@ -354,6 +354,57 @@ func (c *Client) DeleteDocument(ctx context.Context, documentID string) error {
 	return err
 }
 
+// Progress is one report from inside a running worker RPC.
+type Progress struct {
+	RequestID string
+	Phase     string
+	Done      uint64
+	Total     uint64
+	Unit      string
+	Detail    string
+}
+
+// Events subscribes to the worker's progress stream until ctx ends or the
+// worker goes away. The channel closes on either.
+//
+// Best-effort by construction: a worker built before this RPC existed answers
+// Unimplemented, which closes the channel without an error, and the caller
+// simply gets no progress. Nothing downstream depends on these arriving.
+func (c *Client) Events(ctx context.Context) (<-chan Progress, error) {
+	// WaitForReady, because this is subscribed the moment the worker is
+	// spawned and the connection is lazy: the socket does not exist yet, so
+	// without it the call fails instantly and progress is silently absent
+	// for the life of the process. Blocking until the worker accepts is the
+	// desired behaviour — ctx cancellation is what ends the wait.
+	stream, err := c.rpc.Events(ctx, &lumv1.WorkerEventsRequest{}, grpc.WaitForReady(true))
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan Progress, 64)
+	go func() {
+		defer close(out)
+		for {
+			event, err := stream.Recv()
+			if err != nil {
+				return
+			}
+			select {
+			case out <- Progress{
+				RequestID: event.GetRequestId(),
+				Phase:     event.GetPhase(),
+				Done:      event.GetDone(),
+				Total:     event.GetTotal(),
+				Unit:      event.GetUnit(),
+				Detail:    event.GetDetail(),
+			}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
+}
+
 // SearchResult mirrors the proto SearchResult as a plain Go struct so
 // API handlers don't marshal generated types directly.
 type SearchResult struct {

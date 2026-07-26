@@ -50,7 +50,24 @@ impl EmbeddingModelChoice {
 /// it should land near each other, not queries near queries.
 pub trait Embedder: Send + Sync {
     /// Embed document chunks (batched).
-    fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.embed_passages_with_progress(texts, &|_done| {})
+    }
+
+    /// Embed document chunks, reporting cumulative completion after each
+    /// internal batch.
+    ///
+    /// The callback exists because this is the slow step and it is
+    /// otherwise silent: one call can spend a minute inside the model with
+    /// nothing observable happening. Reporting per batch is the finest
+    /// granularity available — a single `model.embed` is atomic — and it is
+    /// a good unit anyway, since chunks are far more uniform in cost than
+    /// documents.
+    fn embed_passages_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: &(dyn Fn(usize) + Sync),
+    ) -> Result<Vec<Vec<f32>>>;
 
     /// Embed a search query.
     fn embed_query(&self, query: &str) -> Result<Vec<f32>>;
@@ -93,7 +110,11 @@ impl FastEmbedder {
 }
 
 impl Embedder for FastEmbedder {
-    fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed_passages_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: &(dyn Fn(usize) + Sync),
+    ) -> Result<Vec<Vec<f32>>> {
         let mut embeddings = Vec::with_capacity(texts.len());
         for batch in texts.chunks(PASSAGE_BATCH_SIZE) {
             // bge models are trained with "passage: "/"query: " prefixes;
@@ -116,6 +137,7 @@ impl Embedder for FastEmbedder {
                 "embedding passage batch complete"
             );
             embeddings.extend(batch_embeddings);
+            on_progress(embeddings.len());
         }
         Ok(embeddings)
     }

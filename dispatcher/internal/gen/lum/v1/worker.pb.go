@@ -161,6 +161,139 @@ func (IngestBatchFailureStage) EnumDescriptor() ([]byte, []int) {
 	return file_lum_v1_worker_proto_rawDescGZIP(), []int{1}
 }
 
+type WorkerEventsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerEventsRequest) Reset() {
+	*x = WorkerEventsRequest{}
+	mi := &file_lum_v1_worker_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerEventsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerEventsRequest) ProtoMessage() {}
+
+func (x *WorkerEventsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_lum_v1_worker_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerEventsRequest.ProtoReflect.Descriptor instead.
+func (*WorkerEventsRequest) Descriptor() ([]byte, []int) {
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{0}
+}
+
+// WorkerEvent is one progress report from inside the worker.
+type WorkerEvent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The x-request-id of the RPC doing the work, so progress correlates
+	// with the scan that caused it. A standing stream is not per-call, so
+	// unlike every other RPC this cannot come from gRPC metadata.
+	RequestId string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// Which stage is running: "parsing", "embedding", "storing", or
+	// "loading-model".
+	Phase string `protobuf:"bytes,2,opt,name=phase,proto3" json:"phase,omitempty"`
+	// Units completed and expected for this phase. Zero total means the
+	// total is not knowable yet.
+	Done  uint64 `protobuf:"varint,3,opt,name=done,proto3" json:"done,omitempty"`
+	Total uint64 `protobuf:"varint,4,opt,name=total,proto3" json:"total,omitempty"`
+	// What is being counted — "chunks", "documents". Progress in chunks is
+	// deliberate for embedding: chunks are the unit the embedder actually
+	// works in, and they are far more uniform than documents, so the count
+	// advances smoothly instead of lurching at document boundaries.
+	Unit string `protobuf:"bytes,5,opt,name=unit,proto3" json:"unit,omitempty"`
+	// Optional human-readable detail, e.g. the current file.
+	Detail        string `protobuf:"bytes,6,opt,name=detail,proto3" json:"detail,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerEvent) Reset() {
+	*x = WorkerEvent{}
+	mi := &file_lum_v1_worker_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerEvent) ProtoMessage() {}
+
+func (x *WorkerEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_lum_v1_worker_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerEvent.ProtoReflect.Descriptor instead.
+func (*WorkerEvent) Descriptor() ([]byte, []int) {
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *WorkerEvent) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *WorkerEvent) GetPhase() string {
+	if x != nil {
+		return x.Phase
+	}
+	return ""
+}
+
+func (x *WorkerEvent) GetDone() uint64 {
+	if x != nil {
+		return x.Done
+	}
+	return 0
+}
+
+func (x *WorkerEvent) GetTotal() uint64 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *WorkerEvent) GetUnit() string {
+	if x != nil {
+		return x.Unit
+	}
+	return ""
+}
+
+func (x *WorkerEvent) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
+}
+
 type HealthRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -169,7 +302,7 @@ type HealthRequest struct {
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_lum_v1_worker_proto_msgTypes[0]
+	mi := &file_lum_v1_worker_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -181,7 +314,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[0]
+	mi := &file_lum_v1_worker_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -194,7 +327,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{0}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{2}
 }
 
 type HealthResponse struct {
@@ -215,7 +348,7 @@ type HealthResponse struct {
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_lum_v1_worker_proto_msgTypes[1]
+	mi := &file_lum_v1_worker_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -227,7 +360,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[1]
+	mi := &file_lum_v1_worker_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -240,7 +373,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{1}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *HealthResponse) GetReady() bool {
@@ -305,7 +438,7 @@ type IngestDocumentRequest struct {
 
 func (x *IngestDocumentRequest) Reset() {
 	*x = IngestDocumentRequest{}
-	mi := &file_lum_v1_worker_proto_msgTypes[2]
+	mi := &file_lum_v1_worker_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -317,7 +450,7 @@ func (x *IngestDocumentRequest) String() string {
 func (*IngestDocumentRequest) ProtoMessage() {}
 
 func (x *IngestDocumentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[2]
+	mi := &file_lum_v1_worker_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -330,7 +463,7 @@ func (x *IngestDocumentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestDocumentRequest.ProtoReflect.Descriptor instead.
 func (*IngestDocumentRequest) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{2}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *IngestDocumentRequest) GetDocumentId() string {
@@ -386,7 +519,7 @@ type IngestDocumentResponse struct {
 
 func (x *IngestDocumentResponse) Reset() {
 	*x = IngestDocumentResponse{}
-	mi := &file_lum_v1_worker_proto_msgTypes[3]
+	mi := &file_lum_v1_worker_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -398,7 +531,7 @@ func (x *IngestDocumentResponse) String() string {
 func (*IngestDocumentResponse) ProtoMessage() {}
 
 func (x *IngestDocumentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[3]
+	mi := &file_lum_v1_worker_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -411,7 +544,7 @@ func (x *IngestDocumentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestDocumentResponse.ProtoReflect.Descriptor instead.
 func (*IngestDocumentResponse) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{3}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *IngestDocumentResponse) GetChunkCount() uint32 {
@@ -435,7 +568,7 @@ type IngestBatchRequest struct {
 
 func (x *IngestBatchRequest) Reset() {
 	*x = IngestBatchRequest{}
-	mi := &file_lum_v1_worker_proto_msgTypes[4]
+	mi := &file_lum_v1_worker_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -447,7 +580,7 @@ func (x *IngestBatchRequest) String() string {
 func (*IngestBatchRequest) ProtoMessage() {}
 
 func (x *IngestBatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[4]
+	mi := &file_lum_v1_worker_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -460,7 +593,7 @@ func (x *IngestBatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestBatchRequest.ProtoReflect.Descriptor instead.
 func (*IngestBatchRequest) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{4}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *IngestBatchRequest) GetFrame() isIngestBatchRequest_Frame {
@@ -538,7 +671,7 @@ type IngestBatchDocumentHeader struct {
 
 func (x *IngestBatchDocumentHeader) Reset() {
 	*x = IngestBatchDocumentHeader{}
-	mi := &file_lum_v1_worker_proto_msgTypes[5]
+	mi := &file_lum_v1_worker_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -550,7 +683,7 @@ func (x *IngestBatchDocumentHeader) String() string {
 func (*IngestBatchDocumentHeader) ProtoMessage() {}
 
 func (x *IngestBatchDocumentHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[5]
+	mi := &file_lum_v1_worker_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -563,7 +696,7 @@ func (x *IngestBatchDocumentHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestBatchDocumentHeader.ProtoReflect.Descriptor instead.
 func (*IngestBatchDocumentHeader) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{5}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *IngestBatchDocumentHeader) GetDocumentId() string {
@@ -616,7 +749,7 @@ type IngestBatchEndDocument struct {
 
 func (x *IngestBatchEndDocument) Reset() {
 	*x = IngestBatchEndDocument{}
-	mi := &file_lum_v1_worker_proto_msgTypes[6]
+	mi := &file_lum_v1_worker_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -628,7 +761,7 @@ func (x *IngestBatchEndDocument) String() string {
 func (*IngestBatchEndDocument) ProtoMessage() {}
 
 func (x *IngestBatchEndDocument) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[6]
+	mi := &file_lum_v1_worker_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -641,7 +774,7 @@ func (x *IngestBatchEndDocument) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestBatchEndDocument.ProtoReflect.Descriptor instead.
 func (*IngestBatchEndDocument) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{6}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{8}
 }
 
 type IngestBatchResponse struct {
@@ -654,7 +787,7 @@ type IngestBatchResponse struct {
 
 func (x *IngestBatchResponse) Reset() {
 	*x = IngestBatchResponse{}
-	mi := &file_lum_v1_worker_proto_msgTypes[7]
+	mi := &file_lum_v1_worker_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -666,7 +799,7 @@ func (x *IngestBatchResponse) String() string {
 func (*IngestBatchResponse) ProtoMessage() {}
 
 func (x *IngestBatchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[7]
+	mi := &file_lum_v1_worker_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -679,7 +812,7 @@ func (x *IngestBatchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestBatchResponse.ProtoReflect.Descriptor instead.
 func (*IngestBatchResponse) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{7}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *IngestBatchResponse) GetDocuments() []*IngestBatchDocumentResult {
@@ -703,7 +836,7 @@ type IngestBatchDocumentResult struct {
 
 func (x *IngestBatchDocumentResult) Reset() {
 	*x = IngestBatchDocumentResult{}
-	mi := &file_lum_v1_worker_proto_msgTypes[8]
+	mi := &file_lum_v1_worker_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -715,7 +848,7 @@ func (x *IngestBatchDocumentResult) String() string {
 func (*IngestBatchDocumentResult) ProtoMessage() {}
 
 func (x *IngestBatchDocumentResult) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[8]
+	mi := &file_lum_v1_worker_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -728,7 +861,7 @@ func (x *IngestBatchDocumentResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestBatchDocumentResult.ProtoReflect.Descriptor instead.
 func (*IngestBatchDocumentResult) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{8}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *IngestBatchDocumentResult) GetDocumentId() string {
@@ -788,7 +921,7 @@ type IngestBatchDocumentSuccess struct {
 
 func (x *IngestBatchDocumentSuccess) Reset() {
 	*x = IngestBatchDocumentSuccess{}
-	mi := &file_lum_v1_worker_proto_msgTypes[9]
+	mi := &file_lum_v1_worker_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -800,7 +933,7 @@ func (x *IngestBatchDocumentSuccess) String() string {
 func (*IngestBatchDocumentSuccess) ProtoMessage() {}
 
 func (x *IngestBatchDocumentSuccess) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[9]
+	mi := &file_lum_v1_worker_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -813,7 +946,7 @@ func (x *IngestBatchDocumentSuccess) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestBatchDocumentSuccess.ProtoReflect.Descriptor instead.
 func (*IngestBatchDocumentSuccess) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{9}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *IngestBatchDocumentSuccess) GetChunkCount() uint32 {
@@ -833,7 +966,7 @@ type IngestBatchDocumentFailure struct {
 
 func (x *IngestBatchDocumentFailure) Reset() {
 	*x = IngestBatchDocumentFailure{}
-	mi := &file_lum_v1_worker_proto_msgTypes[10]
+	mi := &file_lum_v1_worker_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -845,7 +978,7 @@ func (x *IngestBatchDocumentFailure) String() string {
 func (*IngestBatchDocumentFailure) ProtoMessage() {}
 
 func (x *IngestBatchDocumentFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[10]
+	mi := &file_lum_v1_worker_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -858,7 +991,7 @@ func (x *IngestBatchDocumentFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestBatchDocumentFailure.ProtoReflect.Descriptor instead.
 func (*IngestBatchDocumentFailure) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{10}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *IngestBatchDocumentFailure) GetStage() IngestBatchFailureStage {
@@ -884,7 +1017,7 @@ type DeleteDocumentRequest struct {
 
 func (x *DeleteDocumentRequest) Reset() {
 	*x = DeleteDocumentRequest{}
-	mi := &file_lum_v1_worker_proto_msgTypes[11]
+	mi := &file_lum_v1_worker_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -896,7 +1029,7 @@ func (x *DeleteDocumentRequest) String() string {
 func (*DeleteDocumentRequest) ProtoMessage() {}
 
 func (x *DeleteDocumentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[11]
+	mi := &file_lum_v1_worker_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -909,7 +1042,7 @@ func (x *DeleteDocumentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDocumentRequest.ProtoReflect.Descriptor instead.
 func (*DeleteDocumentRequest) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{11}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DeleteDocumentRequest) GetDocumentId() string {
@@ -927,7 +1060,7 @@ type DeleteDocumentResponse struct {
 
 func (x *DeleteDocumentResponse) Reset() {
 	*x = DeleteDocumentResponse{}
-	mi := &file_lum_v1_worker_proto_msgTypes[12]
+	mi := &file_lum_v1_worker_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -939,7 +1072,7 @@ func (x *DeleteDocumentResponse) String() string {
 func (*DeleteDocumentResponse) ProtoMessage() {}
 
 func (x *DeleteDocumentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[12]
+	mi := &file_lum_v1_worker_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -952,7 +1085,7 @@ func (x *DeleteDocumentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDocumentResponse.ProtoReflect.Descriptor instead.
 func (*DeleteDocumentResponse) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{12}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{14}
 }
 
 type SearchRequest struct {
@@ -969,7 +1102,7 @@ type SearchRequest struct {
 
 func (x *SearchRequest) Reset() {
 	*x = SearchRequest{}
-	mi := &file_lum_v1_worker_proto_msgTypes[13]
+	mi := &file_lum_v1_worker_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -981,7 +1114,7 @@ func (x *SearchRequest) String() string {
 func (*SearchRequest) ProtoMessage() {}
 
 func (x *SearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[13]
+	mi := &file_lum_v1_worker_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -994,7 +1127,7 @@ func (x *SearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
 func (*SearchRequest) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{13}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SearchRequest) GetQuery() string {
@@ -1027,7 +1160,7 @@ type SearchResponse struct {
 
 func (x *SearchResponse) Reset() {
 	*x = SearchResponse{}
-	mi := &file_lum_v1_worker_proto_msgTypes[14]
+	mi := &file_lum_v1_worker_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1039,7 +1172,7 @@ func (x *SearchResponse) String() string {
 func (*SearchResponse) ProtoMessage() {}
 
 func (x *SearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[14]
+	mi := &file_lum_v1_worker_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1052,7 +1185,7 @@ func (x *SearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResponse.ProtoReflect.Descriptor instead.
 func (*SearchResponse) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{14}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SearchResponse) GetResults() []*SearchResult {
@@ -1085,7 +1218,7 @@ type SearchResult struct {
 
 func (x *SearchResult) Reset() {
 	*x = SearchResult{}
-	mi := &file_lum_v1_worker_proto_msgTypes[15]
+	mi := &file_lum_v1_worker_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1097,7 +1230,7 @@ func (x *SearchResult) String() string {
 func (*SearchResult) ProtoMessage() {}
 
 func (x *SearchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_lum_v1_worker_proto_msgTypes[15]
+	mi := &file_lum_v1_worker_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1110,7 +1243,7 @@ func (x *SearchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResult.ProtoReflect.Descriptor instead.
 func (*SearchResult) Descriptor() ([]byte, []int) {
-	return file_lum_v1_worker_proto_rawDescGZIP(), []int{15}
+	return file_lum_v1_worker_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *SearchResult) GetDocumentId() string {
@@ -1173,7 +1306,16 @@ var File_lum_v1_worker_proto protoreflect.FileDescriptor
 
 const file_lum_v1_worker_proto_rawDesc = "" +
 	"\n" +
-	"\x13lum/v1/worker.proto\x12\x06lum.v1\"\x0f\n" +
+	"\x13lum/v1/worker.proto\x12\x06lum.v1\"\x15\n" +
+	"\x13WorkerEventsRequest\"\x98\x01\n" +
+	"\vWorkerEvent\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x14\n" +
+	"\x05phase\x18\x02 \x01(\tR\x05phase\x12\x12\n" +
+	"\x04done\x18\x03 \x01(\x04R\x04done\x12\x14\n" +
+	"\x05total\x18\x04 \x01(\x04R\x05total\x12\x12\n" +
+	"\x04unit\x18\x05 \x01(\tR\x04unit\x12\x16\n" +
+	"\x06detail\x18\x06 \x01(\tR\x06detail\"\x0f\n" +
 	"\rHealthRequest\"\x97\x01\n" +
 	"\x0eHealthResponse\x12\x14\n" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12\x16\n" +
@@ -1251,13 +1393,14 @@ const file_lum_v1_worker_proto_rawDesc = "" +
 	"&INGEST_BATCH_FAILURE_STAGE_UNSPECIFIED\x10\x00\x12$\n" +
 	" INGEST_BATCH_FAILURE_STAGE_PARSE\x10\x01\x12-\n" +
 	")INGEST_BATCH_FAILURE_STAGE_RESOURCE_LIMIT\x10\x02\x12$\n" +
-	" INGEST_BATCH_FAILURE_STAGE_STORE\x10\x032\xe6\x02\n" +
+	" INGEST_BATCH_FAILURE_STAGE_STORE\x10\x032\xa4\x03\n" +
 	"\x06Worker\x127\n" +
 	"\x06Health\x12\x15.lum.v1.HealthRequest\x1a\x16.lum.v1.HealthResponse\x12O\n" +
 	"\x0eIngestDocument\x12\x1d.lum.v1.IngestDocumentRequest\x1a\x1e.lum.v1.IngestDocumentResponse\x12H\n" +
 	"\vIngestBatch\x12\x1a.lum.v1.IngestBatchRequest\x1a\x1b.lum.v1.IngestBatchResponse(\x01\x12O\n" +
 	"\x0eDeleteDocument\x12\x1d.lum.v1.DeleteDocumentRequest\x1a\x1e.lum.v1.DeleteDocumentResponse\x127\n" +
-	"\x06Search\x12\x15.lum.v1.SearchRequest\x1a\x16.lum.v1.SearchResponseBAZ?github.com/alDuncanson/lum/dispatcher/internal/gen/lum/v1;lumv1b\x06proto3"
+	"\x06Search\x12\x15.lum.v1.SearchRequest\x1a\x16.lum.v1.SearchResponse\x12<\n" +
+	"\x06Events\x12\x1b.lum.v1.WorkerEventsRequest\x1a\x13.lum.v1.WorkerEvent0\x01BAZ?github.com/alDuncanson/lum/dispatcher/internal/gen/lum/v1;lumv1b\x06proto3"
 
 var (
 	file_lum_v1_worker_proto_rawDescOnce sync.Once
@@ -1272,48 +1415,52 @@ func file_lum_v1_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_lum_v1_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_lum_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_lum_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_lum_v1_worker_proto_goTypes = []any{
 	(ReadinessState)(0),                // 0: lum.v1.ReadinessState
 	(IngestBatchFailureStage)(0),       // 1: lum.v1.IngestBatchFailureStage
-	(*HealthRequest)(nil),              // 2: lum.v1.HealthRequest
-	(*HealthResponse)(nil),             // 3: lum.v1.HealthResponse
-	(*IngestDocumentRequest)(nil),      // 4: lum.v1.IngestDocumentRequest
-	(*IngestDocumentResponse)(nil),     // 5: lum.v1.IngestDocumentResponse
-	(*IngestBatchRequest)(nil),         // 6: lum.v1.IngestBatchRequest
-	(*IngestBatchDocumentHeader)(nil),  // 7: lum.v1.IngestBatchDocumentHeader
-	(*IngestBatchEndDocument)(nil),     // 8: lum.v1.IngestBatchEndDocument
-	(*IngestBatchResponse)(nil),        // 9: lum.v1.IngestBatchResponse
-	(*IngestBatchDocumentResult)(nil),  // 10: lum.v1.IngestBatchDocumentResult
-	(*IngestBatchDocumentSuccess)(nil), // 11: lum.v1.IngestBatchDocumentSuccess
-	(*IngestBatchDocumentFailure)(nil), // 12: lum.v1.IngestBatchDocumentFailure
-	(*DeleteDocumentRequest)(nil),      // 13: lum.v1.DeleteDocumentRequest
-	(*DeleteDocumentResponse)(nil),     // 14: lum.v1.DeleteDocumentResponse
-	(*SearchRequest)(nil),              // 15: lum.v1.SearchRequest
-	(*SearchResponse)(nil),             // 16: lum.v1.SearchResponse
-	(*SearchResult)(nil),               // 17: lum.v1.SearchResult
+	(*WorkerEventsRequest)(nil),        // 2: lum.v1.WorkerEventsRequest
+	(*WorkerEvent)(nil),                // 3: lum.v1.WorkerEvent
+	(*HealthRequest)(nil),              // 4: lum.v1.HealthRequest
+	(*HealthResponse)(nil),             // 5: lum.v1.HealthResponse
+	(*IngestDocumentRequest)(nil),      // 6: lum.v1.IngestDocumentRequest
+	(*IngestDocumentResponse)(nil),     // 7: lum.v1.IngestDocumentResponse
+	(*IngestBatchRequest)(nil),         // 8: lum.v1.IngestBatchRequest
+	(*IngestBatchDocumentHeader)(nil),  // 9: lum.v1.IngestBatchDocumentHeader
+	(*IngestBatchEndDocument)(nil),     // 10: lum.v1.IngestBatchEndDocument
+	(*IngestBatchResponse)(nil),        // 11: lum.v1.IngestBatchResponse
+	(*IngestBatchDocumentResult)(nil),  // 12: lum.v1.IngestBatchDocumentResult
+	(*IngestBatchDocumentSuccess)(nil), // 13: lum.v1.IngestBatchDocumentSuccess
+	(*IngestBatchDocumentFailure)(nil), // 14: lum.v1.IngestBatchDocumentFailure
+	(*DeleteDocumentRequest)(nil),      // 15: lum.v1.DeleteDocumentRequest
+	(*DeleteDocumentResponse)(nil),     // 16: lum.v1.DeleteDocumentResponse
+	(*SearchRequest)(nil),              // 17: lum.v1.SearchRequest
+	(*SearchResponse)(nil),             // 18: lum.v1.SearchResponse
+	(*SearchResult)(nil),               // 19: lum.v1.SearchResult
 }
 var file_lum_v1_worker_proto_depIdxs = []int32{
 	0,  // 0: lum.v1.HealthResponse.state:type_name -> lum.v1.ReadinessState
-	7,  // 1: lum.v1.IngestBatchRequest.document:type_name -> lum.v1.IngestBatchDocumentHeader
-	8,  // 2: lum.v1.IngestBatchRequest.end_document:type_name -> lum.v1.IngestBatchEndDocument
-	10, // 3: lum.v1.IngestBatchResponse.documents:type_name -> lum.v1.IngestBatchDocumentResult
-	11, // 4: lum.v1.IngestBatchDocumentResult.success:type_name -> lum.v1.IngestBatchDocumentSuccess
-	12, // 5: lum.v1.IngestBatchDocumentResult.failure:type_name -> lum.v1.IngestBatchDocumentFailure
+	9,  // 1: lum.v1.IngestBatchRequest.document:type_name -> lum.v1.IngestBatchDocumentHeader
+	10, // 2: lum.v1.IngestBatchRequest.end_document:type_name -> lum.v1.IngestBatchEndDocument
+	12, // 3: lum.v1.IngestBatchResponse.documents:type_name -> lum.v1.IngestBatchDocumentResult
+	13, // 4: lum.v1.IngestBatchDocumentResult.success:type_name -> lum.v1.IngestBatchDocumentSuccess
+	14, // 5: lum.v1.IngestBatchDocumentResult.failure:type_name -> lum.v1.IngestBatchDocumentFailure
 	1,  // 6: lum.v1.IngestBatchDocumentFailure.stage:type_name -> lum.v1.IngestBatchFailureStage
-	17, // 7: lum.v1.SearchResponse.results:type_name -> lum.v1.SearchResult
-	2,  // 8: lum.v1.Worker.Health:input_type -> lum.v1.HealthRequest
-	4,  // 9: lum.v1.Worker.IngestDocument:input_type -> lum.v1.IngestDocumentRequest
-	6,  // 10: lum.v1.Worker.IngestBatch:input_type -> lum.v1.IngestBatchRequest
-	13, // 11: lum.v1.Worker.DeleteDocument:input_type -> lum.v1.DeleteDocumentRequest
-	15, // 12: lum.v1.Worker.Search:input_type -> lum.v1.SearchRequest
-	3,  // 13: lum.v1.Worker.Health:output_type -> lum.v1.HealthResponse
-	5,  // 14: lum.v1.Worker.IngestDocument:output_type -> lum.v1.IngestDocumentResponse
-	9,  // 15: lum.v1.Worker.IngestBatch:output_type -> lum.v1.IngestBatchResponse
-	14, // 16: lum.v1.Worker.DeleteDocument:output_type -> lum.v1.DeleteDocumentResponse
-	16, // 17: lum.v1.Worker.Search:output_type -> lum.v1.SearchResponse
-	13, // [13:18] is the sub-list for method output_type
-	8,  // [8:13] is the sub-list for method input_type
+	19, // 7: lum.v1.SearchResponse.results:type_name -> lum.v1.SearchResult
+	4,  // 8: lum.v1.Worker.Health:input_type -> lum.v1.HealthRequest
+	6,  // 9: lum.v1.Worker.IngestDocument:input_type -> lum.v1.IngestDocumentRequest
+	8,  // 10: lum.v1.Worker.IngestBatch:input_type -> lum.v1.IngestBatchRequest
+	15, // 11: lum.v1.Worker.DeleteDocument:input_type -> lum.v1.DeleteDocumentRequest
+	17, // 12: lum.v1.Worker.Search:input_type -> lum.v1.SearchRequest
+	2,  // 13: lum.v1.Worker.Events:input_type -> lum.v1.WorkerEventsRequest
+	5,  // 14: lum.v1.Worker.Health:output_type -> lum.v1.HealthResponse
+	7,  // 15: lum.v1.Worker.IngestDocument:output_type -> lum.v1.IngestDocumentResponse
+	11, // 16: lum.v1.Worker.IngestBatch:output_type -> lum.v1.IngestBatchResponse
+	16, // 17: lum.v1.Worker.DeleteDocument:output_type -> lum.v1.DeleteDocumentResponse
+	18, // 18: lum.v1.Worker.Search:output_type -> lum.v1.SearchResponse
+	3,  // 19: lum.v1.Worker.Events:output_type -> lum.v1.WorkerEvent
+	14, // [14:20] is the sub-list for method output_type
+	8,  // [8:14] is the sub-list for method input_type
 	8,  // [8:8] is the sub-list for extension type_name
 	8,  // [8:8] is the sub-list for extension extendee
 	0,  // [0:8] is the sub-list for field type_name
@@ -1324,12 +1471,12 @@ func file_lum_v1_worker_proto_init() {
 	if File_lum_v1_worker_proto != nil {
 		return
 	}
-	file_lum_v1_worker_proto_msgTypes[4].OneofWrappers = []any{
+	file_lum_v1_worker_proto_msgTypes[6].OneofWrappers = []any{
 		(*IngestBatchRequest_Document)(nil),
 		(*IngestBatchRequest_Content)(nil),
 		(*IngestBatchRequest_EndDocument)(nil),
 	}
-	file_lum_v1_worker_proto_msgTypes[8].OneofWrappers = []any{
+	file_lum_v1_worker_proto_msgTypes[10].OneofWrappers = []any{
 		(*IngestBatchDocumentResult_Success)(nil),
 		(*IngestBatchDocumentResult_Failure)(nil),
 	}
@@ -1339,7 +1486,7 @@ func file_lum_v1_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_lum_v1_worker_proto_rawDesc), len(file_lum_v1_worker_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   16,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
