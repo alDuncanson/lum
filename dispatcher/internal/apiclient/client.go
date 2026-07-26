@@ -92,6 +92,8 @@ type SearchOptions struct {
 	// PerFile caps how many chunks any one file may contribute. nil leaves
 	// the server's default in place; 0 asks for raw nearest neighbours.
 	PerFile *int
+	// ExcludeTests drops results whose path says they are tests.
+	ExcludeTests bool
 }
 
 // Search runs a semantic query and returns the nearest chunks. sourceID
@@ -109,6 +111,9 @@ func (c *Client) SearchWith(ctx context.Context, query string, opts SearchOption
 	}
 	if opts.PerFile != nil {
 		path += fmt.Sprintf("&per_file=%d", *opts.PerFile)
+	}
+	if opts.ExcludeTests {
+		path += "&exclude_tests=true"
 	}
 	err := c.call(ctx, "GET", path, nil, &out)
 	return out.Results, err

@@ -97,3 +97,41 @@ func TestFetchLimitOverfetchesOnlyWhenCollapsing(t *testing.T) {
 		t.Fatalf("fetch %d must not be below the limit 500", got)
 	}
 }
+
+func TestIsTestPathFollowsNamingConventions(t *testing.T) {
+	for _, uri := range []string{
+		"/repo/internal/api/server_test.go",
+		"/repo/pkg/thing_test.py",
+		"/repo/src/App.test.tsx",
+		"/repo/src/App.spec.js",
+		"/repo/tests/integration.go",
+		"/repo/__tests__/render.js",
+		"/repo/spec/models/user_spec.rb",
+		"/repo/pkg/test_helpers.py",
+	} {
+		if !isTestPath(uri) {
+			t.Errorf("%s should read as a test", uri)
+		}
+	}
+	for _, uri := range []string{
+		"/repo/internal/api/server.go",
+		// Rust keeps its tests inside the file they test, so there is no
+		// path to recognize — and penalizing this one would penalize the
+		// vector store.
+		"/repo/worker/src/store/edge.rs",
+		// "latest" ends in "test" and is not one.
+		"/repo/internal/latest.go",
+		"/repo/contest/main.go",
+	} {
+		if isTestPath(uri) {
+			t.Errorf("%s should not read as a test", uri)
+		}
+	}
+}
+
+func TestDropTestsRemovesOnlyTests(t *testing.T) {
+	results := hits("a", "b", "c")
+	results[1].URI = "/repo/b_test.go"
+	got := dropTests(results)
+	equal(t, documentIDs(got), []string{"a", "c"})
+}

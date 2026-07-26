@@ -252,10 +252,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		perFile = parsed
 	}
 
+	excludeTests := r.URL.Query().Get("exclude_tests") == "true"
+
 	results, err := s.dp.Search(r.Context(), query, uint32(fetchLimit(limit, perFile)), sourceID)
 	if err != nil {
 		httpError(w, http.StatusBadGateway, "worker search failed: "+err.Error())
 		return
+	}
+	if excludeTests {
+		results = dropTests(results)
 	}
 	results = collapseByFile(results, perFile, limit)
 	out := make([]apiv1.SearchResult, 0, len(results))

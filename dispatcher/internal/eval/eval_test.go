@@ -43,6 +43,7 @@ var (
 	limit     = flag.Int("eval.limit", 10, "results to request per query")
 	label     = flag.String("eval.label", "", "name this run in the output (e.g. a chunker version)")
 	perFile   = flag.Int("eval.per-file", -1, "cap chunks per file; -1 leaves the server default, 0 disables collapsing")
+	noTests   = flag.Bool("eval.exclude-tests", false, "drop test files from results")
 )
 
 // Query is one fixture entry: a search phrase and the files it should
@@ -170,6 +171,7 @@ func TestRetrieval(t *testing.T) {
 		if *perFile >= 0 {
 			opts.PerFile = perFile
 		}
+		opts.ExcludeTests = *noTests
 		results, err := client.SearchWith(ctx, query.Text, opts)
 		if err != nil {
 			t.Fatalf("searching %q: %v", query.Text, err)

@@ -24,12 +24,15 @@ chunker, the parsers, or the model does.
 ## Current
 
 `bge-small-en-v1.5`, path context in the embedded text, tree-sitter chunking
-for code and markdown, at most two chunks per file, 40 phrase queries over 70
+for code and markdown, at most two chunks per file, 45 phrase queries over 70
 documents / 705 chunks:
 
 | recall@1 | recall@5 | recall@10 | MRR | chunk hit | distinct@5 |
 |---|---|---|---|---|---|
-| 0.600 | 0.825 | 0.950 | 0.695 | 0.692 | 3.77 |
+| 0.578 | 0.844 | 0.956 | 0.686 | 0.706 | 3.76 |
+
+(The five test-seeking queries added below moved these off the 40-query
+numbers in the sections that follow. They are harder than average.)
 
 Everything below is how it got there. Read the columns, not the rows across
 sections: the corpus is this repository and it changes underneath the
@@ -168,6 +171,42 @@ Two is the default because it keeps most of the coverage (recall@10 0.950,
 distinct 3.10 → 3.77) for one query's worth of chunk-hit precision. Three
 gives back the coverage and keeps the precision loss, which is the worst of
 both.
+
+### Down-weighting tests is wrong, and the fixture had to be fixed to show it
+
+Tests outrank implementations for several queries: "worker crashed state"
+returns two chunks of `manager_test.go` before `manager.go`. A test names the
+feature repeatedly, in prose-like assertion names and short focused
+functions, which is close to a description of what scores well here.
+
+The obvious fix is to scale test scores down. Before measuring it, note what
+the fixture would have said: **no answer key was a test file**, so penalizing
+tests could only ever look free. The benchmark would have been measuring its
+own bias.
+
+So five queries whose answer *is* a test went in first — people do look for
+tests — and then:
+
+| test weight | recall@1 | recall@5 | recall@10 | MRR | chunk hit |
+|---|---|---|---|---|---|
+| **1 (off)** | **0.578** | **0.844** | **0.956** | **0.686** | **0.706** |
+| 0.95 | 0.533 | 0.844 | 0.956 | 0.654 | 0.647 |
+| 0.9 | 0.533 | 0.800 | 0.933 | 0.645 | 0.647 |
+| 0.8 | 0.533 | 0.800 | 0.911 | 0.641 | 0.647 |
+| 0 (drop) | 0.533 | 0.800 | 0.867 | 0.635 | 0.529 |
+
+Monotonically worse, from the first 5% off. Whatever a penalty wins on the
+queries that want implementations, it loses more on the ones that want tests
+— and it starts losing immediately, so there is no setting worth having.
+
+What shipped is the preference rather than the prior: `--no-tests`
+(`exclude_tests=true`), off by default, for searching a codebase where you
+never want them. There is no partial setting because no partial setting is
+good.
+
+The general lesson is about the fixture, not about tests. A benchmark with no
+counter-examples to a change will endorse that change. Before measuring
+something, check whether the fixture is capable of disagreeing.
 
 ## What the current misses say
 

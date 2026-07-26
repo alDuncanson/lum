@@ -1,6 +1,11 @@
 package api
 
-import "github.com/alDuncanson/lum/dispatcher/internal/worker"
+import (
+	"path"
+	"strings"
+
+	"github.com/alDuncanson/lum/dispatcher/internal/worker"
+)
 
 // Nearest-neighbour search returns chunks, and a question about one file is
 // usually answered by several of them. Left alone, three chunks of the same
@@ -73,6 +78,66 @@ func collapseByFile(results []worker.SearchResult, perFile, limit int) []worker.
 		kept = append(kept, result)
 		if limit > 0 && len(kept) == limit {
 			break
+		}
+	}
+	return kept
+}
+
+// Tests describe the feature they exercise, repeatedly, in prose-like
+// assertion names and short focused functions — close to a description of
+// what scores well in an embedding search. So they outrank implementations:
+// "worker crashed state" returns two chunks of manager_test.go before
+// manager.go.
+//
+// Down-weighting them is the obvious fix and it is wrong. Scaling test scores
+// by 0.95, 0.9, 0.8 and 0 made every retrieval metric monotonically worse
+// once the fixture contained queries that were *looking* for a test — which
+// people do. See eval/README.md.
+//
+// What survives is the preference, not the prior: `exclude_tests` drops them
+// entirely, off by default, for searching a codebase where you never want
+// them. There is no partial setting because there is no evidence any partial
+// setting is good.
+
+// testPathSuffixes and testPathSegments are naming conventions, not a
+// language feature. Rust deliberately has no entry: its tests live in a
+// `#[cfg(test)] mod tests` inside the file they test, so there is no path to
+// recognize and penalizing `src/store/edge.rs` would penalize the store.
+var (
+	testPathSuffixes = []string{
+		"_test.go",
+		"_test.py", "_test.rs", "_test.ts", "_test.js",
+		".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+		".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx",
+		"_spec.rb", "_spec.lua", "_test.exs",
+	}
+	testPathSegments = []string{"/test/", "/tests/", "/__tests__/", "/spec/"}
+)
+
+func isTestPath(uri string) bool {
+	lower := strings.ToLower(uri)
+	for _, suffix := range testPathSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	if base := path.Base(lower); strings.HasPrefix(base, "test_") {
+		return true
+	}
+	for _, segment := range testPathSegments {
+		if strings.Contains(lower, segment) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropTests removes results whose path says they are tests.
+func dropTests(results []worker.SearchResult) []worker.SearchResult {
+	kept := results[:0:0]
+	for _, result := range results {
+		if !isTestPath(result.URI) {
+			kept = append(kept, result)
 		}
 	}
 	return kept

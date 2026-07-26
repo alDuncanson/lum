@@ -171,3 +171,29 @@ queries:
 
   - query: development shell
     files: [flake.nix]
+
+  # --- looking for the tests, not the implementation ---
+  #
+  # These exist to keep the fixture honest about a change worth considering:
+  # down-weighting test files, because they outrank implementations for
+  # several queries above. Without a query whose answer *is* a test, that
+  # change can only ever look free, and the benchmark would be measuring its
+  # own bias rather than lum.
+  - query: test that a shrunk document leaves no stale vectors
+    files: [worker/src/store/edge.rs]
+    contains: reingesting_a_shrunk_document_leaves_no_stale_tail
+
+  - query: scan debounce test
+    files: [dispatcher/internal/ingest/ingest_test.go]
+    contains: EnqueueDebouncedScanResetsQuietWindow
+
+  - query: tests for deleting a source
+    files: [dispatcher/internal/ingest/ingest_test.go]
+    contains: TestDeleteSourceRemovesVectorsCatalogRowsAndSource
+
+  - query: ingest failure backoff test
+    files: [dispatcher/internal/ingest/ingest_test.go]
+    contains: TestDocumentFailurePersistsAttemptsAndCapsBackoff
+
+  - query: catalog migration test
+    files: [dispatcher/internal/catalog/catalog_test.go]
