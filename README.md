@@ -18,14 +18,29 @@ everything after that is offline.
 
 ## Install
 
-With [Nix](https://nixos.org/) flakes:
+Lum is two self-contained binaries — ONNX Runtime is statically linked and
+there is nothing to install alongside them.
+
+**In Neovim**, add the plugin and run `:LumInstall` once. It downloads the
+release for your platform into Neovim's data directory and checks it against
+the published SHA256:
+
+```lua
+{ "alDuncanson/lum", dependencies = { "nvim-telescope/telescope.nvim" } }
+```
+
+**With [Nix](https://nixos.org/):**
 
 ```sh
 nix profile install github:alDuncanson/lum
 ```
 
-Or from source, with Go 1.26+ and Rust 1.97+ — the two binaries just need to
-sit in the same directory:
+**Prebuilt binaries** for macOS and Linux, arm64 and x86_64, are on the
+[releases page](https://github.com/alDuncanson/lum/releases). Unpack and put
+both files in the same directory on your `PATH` — `lum` finds `lum-worker`
+beside itself.
+
+**From source**, with Go 1.26+ and Rust 1.97+:
 
 ```sh
 git clone https://github.com/alDuncanson/lum && cd lum
@@ -33,8 +48,6 @@ git clone https://github.com/alDuncanson/lum && cd lum
 (cd dispatcher && go build -o ../bin/lum ./cmd/lum)
 cp worker/target/release/lum-worker bin/
 ```
-
-Put `bin/` on your `PATH`. There are no prebuilt release binaries yet.
 
 ## Quick start
 

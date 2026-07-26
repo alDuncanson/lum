@@ -7,8 +7,30 @@ preview and open the matching code.
 It is an ordinary CLI client: no database, no vector index, no private socket —
 the same deal every other integration gets.
 
-Install the `lum-nvim` flake output, or put this repository's `lua/` directory
-on Neovim's runtime path with your plugin manager.
+Install the `lum-nvim` flake output, or add the repository with your plugin
+manager.
+
+## Getting the binary
+
+The plugin is Lua; lum is two native binaries, so they arrive separately.
+
+If `lum` is on your `PATH` — a Nix profile, a release you unpacked, a build
+from source — the plugin uses it and there is nothing else to do. Otherwise
+run `:LumInstall`, which downloads the release for your platform into
+`stdpath("data")/lum/<version>/` and verifies it against the published
+`SHA256SUMS` before unpacking. `:LumInstall!` re-downloads.
+
+It is a command rather than something that happens on startup: an editor
+plugin that quietly fetches ninety megabytes of executable the first time you
+open a file is not a thing lum should do. The picker names the command when
+the binary is missing, so it is one message and one command.
+
+The version it fetches is pinned in `lua/lum/install.lua` rather than resolved
+as "latest", because a plugin and a binary that shipped together are a tested
+pair. `nix flake check` fails if that pin disagrees with the flake.
+
+For an internal mirror, set `LUM_RELEASE_BASE_URL` to a location serving the
+same archive and `SHA256SUMS` names.
 
 
 ```lua

@@ -62,3 +62,30 @@ It runs on `127.0.0.1:7421` with its data in `/tmp/lum-dev`, so a dev session
 never collides with an installed lum on the default port or touches a real
 index. The shell exports the same settings, so `lum` typed at the prompt and
 `lum` invoked from the picker are the same binary against the same index.
+
+## Cutting a release
+
+`.github/workflows/release.yml` builds four targets on native runners —
+`darwin-arm64`, `darwin-x86_64`, `linux-x86_64`, `linux-arm64` — and publishes
+tarballs plus a `SHA256SUMS` file.
+
+```sh
+gh workflow run release.yml -f version=0.1.0   # dry run: builds, publishes nothing
+git tag v0.1.0 && git push --tags              # the real thing
+```
+
+Three things have to agree before a tag is worth pushing, and two of them are
+checked automatically:
+
+- `flake.nix` `version` — the release job refuses a tag that disagrees.
+- `lua/lum/install.lua` `M.version` — the `plugin-version` flake check refuses
+  a tree where it drifts, because `:LumInstall` would fetch an archive that
+  does not exist.
+- The Linux runners are `ubuntu-22.04`. glibc is backward-compatible but not
+  forward-compatible, so the runner sets the oldest distro a release will
+  start on. Moving to a newer runner silently drops older distros.
+
+The workflow deliberately does not build with Nix, though the flake is the
+source of truth everywhere else. A binary built inside `nix develop` links
+libraries from `/nix/store` and will not start on a machine without Nix — the
+job checks for that and fails rather than shipping it.

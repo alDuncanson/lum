@@ -1,9 +1,12 @@
 -- Telescope picker for the lum semantic-search CLI.
 local M = {}
 
+local install = require("lum.install")
 local notify = require("lum.notify")
 
 local config = {
+  -- A command name is looked up on PATH, then among binaries `:LumInstall`
+  -- downloaded. A path with a slash is used as given. See lua/lum/install.lua.
   executable = "lum",
   limit = 50,
   debounce_ms = 200,
@@ -113,6 +116,7 @@ function M.setup(opts)
     notify_opts = { enabled = false }
   end
   notify.setup(notify_opts)
+  install.command()
 
   if config.index_on_open then
     -- Wait for startup to finish: setup() runs during plugin loading, when
@@ -137,6 +141,16 @@ end
 -- notification channel's problem rather than something to interrupt startup
 -- over. A repository that is already indexed makes this a canonical-path
 -- lookup and a rescan of unchanged files, which is cheap.
+-- executable resolves the configured name to something runnable, reporting
+-- the one command that fixes it if there is nothing.
+local function executable(opts)
+  local resolved = install.resolve(opts.executable)
+  if not resolved then
+    vim.notify(install.missing_message(opts.executable), vim.log.levels.ERROR)
+  end
+  return resolved
+end
+
 function M.start_indexing(opts)
   opts = vim.tbl_deep_extend("force", {}, config, opts or {})
   local root = workspace_root(opts)
@@ -145,11 +159,17 @@ function M.start_indexing(opts)
   if not vim.uv.fs_stat(vim.fs.joinpath(root, ".git")) then
     return false
   end
+  -- Silent when lum is not installed: this runs at startup, and a missing
+  -- binary is worth reporting when someone asks for a search, not before.
+  local lum = install.resolve(opts.executable)
+  if not lum then
+    return false
+  end
 
-  notify.start(opts.executable)
+  notify.start(lum)
   -- `add` rather than `search --root`: registration without a query, and it
   -- returns as soon as the scan is queued instead of blocking on it.
-  vim.system({ opts.executable, "add", root }, { text = true }, function(result)
+  vim.system({ lum, "add", root }, { text = true }, function(result)
     if result.code ~= 0 then
       local detail = (result.stderr or ""):gsub("%s+$", "")
       vim.schedule(function()
@@ -163,11 +183,15 @@ end
 function M.lum(opts)
   opts = vim.tbl_deep_extend("force", {}, config, opts or {})
   local root = workspace_root(opts)
+  local lum = executable(opts)
+  if not lum then
+    return
+  end
 
   -- Subscribe on first use rather than at startup: this is the moment lum
   -- is about to be started anyway, and the first index — the slow, silent
   -- one that prompted all this — is about to run.
-  notify.start(opts.executable)
+  notify.start(lum)
   local debounce = math.max(0, tonumber(opts.debounce_ms) or 200) / 1000
   local limit = math.min(100, math.max(1, math.floor(tonumber(opts.limit) or 50)))
 
@@ -189,7 +213,7 @@ function M.lum(opts)
         'sleep "$1"; shift; exec "$@"',
         "telescope-lum",
         string.format("%.3f", debounce),
-        opts.executable,
+        lum,
         "search",
         "--root",
         root,

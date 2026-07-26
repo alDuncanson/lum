@@ -92,7 +92,8 @@
           src = ./.;
           filter = path: type:
             let rel = lib.removePrefix "${toString ./.}/" (toString path);
-            in rel == "lua" || lib.hasPrefix "lua/" rel;
+            in rel == "lua" || lib.hasPrefix "lua/" rel
+               || rel == "plugin" || lib.hasPrefix "plugin/" rel;
         };
         lum-nvim = pkgs.vimUtils.buildVimPlugin {
           pname = "lum-nvim";
@@ -311,6 +312,20 @@
           nvim-plugin = lum-nvim;
           packaged-version = pkgs.runCommand "lum-packaged-version-${version}" { } ''
             test "$(${lum}/bin/lum version --json)" = '${builtins.toJSON { inherit version; }}'
+            touch $out
+          '';
+
+          # lua/lum/install.lua pins the release `:LumInstall` downloads. If it
+          # drifts from the version here, that command fetches an archive that
+          # either does not exist or was built from different code — and the
+          # failure lands on a stranger's first use of the plugin, not here.
+          plugin-version = pkgs.runCommand "lum-plugin-version-${version}" { } ''
+            pinned=$(${pkgs.gnugrep}/bin/grep -oE 'M\.version = "[0-9]+\.[0-9]+\.[0-9]+"' \
+              ${./lua/lum/install.lua} | ${pkgs.gnugrep}/bin/grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+            if [ "$pinned" != "${version}" ]; then
+              echo "lua/lum/install.lua pins $pinned but flake.nix declares ${version}" >&2
+              exit 1
+            fi
             touch $out
           '';
         };

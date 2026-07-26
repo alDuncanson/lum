@@ -26,7 +26,14 @@ tokio-stream = { version = "0.1", features = ["net", "sync"] }
 # --- The pipeline ---
 # Local embedding inference via ONNX Runtime. Models are downloaded to
 # our data dir on first use; no API keys, no network at query time.
-fastembed = { version = "5", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries-native-tls"] }
+#
+# rustls rather than native-tls, so a released Linux binary does not depend on
+# whichever libssl the host happens to have — the model download is the only
+# network I/O, and a missing libssl.so.3 is a confusing way to fail. The cost
+# is that a custom CA in the system trust store is not picked up; build with
+# the `hf-hub-native-tls` and `ort-download-binaries-native-tls` features if
+# you need that.
+fastembed = { version = "5", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 # Embedded vector search engine from the Qdrant project. Runs entirely
 # in-process; data lives under ~/.lum/vectors. Beta, but its API surface
 # we use (update/query) is small and wrapped behind our VectorStore trait
