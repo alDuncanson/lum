@@ -18,27 +18,44 @@ everything after that is offline.
 
 ## Install
 
-Lum is two self-contained binaries — ONNX Runtime is statically linked and
-there is nothing to install alongside them.
+```sh
+curl -fsSL https://raw.githubusercontent.com/alDuncanson/lum/main/install.sh | sh
+```
 
-**In Neovim**, add the plugin and run `:LumInstall` once. It downloads the
-release for your platform into Neovim's data directory and checks it against
-the published SHA256:
+macOS and Linux, arm64 and x86_64. Downloads the release for your platform,
+verifies it against the published `SHA256SUMS`, and installs to
+`~/.local/bin`. Nothing else to install: ONNX Runtime is statically linked.
+
+**Nix**, as a flake input:
+
+```nix
+{
+  inputs.lum.url = "github:alDuncanson/lum";
+
+  # ... then, wherever you build your packages:
+  environment.systemPackages = [ inputs.lum.packages.${pkgs.system}.lum ];
+  # or with home-manager:
+  home.packages = [ inputs.lum.packages.${pkgs.system}.lum ];
+}
+```
+
+Or try it without installing anything:
+
+```sh
+nix run github:alDuncanson/lum -- search --root . "retry backoff"
+```
+
+**Neovim** — add the plugin and run `:LumInstall` once, which does the same
+download into Neovim's data directory:
 
 ```lua
 { "alDuncanson/lum", dependencies = { "nvim-telescope/telescope.nvim" } }
 ```
 
-**With [Nix](https://nixos.org/):**
-
-```sh
-nix profile install github:alDuncanson/lum
-```
-
-**Prebuilt binaries** for macOS and Linux, arm64 and x86_64, are on the
-[releases page](https://github.com/alDuncanson/lum/releases). Unpack and put
-both files in the same directory on your `PATH` — `lum` finds `lum-worker`
-beside itself.
+**Prebuilt archives** are on the
+[releases page](https://github.com/alDuncanson/lum/releases) if you would
+rather not pipe a script to a shell. Unpack and put both files in the same
+directory on your `PATH` — `lum` finds `lum-worker` beside itself.
 
 **From source**, with Go 1.26+ and Rust 1.97+:
 

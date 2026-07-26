@@ -149,6 +149,19 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 	// this, a concurrent ensure can observe the new row just before its creator
 	// registers the daemon-owned attempt and incorrectly treat it as established.
 	s.sourceMu.Lock()
+	// Under the same lock as the insert: two concurrent adds of a parent and
+	// its child would otherwise each see a catalog without the other.
+	existing, err := s.catalog.ListSources(r.Context())
+	if err != nil {
+		s.sourceMu.Unlock()
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, reason, conflict := nestingConflict(canonicalURI, existing); conflict {
+		s.sourceMu.Unlock()
+		httpError(w, http.StatusConflict, reason)
+		return
+	}
 	row, created, err := s.catalog.AddSource(r.Context(), catalog.Source{
 		ID:        uuid.NewString(),
 		Type:      src.Type(),

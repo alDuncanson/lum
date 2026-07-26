@@ -46,6 +46,43 @@ These were chosen up front and drive everything else:
    all executables and native runtime libraries; first use requires network
    access to download the embedding model.
 
+## Why two processes
+
+The honest test of this decision is what collapsing it would cost, and that
+turns out to be measurable. Indexing 80 documents on an M-series Mac:
+
+| | physical footprint |
+|---|---|
+| dispatcher alone, worker shed | **22 MB** |
+| worker, model loaded, one search | 239 MB |
+| worker, after indexing 80 documents | **3960 MB** |
+
+The worker's peak is dominated by ONNX Runtime's arena allocator, which grows
+to the largest activation it has ever needed — attention over a batch of 64
+sequences at 512 tokens is inherently in the gigabytes — and then keeps it.
+Arenas are not designed to give memory back.
+
+That is what the split buys. Five minutes after the last search, the worker is
+killed and the operating system takes all of it back, leaving a 22 MB daemon
+that still answers `lum status`, still watches for file changes, and still
+starts a new worker the moment anyone searches. In one process there is no
+equivalent move: dropping the model frees what the allocator chooses to free,
+and a background editor integration that holds four gigabytes until you
+reboot is not one anyone would keep installed.
+
+Two smaller reasons follow the same shape. A segfault in native inference code
+takes the worker down and not the API, and recovery is a respawn on the next
+request rather than a lost daemon. And the two halves are genuinely different
+work — orchestration and scheduling against parsing and linear algebra — so
+they get to be written in the language each is good at.
+
+What it costs is one extra file to install, which the installer and the
+release archive both handle. That is the trade, and it is not close.
+
+(The 3960 MB peak is worth attacking on its own — a smaller embedding batch
+would cut it directly. It is a real number about this design's *current*
+tuning, not an argument that four gigabytes is required.)
+
 ## Internal processes
 
 ### Dispatcher — `dispatcher/` (Go, binary: `lum`)

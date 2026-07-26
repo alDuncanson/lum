@@ -33,6 +33,12 @@ lum top                         # live indexing activity
 lum stop
 ```
 
+Registering a directory inside — or containing — one already registered is
+refused. Documents are scoped to the source that produced them, so an overlap
+is indexed twice and returned twice under two document IDs that nothing can
+merge. Use `lum search --root <subdirectory>` to search part of a registered
+source; it does not need its own registration.
+
 `lum status` names the document being worked on and the queue behind it. On a
 first index every count reads zero for a minute while the first batch embeds,
 and without that line it is indistinguishable from being stuck.
