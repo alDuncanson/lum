@@ -113,9 +113,8 @@ do
     end, level)
   end
 
-  -- Supports opts.replace / opts.id so lum's progress bar updates one line
-  -- instead of stacking. Returning a handle is also the signal notify.lua
-  -- uses to decide whether a progress bar is renderable at all.
+  -- Supports opts.replace / opts.id so a repeated message updates one line
+  -- instead of stacking, the way a real notifier does.
   vim.notify = function(message, level, opts)
     opts = opts or {}
     level = level or vim.log.levels.INFO
@@ -152,6 +151,30 @@ do
     render()
     return entry.id
   end
+
+  -- Stand in for what noice, fidget and snacks do with LSP progress. lum
+  -- reports through `$/progress` like rust-analyzer, so with nothing
+  -- listening there is nothing to see — and worse, lum would notice that and
+  -- fall back to drawing its own line, so a dev session would exercise the
+  -- path real users do not take. Rendering it here keeps the loop honest.
+  vim.api.nvim_create_autocmd("LspProgress", {
+    callback = function(args)
+      local params = args.data.params
+      local value = params.value
+      local client = vim.lsp.get_client_by_id(args.data.client_id)
+      local parts = {}
+      if value.percentage then
+        local filled = math.floor(value.percentage / 100 * 14 + 0.5)
+        table.insert(parts, ("▕%s▏"):format(("█"):rep(filled) .. ("░"):rep(14 - filled)))
+      end
+      table.insert(parts, value.message or value.title or "")
+      table.insert(parts, ("(%s %s)"):format(client and client.name or "lsp", value.title or ""))
+      vim.notify(table.concat(parts, " "), vim.log.levels.INFO, {
+        id = "progress:" .. tostring(params.token),
+        timeout = value.kind == "end" and 4000 or false,
+      })
+    end,
+  })
 end
 
 -- Telescope and its plenary dependency come from the Nix store; they are

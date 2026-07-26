@@ -3,18 +3,14 @@
 --
 -- Two channels, because these are two different kinds of thing.
 --
--- Progress goes to one self-updating line that lum draws itself (see
--- lum/progress.lua). It appears when work starts, changes as the phase
--- changes, and stays until lum is ready to use. vim.notify is the wrong
--- primitive for this: it is built for discrete messages, and notifiers
--- disagree about whether one can be updated in place — asking them to
--- produced either three hundred stacked copies of a progress bar, or, once
--- that was detected and stopped, no progress at all.
+-- Progress goes out as LSP `$/progress`, the same way rust-analyzer reports
+-- indexing (see lum/progress.lua and lum/lsp.lua). Whatever renders a
+-- language server's progress renders lum's, in the same corner and the same
+-- style, and they stack rather than covering each other.
 --
--- Discrete events go through vim.notify, where they belong: a crashed
--- worker, a failed scan, a file that could not be indexed. Whichever
--- notifier is installed renders those and persists them however it
--- persists things.
+-- Discrete events go through `vim.notify`, where they belong: a crashed
+-- worker, a failed scan, a file that could not be indexed. Whichever notifier
+-- is installed renders those and persists them however it persists things.
 --
 -- Two tiers of detail. The default reports only what makes someone wait or
 -- tells them something broke. `verbose = true` adds per-document failures,
@@ -25,9 +21,10 @@ local M = {}
 local progress = require("lum.progress")
 
 -- Phase labels, in the order they occur. Keys match the worker's `phase`
--- field plus the two phases only the dispatcher knows about.
+-- field plus the phases only the dispatcher knows about. The model download
+-- is absent on purpose: it is a separate operation with its own token, the
+-- way rust-analyzer reports "Roots Scanned" apart from "Indexing".
 local PHASE_LABELS = {
-  ["downloading-model"] = "downloading the embedding model (~70 MB, first run)",
   reading = "reading files",
   parsing = "parsing",
   embedding = "embedding",
@@ -69,16 +66,16 @@ state.activity = new_activity()
 local defaults = {
   enabled = false,
   verbose = false,
-  -- The self-updating progress line. `false` turns it off; a table is
-  -- passed to lum.progress.setup — `{ row_offset = 1 }` or
-  -- `{ anchor = "SW" }` moves it out from under a notifier that already
-  -- owns the bottom-right corner, which fidget and noice both do.
+  -- Progress reporting. `false` turns it off; a table is passed to
+  -- lum.progress.setup, where `mode` chooses between LSP progress ("lsp"),
+  -- a line lum draws itself ("window"), and asking whether anything renders
+  -- LSP progress before deciding ("auto", the default).
   progress = true,
   -- Stay quiet about scans faster than this that changed nothing. A warm
   -- rescan finishes in milliseconds and announcing it is flicker.
   min_scan_ms = 750,
-  -- How long a completion summary stays up before the line clears. The pause
-  -- is the point: it is the confirmation that what you waited for is done.
+  -- How long a completion summary stays up before it clears. The pause is
+  -- the point: it is the confirmation that what you waited for is done.
   summary_ms = 4000,
   -- Per-level dismissal for vim.notify messages, in milliseconds. `false`
   -- means stay until dismissed, which is what an error wants.
@@ -91,8 +88,8 @@ local defaults = {
 
 local config = vim.deepcopy(defaults)
 
--- `progress` is a boolean or a table of window options, so "is it on" is a
--- question rather than a field.
+-- `progress` is a boolean or a table of options, so "is it on" is a question
+-- rather than a field.
 local function progress_on()
   local p = config.progress
   if p == false or (type(p) == "table" and p.enabled == false) then
@@ -129,43 +126,46 @@ local function relative(uri)
   return uri
 end
 
--- ---- the progress line ----
+-- ---- progress ----
 
--- line composes the current activity into one string. Exposed for testing:
--- these rules are the whole design.
-function M.line()
+-- indexing composes the current activity into the three fields LSP progress
+-- carries: a fixed title, a message that changes, and a percentage. Exposed
+-- for testing — these rules are the whole design.
+--
+-- The percentage tracks the current phase rather than the whole scan, because
+-- the phase is the only thing reporting a denominator. A bar that restarts at
+-- each phase is honest about that; one interpolated across phases would be
+-- inventing the ratio between them.
+function M.indexing()
   local a = state.activity
   local label = a.phase and (PHASE_LABELS[a.phase] or a.phase) or nil
 
-  local text
+  local message, percentage
   if label and a.phase_total > 0 then
-    -- A phase reporting its own units: the bar that actually moves.
-    text = ("%s %s %d/%d %s")
-      :format(label, progress.bar(a.phase_done, a.phase_total), a.phase_done, a.phase_total, a.phase_unit or "")
+    message = ("%s %d/%d %s"):format(label, a.phase_done, a.phase_total, a.phase_unit or "")
+    percentage = math.floor(a.phase_done / a.phase_total * 100)
   elseif label then
-    -- A phase with nothing to count yet — the model download, mainly.
-    text = label
+    message = label
   elseif a.files_total > 0 then
-    -- Between phases. A bar over files would sit empty for a whole batch,
-    -- so say what is known instead of drawing an empty meter.
-    text = ("indexing %d files"):format(a.files_total)
+    -- Between phases. Nothing is counting yet, so say what is known.
+    message = ("%d files"):format(a.files_total)
   else
     return nil
   end
 
   if a.failed > 0 then
-    text = text .. (" · %d failed"):format(a.failed)
+    message = message .. (" · %d failed"):format(a.failed)
   end
-  return (text:gsub("%s+$", ""))
+  return { title = "indexing", message = (message:gsub("%s+$", "")), percentage = percentage }
 end
 
 local function render()
   if not progress_on() then
     return
   end
-  local text = M.line()
-  if text then
-    progress.show(text)
+  local report = M.indexing()
+  if report then
+    progress.report("index", report)
   end
 end
 
@@ -179,14 +179,18 @@ function M.worker_transition(to, detail)
   state.worker_state = to
 
   if to == "downloading-model" then
-    state.activity.phase = "downloading-model"
-    render()
+    if progress_on() then
+      progress.report("model", {
+        title = "downloading the embedding model",
+        message = "~70 MB, first run",
+      })
+    end
     return
   end
 
   if to == "crashed" then
     -- Discrete and serious: this belongs in the notifier, sticky, not on a
-    -- line that clears itself.
+    -- progress report that clears itself.
     state.activity = new_activity()
     progress.hide()
     notify(("worker crashed: %s"):format(detail or "unknown"), vim.log.levels.ERROR)
@@ -194,16 +198,8 @@ function M.worker_transition(to, detail)
   end
 
   if to == "ready" and from == "downloading-model" then
-    -- Only retire the download label. The worker can already be reporting a
-    -- real phase by the time the snapshot loop notices it went ready, and
-    -- clearing that showed a flicker back to "indexing N files".
-    if state.activity.phase == "downloading-model" then
-      state.activity.phase = nil
-    end
-    if state.activity.files_total > 0 or state.activity.phase then
-      render() -- indexing already started; it takes the line over
-    else
-      progress.finish("embedding model ready", config.summary_ms)
+    if progress_on() then
+      progress.finish("model", "embedding model ready", config.summary_ms)
     end
     return
   end
@@ -266,10 +262,11 @@ function M.describe(event)
     local started = state.scans[event.source_id]
     state.scans[event.source_id] = nil
     local took = event.took_ms or (started and (vim.uv.now() - started)) or 0
+    local had_work = a.files_total > 0 or a.phase ~= nil
     state.activity = new_activity()
 
     if event.error and event.error ~= "" then
-      progress.hide()
+      progress.finish("index")
       notify(("indexing failed: %s"):format(event.error), vim.log.levels.ERROR)
       return
     end
@@ -278,7 +275,7 @@ function M.describe(event)
     if ingested == 0 and removed == 0 and failed == 0 and took < config.min_scan_ms and not config.verbose then
       -- Nothing changed and it was quick: the common case after the first
       -- index, and not news.
-      progress.hide()
+      progress.finish("index")
       return
     end
 
@@ -297,11 +294,13 @@ function M.describe(event)
     end
     local summary = ("%s in %.1fs"):format(table.concat(parts, ", "), took / 1000)
 
-    if progress_on() then
-      progress.finish(summary, config.summary_ms)
+    if progress_on() and had_work then
+      progress.finish("index", summary, config.summary_ms)
+    else
+      progress.finish("index")
     end
     if failed > 0 then
-      -- Failures should outlive the line that reports them.
+      -- Failures should outlive the report that mentions them.
       notify(summary, vim.log.levels.WARN)
     end
     return
@@ -319,8 +318,8 @@ function M.is_running()
   return state.job ~= nil
 end
 
--- subscribed_types is derived rather than configured: the progress line needs
--- the per-document and worker-progress events, and subscribing to them with
+-- subscribed_types is derived rather than configured: progress needs the
+-- per-document and worker-progress events, and subscribing to them with
 -- progress off would be traffic nobody reads. Filtered server-side.
 local function subscribed_types()
   local types = { "scan_started", "scan_finished", "worker_state_changed", "snapshot" }
@@ -384,13 +383,13 @@ function M.start(executable)
     if was_stopping then
       return
     end
-    -- The stream died on its own. Clear the line — leaving a spinner up
+    -- The stream died on its own. Clear everything — leaving a spinner up
     -- forever is the exact impression this module exists to avoid — and say
     -- so, because silence here is indistinguishable from "nothing is
     -- happening".
     vim.schedule(function()
       state.activity = new_activity()
-      progress.hide()
+      progress.stop()
       notify(
         ("stopped following lum activity (exit %s); run :Telescope lum to resume")
           :format(tostring(result and result.code or "?")),
@@ -413,7 +412,7 @@ function M.start(executable)
 end
 
 function M.stop()
-  progress.hide()
+  progress.stop()
   if state.job then
     state.stopping = true
     pcall(function()
