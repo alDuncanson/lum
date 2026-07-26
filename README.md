@@ -96,21 +96,23 @@ not.
 ```text
 downloading the embedding model (~70 MB, first run only)
 embedding model ready
-⠹ indexing ▕████████░░░░░░░░▏ 34/68 · embedding
+⠹ indexing 68 files · embedding
 68 indexed in 48.9s
 1 indexed in 0.3s          <- after you save a file
 worker crashed: exited: exit status 3
 ```
 
-The progress line updates in place while work is in flight, and carries a
-spinner as well as a counter. The counter alone is not enough: documents are
+The progress line updates in place while work is in flight. Documents are
 embedded a whole batch at a time and the dispatcher only learns any of them
-finished when the batch returns, so on a small repository the count can sit
-still for the entire index. Correct, and indistinguishable from hung — the
-spinner is what tells you the difference. It needs a notifier that can replace
-a message; if yours cannot, that is detected on the first update and progress
-falls back to start and finish only, rather than stacking a new line every
-tick.
+finished when that batch returns, so on a small repository nothing completes
+until everything does — the spinner, not a counter, is what tells you it is
+alive. Once more than one batch is involved a bar appears and fills.
+
+It needs a notifier that can replace a message rather than stack one. That is
+settled on the second update by checking whether the same handle comes back;
+if it does not, progress stops there and you get start and finish only. A
+notifier returning a handle is not evidence it replaced anything — that
+assumption is what once produced three hundred identical lines.
 
 Errors stay on screen until dismissed. Progress stays while it runs. Routine
 information times out. Nothing is said about a warm rescan that changed

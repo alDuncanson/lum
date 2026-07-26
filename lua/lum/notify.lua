@@ -55,6 +55,7 @@ local function new_progress(supported)
     frame = 1,
     stage = nil,
     timer = nil,
+    rendered = 0,
   }
 end
 
@@ -134,8 +135,18 @@ local function render_progress(force)
   end
   p.last_render = now
 
-  local message = ("%s indexing ▕%s▏ %d/%d")
-    :format(SPINNER_FRAMES[p.frame], progress_bar(p.done, p.total), p.done, p.total)
+  -- Until something completes, a bar is definitionally empty and reads as
+  -- stuck. Documents are embedded a whole batch at a time and none of them
+  -- resolve until the batch returns, so on a small repository that is the
+  -- entire run. Show the count of files in flight instead, and switch to a
+  -- bar once there is real movement to draw.
+  local message
+  if p.done == 0 then
+    message = ("%s indexing %d files"):format(SPINNER_FRAMES[p.frame], p.total)
+  else
+    message = ("%s indexing ▕%s▏ %d/%d")
+      :format(SPINNER_FRAMES[p.frame], progress_bar(p.done, p.total), p.done, p.total)
+  end
   if p.stage and p.stage ~= "" then
     message = message .. (" · %s"):format(p.stage)
   end
@@ -145,18 +156,34 @@ local function render_progress(force)
   -- id for snacks.nvim, replace for nvim-notify: whichever the notifier
   -- understands, it updates one message rather than stacking a new one.
   -- timeout=false keeps the bar up while work is in flight.
+  -- Replacement is asked for two ways because notifiers disagree:
+  -- nvim-notify takes the record a previous call returned as `replace`,
+  -- snacks.nvim takes a stable `id`. A notifier honoring neither silently
+  -- stacks a new message every tick — hundreds over one index.
   local handle = notify(message, vim.log.levels.INFO, {
     id = "lum-progress",
     replace = p.handle,
     timeout = false,
   })
-  if handle == nil and p.handle == nil then
-    -- Nothing came back on the first update, so this notifier cannot be
-    -- asked to replace a message. Emitting a bar every tick would be a wall
-    -- of near-identical notifications; one "started" line is better.
-    p.supported = false
-    return
+
+  -- Decide, on the second update, whether this notifier actually replaces.
+  -- Returning non-nil is not evidence: a notifier that ignores both keys
+  -- still hands back a handle, just a different one each time, because it
+  -- made a new notification. Same handle twice means one message is being
+  -- updated. Assuming otherwise is what produced a wall of identical
+  -- "indexing 0/68" lines.
+  if p.rendered == 1 then
+    local replacing = handle ~= nil and p.handle ~= nil and handle == p.handle
+    if not replacing then
+      p.supported = false
+      stop_spinner()
+      -- The one line already on screen is the fallback: it says indexing
+      -- started, and scan_finished will report the outcome.
+      return
+    end
   end
+
+  p.rendered = (p.rendered or 0) + 1
   p.handle = handle
   start_spinner()
 end
@@ -261,10 +288,9 @@ function M.describe(event)
   end
 
   if kind == "scan_started" then
+    -- Recorded, not announced: the progress line already says a scan began,
+    -- and this one only had a source UUID to show for itself.
     state.scans[event.source_id] = vim.uv.now()
-    if config.verbose then
-      notify(("scan started (%s)"):format(event.source_id or "?"), vim.log.levels.INFO)
-    end
     return
   end
 
