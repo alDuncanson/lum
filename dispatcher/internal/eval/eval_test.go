@@ -1,7 +1,7 @@
 //go:build eval
 
-// Package eval measures retrieval quality against a fixture of questions
-// with known-correct answers.
+// Package eval measures retrieval quality against a fixture of search
+// phrases with known-correct answers.
 //
 // It is behind a build tag because it is not a unit test: it needs a real
 // daemon, a real embedding model, and a real index of this repository, and
@@ -14,7 +14,7 @@
 // Why it exists: parsing, chunking, and embedding changes are judged on
 // whether results "look better", which is exactly the judgement least
 // available to whoever just made the change. These numbers are not precise
-// — thirty questions is a small sample — but they are comparable between
+// — forty queries is a small sample — but they are comparable between
 // two runs, which is the only property required to tell an improvement from
 // a preference.
 package eval
@@ -40,13 +40,18 @@ import (
 
 var (
 	writeJSON = flag.String("eval.json", "", "write the full result set to this path, for diffing between runs")
-	limit     = flag.Int("eval.limit", 10, "results to request per question")
+	limit     = flag.Int("eval.limit", 10, "results to request per query")
 	label     = flag.String("eval.label", "", "name this run in the output (e.g. a chunker version)")
 )
 
-// Question is one fixture entry. Files are repository-relative.
-type Question struct {
-	Q     string   `yaml:"q"`
+// Query is one fixture entry: a search phrase and the files it should
+// surface. Files are repository-relative.
+//
+// Phrases rather than questions, because lum is a bi-encoder — it embeds the
+// text and returns nearest neighbours. Nothing reads a sentence and reasons
+// about it, so full questions measure a capability that is not there.
+type Query struct {
+	Text  string   `yaml:"query"`
 	Files []string `yaml:"files"`
 	// Contains is an optional substring that the matched chunk must include.
 	// It measures what recall cannot: whether the chunk returned is the right
@@ -60,13 +65,13 @@ type Question struct {
 }
 
 type fixture struct {
-	Questions []Question `yaml:"questions"`
+	Queries []Query `yaml:"queries"`
 }
 
-// Outcome is one question's result, kept in the JSON output so a regression
+// Outcome is one query's result, kept in the JSON output so a regression
 // can be traced to the query that caused it rather than just a moved average.
 type Outcome struct {
-	Question      string   `json:"question"`
+	Query         string   `json:"query"`
 	Want          []string `json:"want"`
 	Got           []string `json:"got"`
 	FirstHitRank  int      `json:"first_hit_rank"` // 1-based; 0 means no hit
@@ -79,13 +84,13 @@ type Outcome struct {
 type Report struct {
 	Label       string             `json:"label,omitempty"`
 	RanAt       string             `json:"ran_at"`
-	Questions   int                `json:"questions"`
+	Queries     int                `json:"queries"`
 	Documents   int                `json:"indexed_documents"`
 	Chunks      int                `json:"indexed_chunks"`
 	Recall      map[string]float64 `json:"recall"`
 	MRR         float64            `json:"mrr"`
 	ChunkHits   float64            `json:"chunk_hit_rate"`
-	ChunkScored int                `json:"chunk_scored_questions"`
+	ChunkScored int                `json:"chunk_scored_queries"`
 	DistinctAt5 float64            `json:"mean_distinct_files_in_top5"`
 	Outcomes    []Outcome          `json:"outcomes"`
 }
@@ -101,7 +106,7 @@ func repoRoot(t *testing.T) string {
 
 func loadFixture(t *testing.T, root string) fixture {
 	t.Helper()
-	path := filepath.Join(root, "eval", "questions.yaml")
+	path := filepath.Join(root, "eval", "queries.yaml")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading the fixture: %v", err)
@@ -110,20 +115,20 @@ func loadFixture(t *testing.T, root string) fixture {
 	if err := yaml.Unmarshal(raw, &f); err != nil {
 		t.Fatalf("parsing %s: %v", path, err)
 	}
-	if len(f.Questions) == 0 {
-		t.Fatalf("%s has no questions", path)
+	if len(f.Queries) == 0 {
+		t.Fatalf("%s has no queries", path)
 	}
-	for i, q := range f.Questions {
-		if q.Q == "" || len(q.Files) == 0 {
-			t.Fatalf("question %d needs both a q and at least one file", i+1)
+	for i, q := range f.Queries {
+		if q.Text == "" || len(q.Files) == 0 {
+			t.Fatalf("query %d needs both a query and at least one file", i+1)
 		}
 		for _, file := range q.Files {
 			if _, err := os.Stat(filepath.Join(root, file)); err != nil {
-				t.Fatalf("question %q names %s, which does not exist — a stale answer key scores as a miss forever", q.Q, file)
+				t.Fatalf("query %q names %s, which does not exist — a stale answer key scores as a miss forever", q.Text, file)
 			}
 		}
 		if q.Contains != "" && len(q.Files) != 1 {
-			t.Fatalf("question %q: contains only makes sense with exactly one file", q.Q)
+			t.Fatalf("query %q: contains only makes sense with exactly one file", q.Text)
 		}
 	}
 	return f
@@ -149,7 +154,7 @@ func TestRetrieval(t *testing.T) {
 	report := Report{
 		Label:     *label,
 		RanAt:     time.Now().UTC().Format(time.RFC3339),
-		Questions: len(f.Questions),
+		Queries:   len(f.Queries),
 		Documents: status.Stats.Documents,
 		Chunks:    status.Stats.Chunks,
 		Recall:    map[string]float64{},
@@ -159,12 +164,12 @@ func TestRetrieval(t *testing.T) {
 	var chunkHits, chunkScored int
 	hitsAt := map[int]int{1: 0, 5: 0, 10: 0}
 
-	for _, question := range f.Questions {
-		results, err := client.Search(ctx, question.Q, *limit, source.Source.ID)
+	for _, query := range f.Queries {
+		results, err := client.Search(ctx, query.Text, *limit, source.Source.ID)
 		if err != nil {
-			t.Fatalf("searching %q: %v", question.Q, err)
+			t.Fatalf("searching %q: %v", query.Text, err)
 		}
-		outcome := score(root, question, results, hitsAt)
+		outcome := score(root, query, results, hitsAt)
 		reciprocalSum += reciprocal(outcome.FirstHitRank)
 		distinctSum += float64(outcome.DistinctFiles)
 		if outcome.ChunkHit != nil {
@@ -176,7 +181,7 @@ func TestRetrieval(t *testing.T) {
 		report.Outcomes = append(report.Outcomes, outcome)
 	}
 
-	total := float64(len(f.Questions))
+	total := float64(len(f.Queries))
 	for _, k := range []int{1, 5, 10} {
 		report.Recall[fmt.Sprintf("@%d", k)] = float64(hitsAt[k]) / total
 	}
@@ -200,15 +205,15 @@ func TestRetrieval(t *testing.T) {
 	}
 }
 
-// score evaluates one question's results. hitsAt is accumulated across
-// questions for recall@k.
-func score(root string, question Question, results []apiv1.SearchResult, hitsAt map[int]int) Outcome {
-	want := make(map[string]bool, len(question.Files))
-	for _, file := range question.Files {
+// score evaluates one query's results. hitsAt is accumulated across
+// queries for recall@k.
+func score(root string, query Query, results []apiv1.SearchResult, hitsAt map[int]int) Outcome {
+	want := make(map[string]bool, len(query.Files))
+	for _, file := range query.Files {
 		want[file] = true
 	}
 
-	outcome := Outcome{Question: question.Q, Want: question.Files}
+	outcome := Outcome{Query: query.Text, Want: query.Files}
 	seen := map[string]bool{}
 	for rank, result := range results {
 		file := strings.TrimPrefix(strings.TrimPrefix(result.URI, root), "/")
@@ -232,16 +237,16 @@ func score(root string, question Question, results []apiv1.SearchResult, hitsAt 
 		}
 		// Only counts within the requested window: a chunk nobody would
 		// scroll to is not a useful answer.
-		if question.Contains != "" && rank < 10 {
-			hit := strings.Contains(result.Text, question.Contains)
+		if query.Contains != "" && rank < 10 {
+			hit := strings.Contains(result.Text, query.Contains)
 			if outcome.ChunkHit == nil || (!*outcome.ChunkHit && hit) {
 				outcome.ChunkHit = &hit
 			}
 		}
 	}
-	// A question whose file never matched still counts as a chunk miss
+	// A query whose file never matched still counts as a chunk miss
 	// rather than going unscored.
-	if question.Contains != "" && outcome.ChunkHit == nil {
+	if query.Contains != "" && outcome.ChunkHit == nil {
 		miss := false
 		outcome.ChunkHit = &miss
 	}
@@ -258,7 +263,7 @@ func reciprocal(rank int) float64 {
 func printReport(t *testing.T, report Report) {
 	t.Helper()
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n=== retrieval over %d questions", report.Questions)
+	fmt.Fprintf(&b, "\n=== retrieval over %d queries", report.Queries)
 	if report.Label != "" {
 		fmt.Fprintf(&b, " [%s]", report.Label)
 	}
@@ -274,7 +279,7 @@ func printReport(t *testing.T, report Report) {
 	}
 	fmt.Fprintf(&b, "  MRR              %.3f\n", report.MRR)
 	if report.ChunkScored > 0 {
-		fmt.Fprintf(&b, "  chunk hit rate   %.3f  (%d questions naming a required substring)\n", report.ChunkHits, report.ChunkScored)
+		fmt.Fprintf(&b, "  chunk hit rate   %.3f  (%d queries naming a required substring)\n", report.ChunkHits, report.ChunkScored)
 	}
 	fmt.Fprintf(&b, "  distinct files   %.2f of 5   (higher is less duplication)\n", report.DistinctAt5)
 
@@ -289,7 +294,7 @@ func printReport(t *testing.T, report Report) {
 		if outcome.FirstHitRank != 0 {
 			status = fmt.Sprintf("rank %d", outcome.FirstHitRank)
 		}
-		fmt.Fprintf(&b, "    %-6s %s\n", status, outcome.Question)
+		fmt.Fprintf(&b, "    %-6s %s\n", status, outcome.Query)
 		fmt.Fprintf(&b, "           want %s\n", strings.Join(outcome.Want, ", "))
 		fmt.Fprintf(&b, "           got  %s\n", strings.Join(outcome.Got, ", "))
 	}

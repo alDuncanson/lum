@@ -275,13 +275,13 @@ nix run . -- serve               # build and run in the foreground
 ### Measuring retrieval
 
 ```sh
-nix run .#eval                 # score lum against eval/questions.yaml
+nix run .#eval                 # score lum against eval/queries.yaml
 nix run .#eval -- --fresh      # wipe the eval index first
 ```
 
 Changes to parsing, chunking, or the embedding model are hard to judge by
 looking at results, so [eval/](eval/README.md) scores them: recall@k, MRR,
-whether the returned chunk is the part that answers the question, and how much
+whether the returned chunk is the part you wanted, and how much
 of the top five is duplicate files.
 
 `proto/lum/v1/worker.proto` is the contract between the two processes. The

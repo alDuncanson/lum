@@ -23,26 +23,60 @@ chunker, the parsers, or the model does.
 
 ## Baseline
 
-Word-window chunker (220 words, 40 overlap), `bge-small-en-v1.5`, 30 questions
-over 65 documents / 394 chunks:
+Word-window chunker (220 words, 40 overlap), `bge-small-en-v1.5`, 40 phrase
+queries over 65 documents / 398 chunks:
 
 | metric | value |
 |---|---|
-| recall@1 | 0.133 |
-| recall@5 | 0.433 |
-| recall@10 | 0.600 |
-| MRR | 0.259 |
-| chunk hit rate | 0.222 |
-| distinct files in top 5 | 3.83 |
+| recall@1 | 0.450 |
+| recall@5 | 0.775 |
+| recall@10 | 0.850 |
+| MRR | 0.584 |
+| chunk hit rate | 0.769 |
+| distinct files in top 5 | 3.52 |
 
-Read that as: for two questions in three, a correct file is somewhere in the
-top ten — but only one in eight puts it first, and when the right file *is*
-found, the chunk usually is not the part that answers the question. That last
-number is the one a syntax-aware chunker should move most.
+Read that as: for six queries in seven a correct file is in the top ten, and
+for nearly half it is first.
+
+### The first baseline was measuring the wrong thing
+
+An earlier fixture used full natural-language questions ("how does lum avoid
+keeping the embedding model in memory when nobody is searching?") and scored
+recall@1 0.133 / MRR 0.259. Rewriting the same 40-odd intents as the phrases
+someone would actually type moved recall@1 to 0.450 and MRR to 0.584 — with no
+change whatsoever to lum.
+
+Nothing got better; the benchmark stopped being wrong. lum is a bi-encoder:
+it embeds your text and returns nearest neighbours by cosine similarity.
+Nothing reads a sentence and reasons about it, so a fixture of questions was
+measuring a capability the system does not have and was never going to.
+
+Worth keeping in mind whenever these numbers move: the query distribution is
+part of the measurement, and it is the part easiest to get wrong.
+
+## What the current misses say
+
+Six of forty find nothing in the top ten. Four of them share a cause:
+
+    ingestion diagram          -> wanted docs/diagrams.md
+    protocol boundaries table  -> wanted docs/diagrams.md
+    picker entry formatting    -> wanted lua/lum/telescope.lua
+    live activity tui          -> wanted dispatcher/internal/cli/top.go
+
+**The file path is not embedded.** Only `chunk.text` becomes a vector; the URI
+is stored in the payload and used for display, provenance, and filtering, but
+never for matching. So "ingestion diagram" cannot match `docs/diagrams.md` on
+its name — only on prose that happens to contain those words. Since people
+routinely search with words that live in the path, prepending a compact
+context header to each chunk before embedding (path, and later the enclosing
+symbol) is plausibly a larger and much cheaper win than a smarter chunker.
+
+The other two show a different problem: for "retry backoff" and "environment
+variables", test files and prose about the feature outrank the implementation.
 
 ## The metrics
 
-**recall@k** — fraction of questions where a correct file appears in the top k.
+**recall@k** — fraction of queries where a correct file appears in the top k.
 The headline number, and the coarsest: it says nothing about ranking or about
 which part of the file came back.
 
@@ -50,7 +84,7 @@ which part of the file came back.
 than mere presence, so a fix that moves answers from rank 8 to rank 2 shows up
 here while recall@10 stays flat.
 
-**chunk hit rate** — for questions naming a `contains` substring, whether a
+**chunk hit rate** — for queries naming a `contains` substring, whether a
 returned chunk actually includes it. This is the precision metric: the right
 file with boundaries straddling two unrelated functions still counts as a
 recall hit, and is still not an answer.
@@ -59,42 +93,40 @@ recall hit, and is still not an answer.
 files. Overlapping chunks let one function occupy several slots; 5.0 means no
 duplication, and lower means wasted screen.
 
-## Writing questions
+## Writing queries
 
-`questions.yaml` is the benchmark. Editing it changes what is being measured,
+`queries.yaml` is the benchmark. Editing it changes what is being measured,
 so a few rules keep it honest:
 
-- **Ask what you would actually ask.** "where are retries handled" is a
-  question. "the replaceRetry function in ingest.go" is a lookup, and grep
-  already wins those.
-- **Prefer questions whose answer words are not in the answer.** That is the
-  only place semantic search can beat a regex, and where prose-shaped chunking
-  hurts most.
-- **Keep `files` to what genuinely answers the question.** Padding it inflates
+- **Write what you would type, and stop.** "idle shedding", not "where is idle
+  shedding implemented and why". Two to four words is the realistic shape.
+- **Prefer phrases whose words are not already in the answer.** Where they are,
+  grep wins and this measures nothing interesting.
+- **Keep `files` to what genuinely answers the query.** Padding it inflates
   recall without improving anything.
 - **Use `contains` for an identifier that will not move**, not a line range.
   Line numbers drift with every edit above them, and a rotted answer key scores
   as a permanent miss.
-- **Write questions before the change you intend to make**, not after. A
-  fixture authored by the person optimizing against it drifts toward what the
-  system already does well.
+- **Write queries before the change you intend to make**, not after. A fixture
+  authored by the person optimizing against it drifts toward what the system
+  already does well.
 
-The harness fails loudly if a question names a file that no longer exists,
+The harness fails loudly if a query names a file that no longer exists,
 since a stale answer key otherwise scores as a miss forever.
 
 ## Caveats worth keeping in mind
 
-Thirty questions is a small sample; a single question flipping moves recall by
-3.3 points. The numbers are not precise. They are *comparable* between two
+Forty queries is a small sample; a single one flipping moves recall by
+2.5 points. The numbers are not precise. They are *comparable* between two
 runs, which is all that is needed to tell an improvement from a preference.
 
 The fixture is excluded from the index by the runner. It contains every
-question verbatim, so indexing it made it the best match for its own queries —
+query verbatim, so indexing it made it the best match for its own queries —
 it appeared in the top five for half of them before that was caught, which is a
 good illustration of how easily a benchmark measures itself.
 
 This repository is also unusual: heavily commented code and a large `docs/`
-tree written in the same natural language as the questions. Prose files
-currently outrank code on many queries, which is real signal about the
-embedding model, but it means results here will not transfer directly to a
-repository with sparser comments.
+tree written in the same vocabulary the queries use. Prose files outrank code
+on several queries, which is real signal about the embedding model, but it
+means results here will not transfer directly to a repository with sparser
+comments.

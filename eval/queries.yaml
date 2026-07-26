@@ -1,0 +1,173 @@
+# Retrieval fixture: search phrases with the files they should surface.
+#
+# Run with `nix run .#eval` (see eval/README.md).
+#
+# These are phrases, not questions, because lum is a bi-encoder: it embeds
+# your text and returns the nearest chunks by cosine similarity. There is no
+# model reading a sentence and reasoning about it, so "how does lum avoid
+# keeping the model in memory when nobody is searching?" is not a realistic
+# input — that is a question for a chatbot. What people type into a search
+# box is two to four words describing the thing they want, usually because
+# they do not know where it lives.
+#
+# Rules that keep this honest:
+#
+#   - Write what you would type, and stop. "idle shedding", not "where is
+#     idle shedding implemented and why".
+#   - Prefer phrases for things you would not know how to grep for. Where the
+#     exact words already appear in the code, grep wins and this measures
+#     nothing interesting.
+#   - `files` lists every file that would be a correct top hit. Padding it
+#     inflates recall without improving anything.
+#   - `contains` is optional: a substring the matched chunk must include. It
+#     measures what recall cannot — whether you got the right *part* of the
+#     right file. Use an identifier, not a line number: line numbers drift
+#     with every edit above them and rot into permanent misses.
+#
+# Adding a query is a real edit to the benchmark. Do it when you find
+# something lum should surface and does not, before changing anything.
+
+queries:
+  # --- documentation and prose ---
+  # Path-flavored: the words are in the filename as much as the content.
+  # Nothing embeds the path today — only chunk text becomes a vector — so
+  # these measure how far the prose alone carries.
+  - query: ingestion diagram
+    files: [docs/diagrams.md]
+    contains: Ingestion data flow
+
+  - query: architecture overview
+    files: [docs/architecture.md, README.md]
+
+  - query: protocol boundaries table
+    files: [docs/diagrams.md]
+
+  - query: readme install instructions
+    files: [README.md]
+
+  # --- Neovim plugin ---
+  - query: telescope plugin setup
+    files: [lua/lum/telescope.lua]
+    contains: M.setup
+
+  - query: neovim notifications
+    files: [lua/lum/notify.lua]
+
+  - query: picker entry formatting
+    files: [lua/lum/telescope.lua]
+    contains: make_entry
+
+  # --- scanning and file selection ---
+  - query: indexable file extensions
+    files: [dispatcher/internal/source/localdir.go]
+    contains: indexableExtensions
+
+  - query: parsed files
+    files: [dispatcher/internal/source/localdir.go, worker/src/pipeline/parser.rs]
+
+  - query: gitignore rules
+    files: [dispatcher/internal/source/localdir.go]
+
+  - query: excluded directories
+    files: [dispatcher/internal/source/localdir.go]
+    contains: defaultExcludedDirectories
+
+  - query: file watcher
+    files: [dispatcher/internal/source/localdir.go]
+    contains: fsnotify
+
+  - query: change detection fingerprint
+    files: [dispatcher/internal/source/localdir.go, dispatcher/internal/ingest/ingest.go]
+
+  # --- ingest pipeline ---
+  - query: scan planner
+    files: [dispatcher/internal/ingest/ingest.go]
+    contains: planScan
+
+  - query: retry backoff
+    files: [dispatcher/internal/ingest/ingest.go]
+
+  - query: batch ingest framing
+    files: [dispatcher/internal/worker/client.go, worker/src/service.rs]
+
+  - query: document identity
+    files: [dispatcher/internal/catalog/catalog.go]
+
+  - query: sqlite schema
+    files: [dispatcher/internal/catalog/catalog.go]
+    contains: CREATE TABLE
+
+  - query: database migration
+    files: [dispatcher/internal/catalog/catalog.go]
+
+  # --- worker pipeline ---
+  - query: embedding model
+    files: [worker/src/pipeline/embedder.rs]
+
+  - query: chunk overlap
+    files: [worker/src/pipeline/chunker.rs]
+    contains: WordWindowChunker
+
+  - query: markdown front matter
+    files: [worker/src/pipeline/parser.rs]
+    contains: strip_front_matter
+
+  - query: vector store upsert
+    files: [worker/src/store/edge.rs]
+    contains: upsert_document
+
+  - query: cosine similarity search
+    files: [worker/src/store/edge.rs]
+
+  - query: index model manifest
+    files: [worker/src/store/edge.rs]
+    contains: validate_manifest
+
+  # --- process lifecycle ---
+  - query: idle shedding
+    files: [dispatcher/internal/worker/manager.go]
+    contains: shedIfIdle
+
+  - query: graceful shutdown
+    files: [dispatcher/internal/worker/supervisor.go, dispatcher/internal/cli/serve.go]
+
+  - query: daemon lock file
+    files: [dispatcher/internal/apiclient/client.go, dispatcher/internal/cli/serve.go]
+
+  - query: worker crashed state
+    files: [dispatcher/internal/worker/manager.go]
+
+  - query: spawn child process
+    files: [dispatcher/internal/worker/supervisor.go]
+
+  # --- interfaces ---
+  - query: rest api endpoints
+    files: [dispatcher/internal/api/server.go]
+
+  - query: server sent events stream
+    files: [dispatcher/internal/api/server.go, dispatcher/internal/cli/events.go]
+
+  - query: mcp tools
+    files: [dispatcher/internal/mcpserver/server.go]
+
+  - query: cli commands
+    files: [dispatcher/internal/cli/commands.go, dispatcher/internal/cli/root.go]
+
+  - query: live activity tui
+    files: [dispatcher/internal/cli/top.go]
+
+  # --- configuration and build ---
+  - query: environment variables
+    files: [dispatcher/internal/config/config.go]
+
+  - query: unix socket path
+    files: [dispatcher/internal/config/config.go, dispatcher/internal/worker/client.go]
+
+  - query: grpc contract
+    files: [proto/lum/v1/worker.proto]
+
+  - query: nix flake outputs
+    files: [flake.nix]
+
+  - query: development shell
+    files: [flake.nix]
