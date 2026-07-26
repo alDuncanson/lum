@@ -88,26 +88,40 @@ require("telescope").setup({
 
 ### Knowing what it is doing
 
-`notify = true` reports what lum is doing through `vim.notify`, the way an LSP
-reports progress — so fidget, nvim-notify, snacks, or the built-in all render
-it. Off by default: subscribing starts the daemon, and opening Neovim should
-not.
+`notify = true` reports what lum is doing. Off by default: subscribing starts
+the daemon, and opening Neovim should not.
+
+One line, bottom right, that stays up from the moment work starts until lum is
+ready to use — moving through each phase in place rather than stacking a
+notification per event:
 
 ```text
-downloading the embedding model (~70 MB, first run only)
-embedding model ready
-⠹ embedding ▕█████████░░░░░░░▏ 256/443 chunks
-⠼ storing ▕█████████████░░░▏ 57/68 documents
-68 indexed in 48.9s
-1 indexed in 0.3s          <- after you save a file
-worker crashed: exited: exit status 3
+⠹ lum  downloading the embedding model (~70 MB, first run)
+⠹ lum  embedding ▕█████████░░░░░▏ 256/443 chunks
+⠼ lum  storing ▕█████████████░▏ 57/69 documents
+   lum  69 indexed in 40.6s          <- lingers a few seconds, then clears
 ```
 
-The progress line updates in place while work is in flight, counting whatever
-unit the current phase advances in. Embedding counts chunks rather than files
-on purpose: the worker embeds a whole batch at once, so no file finishes until
-they all do, but chunks complete steadily throughout — and they are far more
-uniform in cost than files, so the bar moves smoothly instead of lurching.
+A successful index produces no notifications at all. Discrete events still go
+through `vim.notify`, where your notifier renders and persists them:
+
+```text
+worker crashed: exited: exit status 3
+could not index src/huge.json: document exceeds 32 MiB ingest limit
+```
+
+The split is deliberate. `vim.notify` is built for discrete messages, and
+notifiers disagree about whether one can be updated in place — asking them to
+produced either hundreds of stacked copies of a progress bar or, once that was
+detected and stopped, no progress at all. A status display is a different
+thing from a message, which is why fidget exists separately from nvim-notify,
+so lum draws that one line itself.
+
+Each phase counts whatever unit it actually advances in. Embedding counts
+chunks rather than files on purpose: the worker embeds a whole batch at once,
+so no file finishes until they all do, but chunks complete steadily throughout
+— and they are far more uniform in cost than files, so the bar moves smoothly
+instead of lurching.
 
 It needs a notifier that can replace a message rather than stack one. That is
 settled on the second update by checking whether the same handle comes back;
@@ -123,8 +137,9 @@ non-events is one you learn to ignore.
 ```lua
 notify = {
   verbose = false,     -- add per-document failures, no-op scans, worker churn
-  progress = true,     -- the live bar
+  progress = true,     -- the status line; false leaves only notifications
   min_scan_ms = 750,   -- stay quiet about faster scans that changed nothing
+  summary_ms = 4000,   -- how long the completion summary lingers
   timeouts = { info = 4000, warn = 10000, error = false },  -- false = sticky
   opts = { title = "lum" },       -- merged into the vim.notify opts table
   on_event = function(event)      -- or take the raw stream instead
