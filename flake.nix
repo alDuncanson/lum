@@ -128,6 +128,21 @@
             export LUM_DATA_DIR="''${LUM_DATA_DIR:-/tmp/lum-dev}"
             export LUM_WORKER_PATH="''${LUM_WORKER_PATH:-${lum-worker}/bin/lum-worker}"
 
+            # --fresh wipes the dev index, for exercising a cold start end to
+            # end: model load, first scan, and the notifications that report
+            # them. --user-config selects your own Neovim. Either order, and
+            # anything else is passed through to nvim.
+            fresh=0
+            userConfig=0
+            args=()
+            for arg in "$@"; do
+              case "$arg" in
+                --fresh) fresh=1 ;;
+                --user-config) userConfig=1 ;;
+                *) args+=("$arg") ;;
+              esac
+            done
+
             echo "building the dispatcher from $root/dispatcher ..."
             mkdir -p "$root/bin"
             (cd "$root/dispatcher" && go build -o "$root/bin/lum" ./cmd/lum)
@@ -136,7 +151,13 @@
             # A dev daemon left over from the previous launch still holds the
             # port, and the CLI talks to whatever answers — so without this,
             # the build that just finished would not be the one under test.
+            # It also holds the index files open, which is why --fresh has to
+            # stop it before deleting anything.
             lum stop >/dev/null 2>&1 || true
+            if [ "$fresh" = "1" ]; then
+              echo "clearing $LUM_DATA_DIR (cold start: model load + full index)"
+              rm -rf "''${LUM_DATA_DIR:?}"
+            fi
 
             echo "lum:    $(command -v lum)"
             echo "worker: $LUM_WORKER_PATH"
@@ -152,8 +173,7 @@
             # want to see the integration the way you actually use it; the
             # isolated config stays the better place to debug lum itself,
             # since it has no other plugins to blame.
-            if [ "''${1:-}" = "--user-config" ]; then
-              shift
+            if [ "$userConfig" = "1" ]; then
               if ! command -v nvim >/dev/null 2>&1; then
                 echo "--user-config runs your own Neovim, but no nvim is on PATH." >&2
                 echo "Run lum-nvim-dev without --user-config to use the pinned one." >&2
@@ -165,10 +185,10 @@
               # again at VimEnter, because plugin managers rewrite
               # runtimepath and would otherwise drop it.
               exec nvim --cmd "set runtimepath^=$root" \
-                -c "lua dofile('$root/dev/attach.lua')" "$@"
+                -c "lua dofile('$root/dev/attach.lua')" ''${args[@]+"''${args[@]}"}
             fi
             echo "nvim:   ${pkgs.neovim}/bin/nvim (isolated config)"
-            exec ${pkgs.neovim}/bin/nvim -u "$root/dev/nvim.lua" "$@"
+            exec ${pkgs.neovim}/bin/nvim -u "$root/dev/nvim.lua" ''${args[@]+"''${args[@]}"}
           '';
         };
         # Retrieval evaluation. Same split as the Neovim loop: dispatcher

@@ -28,7 +28,7 @@ vim.g.mapleader = " "
 --
 -- Run with --user-config to use your own Neovim instead of this file.
 do
-  local entries, win, buf = {}, nil, nil
+  local entries, win, buf, next_id = {}, nil, nil, 0
   local highlights = {
     [vim.log.levels.ERROR] = "ErrorMsg",
     [vim.log.levels.WARN] = "WarningMsg",
@@ -49,7 +49,7 @@ do
     local lines, width = {}, 20
     for _, entry in ipairs(entries) do
       table.insert(lines, " " .. entry.text .. " ")
-      width = math.max(width, #entry.text + 2)
+      width = math.max(width, vim.fn.strdisplaywidth(entry.text) + 2)
     end
     width = math.min(width, math.floor(vim.o.columns * 0.6))
 
@@ -59,8 +59,10 @@ do
     vim.bo[buf].modifiable = true
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].modifiable = false
+    local ns = vim.api.nvim_create_namespace("lum_notify")
+    vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
     for index, entry in ipairs(entries) do
-      vim.api.nvim_buf_set_extmark(buf, vim.api.nvim_create_namespace("lum_notify"), index - 1, 0, {
+      vim.api.nvim_buf_set_extmark(buf, ns, index - 1, 0, {
         end_row = index,
         hl_group = highlights[entry.level] or "Comment",
         hl_eol = true,
@@ -89,29 +91,66 @@ do
     end
   end
 
-  vim.notify = function(message, level, _)
-    level = level or vim.log.levels.INFO
-    for line in tostring(message):gmatch("[^\n]+") do
-      local entry = { text = line, level = level }
-      table.insert(entries, entry)
-      -- Errors linger; routine progress does not.
-      local ttl = level >= vim.log.levels.ERROR and 20000 or 8000
-      vim.defer_fn(function()
-        for index, candidate in ipairs(entries) do
-          if candidate == entry then
-            table.remove(entries, index)
-            break
-          end
-        end
-        render()
-      end, ttl)
+  local function expire(entry, level)
+    if level == false then
+      return
     end
-    -- Keep :messages working too, so nothing is lost if the float is missed.
-    -- Flattened to one line: echoing more lines than cmdheight triggers the
-    -- hit-enter prompt, which is a rude thing to do for a progress report.
+    entry.generation = (entry.generation or 0) + 1
+    local generation = entry.generation
+    vim.defer_fn(function()
+      -- A replaced entry gets a new generation; this timer is then stale and
+      -- must not remove the message that took its place.
+      if entry.generation ~= generation then
+        return
+      end
+      for index, candidate in ipairs(entries) do
+        if candidate == entry then
+          table.remove(entries, index)
+          break
+        end
+      end
+      render()
+    end, level)
+  end
+
+  -- Supports opts.replace / opts.id so lum's progress bar updates one line
+  -- instead of stacking. Returning a handle is also the signal notify.lua
+  -- uses to decide whether a progress bar is renderable at all.
+  vim.notify = function(message, level, opts)
+    opts = opts or {}
+    level = level or vim.log.levels.INFO
     local flat = tostring(message):gsub("%s*\n%s*", " · ")
+    -- Errors stay until something replaces them; progress carries an
+    -- explicit timeout of false while in flight.
+    local ttl = opts.timeout
+    if ttl == nil then
+      ttl = level >= vim.log.levels.ERROR and false or 8000
+    end
+
+    local key = opts.replace or opts.id
+    local existing
+    for _, entry in ipairs(entries) do
+      if key ~= nil and entry.id == key then
+        existing = entry
+        break
+      end
+    end
+
+    local entry = existing
+    if entry then
+      entry.text, entry.level = flat, level
+    else
+      next_id = next_id + 1
+      entry = { id = opts.id or next_id, text = flat, level = level }
+      table.insert(entries, entry)
+    end
+    expire(entry, ttl)
+
+    -- :messages history too, flattened: echoing more lines than cmdheight
+    -- triggers the hit-enter prompt.
     vim.api.nvim_echo({ { "[lum] " .. flat } }, true, {})
     render()
+    return entry.id
   end
 end
 
@@ -142,7 +181,9 @@ require("telescope").setup({
       -- Both on here, off by default in the plugin: watching indexing happen
       -- is most of the point of a dev session, and waiting on a cold index
       -- inside the picker is the thing being avoided.
-      notify = true,
+      -- verbose adds the dev tier: per-document failures, scans that
+      -- changed nothing, worker idle/respawn churn.
+      notify = { verbose = true },
       index_on_open = true,
     },
   },

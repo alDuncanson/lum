@@ -63,7 +63,7 @@ local function attach(quiet)
     extensions = {
       lum = {
         executable = "lum", -- PATH points at the working-tree build
-        notify = true,
+        notify = { verbose = true },
         index_on_open = true,
       },
     },

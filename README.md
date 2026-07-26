@@ -88,39 +88,47 @@ require("telescope").setup({
 
 ### Knowing what it is doing
 
-`notify = true` reports indexing activity through `vim.notify`, the way an LSP
-reports progress — so whichever notification plugin you use renders it:
+`notify = true` reports what lum is doing through `vim.notify`, the way an LSP
+reports progress — so fidget, nvim-notify, snacks, or the built-in all render
+it. Off by default: subscribing starts the daemon, and opening Neovim should
+not.
 
 ```text
 downloading the embedding model (~70 MB, first run only)
 embedding model ready
-64 indexed in 42.1s
-could not index src/huge.json: document exceeds 32 MiB ingest limit
+⠹ indexing ▕████████░░░░░░░░▏ 34/68 · embedding
+68 indexed in 48.9s
+1 indexed in 0.3s          <- after you save a file
+worker crashed: exited: exit status 3
 ```
 
-It exists because the first index is otherwise silent, and on a cold start it
-is the one time lum makes you wait. Off by default: subscribing starts the
-daemon, and opening Neovim should not.
+The progress line updates in place while work is in flight, and carries a
+spinner as well as a counter. The counter alone is not enough: documents are
+embedded a whole batch at a time and the dispatcher only learns any of them
+finished when the batch returns, so on a small repository the count can sit
+still for the entire index. Correct, and indistinguishable from hung — the
+spinner is what tells you the difference. It needs a notifier that can replace
+a message; if yours cannot, that is detected on the first update and progress
+falls back to start and finish only, rather than stacking a new line every
+tick.
 
-Routine events stay quiet on purpose — a warm rescan that changed nothing, idle
-shedding, the respawn after it. A channel that reports non-events is a channel
-you learn to ignore. Tune or replace the rules:
+Errors stay on screen until dismissed. Progress stays while it runs. Routine
+information times out. Nothing is said about a warm rescan that changed
+nothing, idle shedding, or the respawn after it — a channel that reports
+non-events is one you learn to ignore.
 
 ```lua
 notify = {
-  min_scan_ms = 750,           -- ignore faster scans that changed nothing
-  types = { "scan_finished" }, -- narrow the subscription (filtered server-side)
-  opts = { title = "lum", timeout = 4000 }, -- passed to vim.notify
-  on_event = function(event)   -- or take the raw stream and do your own thing
+  verbose = false,     -- add per-document failures, no-op scans, worker churn
+  progress = true,     -- the live bar
+  min_scan_ms = 750,   -- stay quiet about faster scans that changed nothing
+  timeouts = { info = 4000, warn = 10000, error = false },  -- false = sticky
+  opts = { title = "lum" },       -- merged into the vim.notify opts table
+  on_event = function(event)      -- or take the raw stream instead
     vim.print(event)
   end,
 }
 ```
-
-Silence is the normal state. A second Neovim session on an unchanged
-repository reports nothing at all: the model is cached and the rescan finds no
-work, so there is nothing to say. Set `min_scan_ms = 0` to hear about every
-scan including the empty ones.
 
 ### Indexing before you ask
 
