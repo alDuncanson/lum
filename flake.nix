@@ -111,7 +111,12 @@
         # rebuild at all.
         lum-nvim-dev = pkgs.writeShellApplication {
           name = "lum-nvim-dev";
-          runtimeInputs = [ pkgs.git pkgs.go_1_26 pkgs.neovim ];
+          # Deliberately no neovim here. writeShellApplication puts
+          # runtimeInputs first on PATH, so including it would shadow the
+          # user's own Neovim — and --user-config exists precisely to run
+          # theirs, with their plugins and their notification handler. The
+          # isolated mode references the pinned one by store path instead.
+          runtimeInputs = [ pkgs.git pkgs.go_1_26 ];
           text = ''
             root=$(git rev-parse --show-toplevel)
 
@@ -149,12 +154,21 @@
             # since it has no other plugins to blame.
             if [ "''${1:-}" = "--user-config" ]; then
               shift
-              # --cmd runs before init, so the runtimepath is in place if your
-              # own config loads the extension itself.
+              if ! command -v nvim >/dev/null 2>&1; then
+                echo "--user-config runs your own Neovim, but no nvim is on PATH." >&2
+                echo "Run lum-nvim-dev without --user-config to use the pinned one." >&2
+                exit 1
+              fi
+              echo "nvim:   $(command -v nvim) (your configuration)"
+              # --cmd runs before init so the runtimepath is in place for
+              # configs that load the extension themselves. attach.lua sets it
+              # again at VimEnter, because plugin managers rewrite
+              # runtimepath and would otherwise drop it.
               exec nvim --cmd "set runtimepath^=$root" \
-                -c "luafile $root/dev/attach.lua" "$@"
+                -c "lua dofile('$root/dev/attach.lua')" "$@"
             fi
-            exec nvim -u "$root/dev/nvim.lua" "$@"
+            echo "nvim:   ${pkgs.neovim}/bin/nvim (isolated config)"
+            exec ${pkgs.neovim}/bin/nvim -u "$root/dev/nvim.lua" "$@"
           '';
         };
         # Retrieval evaluation. Same split as the Neovim loop: dispatcher
@@ -287,8 +301,11 @@
           # run directly in this shell and `lum` run from inside Neovim are
           # the same binary against the same index. Without that, a session
           # would have two different lums depending on where you typed it.
+          # No neovim in packages: it would shadow the user's own, which
+          # --user-config needs. lum-nvim-dev pins the isolated one by store
+          # path.
           nvim = pkgs.mkShell {
-            packages = [ pkgs.go_1_26 pkgs.neovim pkgs.git lum-nvim-dev ];
+            packages = [ pkgs.go_1_26 pkgs.git lum-nvim-dev ];
             shellHook = ''
               export LUM_HTTP_ADDR="''${LUM_HTTP_ADDR:-127.0.0.1:7421}"
               export LUM_DATA_DIR="''${LUM_DATA_DIR:-/tmp/lum-dev}"

@@ -301,7 +301,11 @@ a result looks wrong, the only variable should be lum.
 `--user-config` starts your own Neovim instead, with the working-tree lum
 attached: your plugins, your notification handler, your keymaps. Use it to see
 the integration the way you actually use it; use the isolated config to debug
-lum itself.
+lum itself, where no other plugin can be at fault.
+
+It needs Telescope in your configuration. If yours lazy-loads it, open Telescope
+once and run `:LumAttach` — attaching at startup cannot work when the plugin
+does not exist yet.
 
 It runs on `127.0.0.1:7421` with its data in `/tmp/lum-dev`, so a dev session
 never collides with an installed lum on the default port or touches a real
