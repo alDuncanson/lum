@@ -649,7 +649,7 @@ impl pb::worker_server::Worker for WorkerService {
                 failed,
                 content_bytes = declared_content_bytes,
                 chunks = total_chunks,
-                max_embed_batch_size = crate::pipeline::embedder::PASSAGE_BATCH_SIZE,
+                max_embed_batch_size = crate::pipeline::embedder::passage_batch_size(),
                 parse_ms = milliseconds(parse_duration),
                 chunk_ms = milliseconds(chunk_duration),
                 embed_ms = milliseconds(embed_duration),

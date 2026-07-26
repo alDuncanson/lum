@@ -1,5 +1,16 @@
 # lum
 
+> [!WARNING]
+> **Highly experimental. Fully vibed. Use at your own risk.**
+>
+> This is a personal project, written end to end with AI assistance. Nobody
+> has run it in production, or for very long. Expect rough edges, breaking
+> changes without notice, and decisions that get reversed once something is
+> actually measured.
+>
+> It reads your repository and never writes to it — everything lum creates
+> lives under `~/.lum`, and deleting that directory undoes it completely.
+
 Lum is a local semantic code-search engine with a Telescope integration for
 Neovim. Point it at a repository, search by meaning instead of by pattern, and
 jump to the matching line range. Your code, the embeddings, and the index never

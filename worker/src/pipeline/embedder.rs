@@ -13,8 +13,39 @@ use clap::ValueEnum;
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 
 /// Bounds one passage inference call so a waiting interactive query gets
-/// an opportunity to acquire the model between bulk-ingest batches.
-pub const PASSAGE_BATCH_SIZE: usize = 64;
+/// an opportunity to acquire the model between bulk-ingest batches — and,
+/// far more importantly, bounds peak memory. See `passage_batch_size`.
+const DEFAULT_PASSAGE_BATCH_SIZE: usize = 64;
+
+/// How many passages go into one inference call.
+///
+/// This is the memory knob. Attention is quadratic in sequence length and
+/// linear in batch: 64 sequences padded to 512 tokens across 12 heads is
+/// ~800 MB for one score tensor, and ONNX Runtime's arena keeps the largest
+/// allocation it ever made. Halving the batch halves that.
+pub fn passage_batch_size() -> usize {
+    read_env("LUM_EMBED_BATCH_SIZE").unwrap_or(DEFAULT_PASSAGE_BATCH_SIZE)
+}
+
+/// Threads ONNX Runtime may use inside one inference call.
+///
+/// Also a memory knob, not only a speed one: ORT keeps a per-thread arena, so
+/// the peak scales with core count on a machine nobody tested on. `None`
+/// leaves ORT's default (one thread per core).
+fn intra_threads() -> Option<usize> {
+    read_env("LUM_EMBED_THREADS")
+}
+
+fn read_env(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    match raw.trim().parse::<usize>() {
+        Ok(value) if value > 0 => Some(value),
+        _ => {
+            tracing::warn!(%name, value = %raw, "ignoring unparseable value; must be a positive integer");
+            None
+        }
+    }
+}
 
 /// Supported bge-small variants. The quantized model keeps the same
 /// dimensions but produces different vectors, so each has a distinct
@@ -91,11 +122,13 @@ pub struct FastEmbedder {
 
 impl FastEmbedder {
     pub fn initialize(cache_dir: &Path, choice: EmbeddingModelChoice) -> Result<Self> {
-        let model = TextEmbedding::try_new(
-            TextInitOptions::new(choice.fastembed_model())
-                .with_cache_dir(cache_dir.to_path_buf())
-                .with_show_download_progress(true),
-        )
+        let mut options = TextInitOptions::new(choice.fastembed_model())
+            .with_cache_dir(cache_dir.to_path_buf())
+            .with_show_download_progress(true);
+        if let Some(threads) = intra_threads() {
+            options = options.with_intra_threads(threads);
+        }
+        let model = TextEmbedding::try_new(options)
         .with_context(|| format!("initializing embedding model {}", choice.model_name()))?;
         Ok(Self {
             model: Mutex::new(model),
@@ -111,7 +144,7 @@ impl Embedder for FastEmbedder {
         on_progress: &(dyn Fn(usize) + Sync),
     ) -> Result<Vec<Vec<f32>>> {
         let mut embeddings = Vec::with_capacity(texts.len());
-        for batch in texts.chunks(PASSAGE_BATCH_SIZE) {
+        for batch in texts.chunks(passage_batch_size()) {
             // bge models are trained with "passage: "/"query: " prefixes;
             // using them measurably improves retrieval quality.
             let prefixed: Vec<String> = batch
