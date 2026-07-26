@@ -105,7 +105,7 @@ queries:
     files: [worker/src/pipeline/embedder.rs]
 
   - query: chunk overlap
-    files: [worker/src/pipeline/chunker.rs]
+    files: [worker/src/pipeline/chunker/word_window.rs]
     contains: WordWindowChunker
 
   - query: markdown front matter

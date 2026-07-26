@@ -21,8 +21,8 @@ use tonic::{Request, Response, Status};
 
 use crate::pb;
 use crate::pipeline::{
-    Chunk, Chunker, Embedder, EmbeddingModelChoice, FastEmbedder, InvalidArgument, ParserRegistry,
-    WordWindowChunker,
+    Chunk, Chunker, Embedder, EmbeddingModelChoice, FastEmbedder, InvalidArgument, Language,
+    ParserRegistry, SyntaxChunker,
 };
 use crate::store::{edge::EdgeStore, DocumentMeta, VectorStore};
 
@@ -121,6 +121,13 @@ fn embed_text(display_path: &str, uri: &str, chunk_text: &str) -> String {
 /// Last two path components of a URI — enough to be useful, short enough to
 /// leave out the parts of an absolute path that are identical for every
 /// document and describe nobody's query.
+/// The grammar that chunked a document, for the ingest log. "text" means the
+/// word-window fallback, which is the answer to "why did this file chunk
+/// oddly" often enough to be worth a field.
+fn language_label(mime_type: &str) -> &'static str {
+    Language::from_mime(mime_type).map_or("text", Language::name)
+}
+
 fn derive_label(uri: &str) -> String {
     let parts: Vec<&str> = uri.rsplit('/').take(2).collect();
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
@@ -213,7 +220,7 @@ impl WorkerService {
             )?;
             Ok(Pipeline {
                 parsers: ParserRegistry::with_defaults(),
-                chunker: Box::new(WordWindowChunker::default()),
+                chunker: Box::new(SyntaxChunker::default()),
                 embedder: Box::new(embedder),
                 store: Box::new(store),
             })
@@ -353,6 +360,7 @@ impl pb::worker_server::Worker for WorkerService {
                 tracing::info!(
                     request_id,
                     document_id = req.document_id,
+                    language = language_label(&req.mime_type),
                     content_bytes,
                     chunks = chunks.len(),
                     batch_size,

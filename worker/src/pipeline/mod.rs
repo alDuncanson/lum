@@ -12,8 +12,10 @@
 
 pub mod chunker;
 pub mod embedder;
+pub mod language;
 pub mod parser;
 
-pub use chunker::{Chunk, Chunker, WordWindowChunker};
+pub use chunker::{Chunk, Chunker, SyntaxChunker};
+pub use language::Language;
 pub use embedder::{Embedder, EmbeddingModelChoice, FastEmbedder};
 pub use parser::{InvalidArgument, ParserRegistry};

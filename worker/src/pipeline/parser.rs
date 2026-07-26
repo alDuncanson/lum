@@ -6,15 +6,34 @@
 //! to [`ParserRegistry::with_defaults`] — nothing else in the system
 //! changes.
 
+use super::language::Language;
 use anyhow::Result;
 use std::fmt;
 
 /// Text extracted from a document, together with its first original
 /// source line. Parsers that remove a prefix must adjust `starting_line`.
+///
+/// `language` is stamped by the registry rather than by the parser, because
+/// it describes the *document*, not the extraction: markdown and Go both
+/// come out of a parser as plain text, and only the chunker cares which one
+/// it was looking at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedText {
     pub text: String,
     pub starting_line: u32,
+    pub language: Option<Language>,
+}
+
+impl ParsedText {
+    /// Extracted text with no language attached. Parsers use this; the
+    /// registry fills in the language afterwards.
+    pub fn new(text: impl Into<String>, starting_line: u32) -> Self {
+        Self {
+            text: text.into(),
+            starting_line,
+            language: None,
+        }
+    }
 }
 
 /// Marks an error as the caller's fault (unsupported/invalid input), not
@@ -69,7 +88,9 @@ impl ParserRegistry {
             ))
             .into());
         };
-        parser.parse(content)
+        let mut parsed = parser.parse(content)?;
+        parsed.language = Language::from_mime(mime_type);
+        Ok(parsed)
     }
 }
 
@@ -83,10 +104,7 @@ impl Parser for PlainTextParser {
     }
 
     fn parse(&self, content: &[u8]) -> Result<ParsedText> {
-        Ok(ParsedText {
-            text: String::from_utf8_lossy(content).into_owned(),
-            starting_line: 1,
-        })
+        Ok(ParsedText::new(String::from_utf8_lossy(content), 1))
     }
 }
 
@@ -105,10 +123,7 @@ impl Parser for MarkdownParser {
     fn parse(&self, content: &[u8]) -> Result<ParsedText> {
         let text = String::from_utf8_lossy(content);
         let (text, starting_line) = strip_front_matter(&text);
-        Ok(ParsedText {
-            text: text.to_owned(),
-            starting_line,
-        })
+        Ok(ParsedText::new(text, starting_line))
     }
 }
 
@@ -148,10 +163,7 @@ mod tests {
         let md = b"---\ntags: [a, b]\n---\n# Hello";
         assert_eq!(
             registry.parse("text/markdown", md).unwrap(),
-            ParsedText {
-                text: "# Hello".to_owned(),
-                starting_line: 4
-            }
+            ParsedText::new("# Hello", 4)
         );
         // Plain text keeps the front matter verbatim.
         assert!(registry
@@ -175,6 +187,20 @@ mod tests {
             .downcast_ref::<InvalidArgument>()
             .expect("unsupported MIME type must be reported as InvalidArgument (#7)");
         assert!(invalid.0.contains("application/pdf"));
+    }
+
+    #[test]
+    fn registry_stamps_the_language_for_code() {
+        let registry = ParserRegistry::with_defaults();
+        assert_eq!(
+            registry
+                .parse("text/x-go", b"package main")
+                .unwrap()
+                .language,
+            Some(Language::Go)
+        );
+        // Prose parses fine and simply carries no grammar.
+        assert_eq!(registry.parse("text/plain", b"hi").unwrap().language, None);
     }
 
     #[test]

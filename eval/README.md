@@ -24,27 +24,59 @@ chunker, the parsers, or the model does.
 ## Baseline
 
 Word-window chunker (220 words, 40 overlap), `bge-small-en-v1.5`, path context
-in the embedded text, 40 phrase queries over 65 documents / 402 chunks:
+`bge-small-en-v1.5`, path context in the embedded text, 40 phrase queries over
+69 documents. Both columns measured on the same tree on the same day, because
+the corpus is this repository and it changes underneath the benchmark:
 
-| metric | no path context | with path context |
+| metric | word window | tree-sitter |
 |---|---|---|
-| recall@1 | 0.450 | **0.550** |
-| recall@5 | 0.775 | **0.825** |
-| recall@10 | 0.850 | **0.925** |
-| MRR | 0.584 | **0.659** |
-| chunk hit rate | 0.769 | **0.846** |
-| distinct files in top 5 | 3.52 | 3.30 |
+| chunks | 450 | 661 |
+| recall@1 | 0.525 | **0.600** |
+| recall@5 | 0.775 | **0.800** |
+| recall@10 | 0.875 | **0.900** |
+| MRR | 0.627 | **0.688** |
+| chunk hit rate | 0.846 | 0.846 |
+| distinct files in top 5 | **3.23** | 3.00 |
+
+Splitting code at declaration boundaries instead of every 220 words moved
+every retrieval metric. Only 43 of the 49 answer-key files are in a language
+with a grammar — markdown, YAML and the proto file still chunk as prose — so
+the whole gain comes from three quarters of the fixture.
+
+Duplication got worse again, 3.23 → 3.00 distinct files in the top five, for
+the same reason smaller chunks always cost duplication: 661 chunks over 69
+files means more of one file can crowd into five slots. Collapsing results by
+file is now the obvious next win, and would pay for both this regression and
+the one path context caused.
+
+### Chunk size is not monotonic
+
+The budget is the one number worth tuning, and 1200 bytes is a real optimum
+rather than a guess:
+
+| max_bytes | chunks | recall@1 | recall@10 | MRR | chunk hit |
+|---|---|---|---|---|---|
+| 800 | 961 | 0.575 | 0.825 | 0.663 | 0.769 |
+| **1200** | 661 | **0.600** | **0.900** | **0.688** | **0.846** |
+| 1800 | 481 | 0.575 | 0.825 | 0.650 | 0.846 |
+
+Both directions lose, for different reasons. At 800 the chunk hit rate falls
+to 0.769: chunks get too small to contain the substring the query is actually
+after, so the right file comes back around the wrong lines. At 1800 the hit
+rate holds but recall@10 drops to 0.825 — a chunk holding three functions has
+a vector near none of them, and 1800 bytes of code is roughly 600 tokens
+against bge-small's 512, so the tail is being truncated before it is embedded.
+
+### Path context
 
 Prepending the repository-relative path to each chunk before embedding — not
-storing it, only embedding it — moved every retrieval metric. Three queries
-that previously found nothing in the top ten now rank ("protocol boundaries
-table", "live activity tui", "environment variables"), and no query fell out.
-
-The one number that got worse is duplication: 3.52 → 3.30 distinct files in
-the top five. Expected, and the cost of the trick. Every chunk of a file now
-shares a prefix, which makes chunks of the same file more similar to each
-other and more likely to cluster in one result list. Collapsing results by
-file would pay for itself here.
+storing it, only embedding it — was the previous change, measured on a
+65-document tree with the word-window chunker: recall@1 0.450 → 0.550,
+recall@10 0.850 → 0.925, MRR 0.584 → 0.659, chunk hit rate 0.769 → 0.846.
+Three queries that found nothing in the top ten started ranking ("protocol
+boundaries table", "live activity tui", "environment variables"), and
+distinct files fell 3.52 → 3.30. Every chunk of a file shares a prefix, which
+makes chunks of the same file look more alike.
 
 ### The first baseline was measuring the wrong thing
 
@@ -64,23 +96,36 @@ part of the measurement, and it is the part easiest to get wrong.
 
 ## What the current misses say
 
-Six of forty find nothing in the top ten. Four of them share a cause:
+Four of forty find nothing in the top ten, and four more rank outside the top
+five. They fall into three groups.
+
+**Prose still chunks as prose.**
 
     ingestion diagram          -> wanted docs/diagrams.md
     protocol boundaries table  -> wanted docs/diagrams.md
-    picker entry formatting    -> wanted lua/lum/telescope.lua
-    live activity tui          -> wanted dispatcher/internal/cli/top.go
+    grpc contract              -> wanted proto/lum/v1/worker.proto
 
-**The file path is not embedded.** Only `chunk.text` becomes a vector; the URI
-is stored in the payload and used for display, provenance, and filtering, but
-never for matching. So "ingestion diagram" cannot match `docs/diagrams.md` on
-its name — only on prose that happens to contain those words. Since people
-routinely search with words that live in the path, prepending a compact
-context header to each chunk before embedding (path, and later the enclosing
-symbol) is plausibly a larger and much cheaper win than a smarter chunker.
+There is no grammar for markdown or protobuf, so these three go through the
+word window, and the two `docs/diagrams.md` queries have been missing since
+the fixture was written. A markdown chunker that splits on headings — with the
+heading trail as context, the same trick the path prefix uses — is the obvious
+next thing to measure.
 
-The other two show a different problem: for "retry backoff" and "environment
-variables", test files and prose about the feature outrank the implementation.
+**Tests outrank implementations.**
+
+    change detection fingerprint  -> rank 6, above it: catalog.go, ingest_test.go, localdir_test.go
+    worker crashed state          -> rank 7, above it: client_test.go, manager_test.go x2
+
+A test names the feature repeatedly, in prose-like assertion messages, and
+does so in short focused functions — which is close to a description of what
+scores well here. It is not obviously wrong to return them, but nobody
+searching "worker crashed state" wants two test files before the state
+machine. Whether that is fixed by ranking, by a filter, or by leaving it
+alone is an open question.
+
+**The rest are ordinary near-misses.** "telescope plugin setup" ranks the
+Telescope *extension* shim above the plugin (rank 6), and "live activity tui"
+returns the API server that feeds the TUI instead of the TUI.
 
 ## The metrics
 

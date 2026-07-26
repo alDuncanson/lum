@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -179,7 +180,13 @@ func stopCmd() *cobra.Command {
 func snippet(text string, max int) string {
 	text = strings.Join(strings.Fields(text), " ")
 	if len(text) > max {
-		text = text[:max] + "…"
+		// Cut on a rune boundary: chunk text is source, and source is full
+		// of comments containing characters a byte slice would cut in half.
+		cut := max
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut] + "…"
 	}
 	return text
 }

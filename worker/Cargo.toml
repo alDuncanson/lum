@@ -33,6 +33,17 @@ fastembed = { version = "5", default-features = false, features = ["hf-hub-nativ
 # so it can be swapped for a Qdrant server later without touching the
 # pipeline.
 qdrant-edge = "0.7"
+# Syntax-aware chunking: split code at declaration boundaries rather than
+# every N words, so a chunk is one function or type rather than the tail of
+# one and the head of the next. Each grammar is a small C parser compiled by
+# its build script, so adding a language costs a dependency and a match arm
+# (see pipeline/language.rs) — no protocol or dispatcher change.
+tree-sitter = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-nix = "0.3"
+tree-sitter-lua = "0.5"
 
 # --- Utilities ---
 uuid = { version = "1", features = ["v5"] }  # deterministic chunk point IDs

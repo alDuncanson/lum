@@ -1,36 +1,15 @@
-//! Chunkers: plain text → overlapping windows suitable for embedding.
-//!
-//! Why chunk at all? Embedding models have a token budget (bge-small:
-//! 512 tokens) and, more importantly, one vector per *whole document*
-//! averages away the details a query is actually looking for. Smaller
-//! pieces give sharper matches; overlap keeps sentences that straddle a
-//! boundary findable from either side.
+//! The fallback chunker: a sliding window of words.
 
-use super::parser::ParsedText;
+use super::{Chunk, Chunker};
+use crate::pipeline::parser::ParsedText;
 
-/// One piece of a document. `index` is the chunk's position (0-based)
-/// and is part of the vector point identity — see `store::point_uuid`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Chunk {
-    pub index: u32,
-    pub text: String,
-    pub start_line: u32,
-    pub end_line: u32,
-}
-
-/// Strategy for splitting text. Implementations must be deterministic:
-/// the same text must always yield the same chunks, because re-ingests
-/// rely on chunk indices being stable to overwrite stale points.
-pub trait Chunker: Send + Sync {
-    fn chunk(&self, parsed: &ParsedText) -> Vec<Chunk>;
-}
-
-/// A simple, robust baseline: a sliding window of words.
+/// A sliding window of words, used for everything lum has no grammar for.
 ///
 /// Not sentence-aware and not token-exact — 220 words comfortably fits
-/// bge-small's 512-token budget for English. Replacing this with a
-/// sentence- or heading-aware chunker is a natural upgrade that requires
-/// no changes outside this file.
+/// bge-small's 512-token budget for English. Overlap earns its keep here in
+/// a way it does not for code: prose has no boundaries the splitter can see,
+/// so sharing words between neighbours keeps a sentence that straddles a cut
+/// findable from either side.
 pub struct WordWindowChunker {
     /// Words per chunk.
     pub window: usize,
@@ -100,6 +79,7 @@ impl Chunker for WordWindowChunker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::chunker::parsed;
 
     #[test]
     fn short_text_is_one_chunk() {
@@ -129,13 +109,6 @@ mod tests {
         // Indices are consecutive from zero — the store depends on this.
         for (i, c) in chunks.iter().enumerate() {
             assert_eq!(c.index as usize, i);
-        }
-    }
-
-    fn parsed(text: &str, starting_line: u32) -> ParsedText {
-        ParsedText {
-            text: text.to_owned(),
-            starting_line,
         }
     }
 

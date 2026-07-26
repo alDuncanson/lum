@@ -61,6 +61,18 @@ Lum starts on demand — the first search, tool call, or `curl` brings it up. It
 keeps registered repositories current with recursive file watching; startup and
 periodic full scans are the correctness backstop if watch delivery fails.
 
+### Why results are whole functions
+
+Go, Rust, Python, Nix and Lua are parsed with tree-sitter and split where the
+language says one thing ends and the next begins, so a result is a declaration
+with its doc comment rather than the last half of one function and the first
+half of another. Everything else — Markdown, config, languages without a
+grammar yet — falls back to overlapping word windows, which is what lum used
+everywhere before.
+
+This is measurable, not a claim: on [lum's own benchmark](eval/README.md) it
+moved recall@1 from 0.525 to 0.600 and MRR from 0.627 to 0.688.
+
 ## Neovim / Telescope
 
 ```lua

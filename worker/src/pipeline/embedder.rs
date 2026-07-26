@@ -49,12 +49,7 @@ impl EmbeddingModelChoice {
 /// asymmetric prefixes: the query "how do I X" and a passage answering
 /// it should land near each other, not queries near queries.
 pub trait Embedder: Send + Sync {
-    /// Embed document chunks (batched).
-    fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.embed_passages_with_progress(texts, &|_done| {})
-    }
-
-    /// Embed document chunks, reporting cumulative completion after each
+    /// Embed document chunks (batched), reporting cumulative completion after each
     /// internal batch.
     ///
     /// The callback exists because this is the slow step and it is
