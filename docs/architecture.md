@@ -75,8 +75,8 @@ Owns *bytes and math*: parse → chunk → embed → store/search. Spawned by
 |---|---|
 | `service.rs` | gRPC glue: compose pipeline, hop to blocking threads, map errors |
 | `pipeline/parser.rs` | `Parser` trait + registry (plain text, markdown) |
-| `pipeline/language.rs` | MIME type → tree-sitter grammar, for the languages lum can parse |
-| `pipeline/chunker/` | `Chunker` trait; syntax-aware splitting for code, word windows for everything else |
+| `pipeline/language.rs` | MIME type → tree-sitter grammar, and whether that language wants heading context |
+| `pipeline/chunker/` | `Chunker` trait; syntax-aware splitting for code and markdown, word windows for everything else |
 | `pipeline/embedder.rs` | `Embedder` trait + fastembed (bge-small-en-v1.5) |
 | `store/` | `VectorStore` trait + qdrant-edge implementation |
 

@@ -400,12 +400,14 @@ mod tests {
                         text: "a0".to_owned(),
                         start_line: 1,
                         end_line: 1,
+                        context: String::new(),
                     },
                     Chunk {
                         index: 1,
                         text: "a1".to_owned(),
                         start_line: 2,
                         end_line: 3,
+                        context: String::new(),
                     },
                 ],
                 vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]],
@@ -423,6 +425,7 @@ mod tests {
                     text: "b0".to_owned(),
                     start_line: 4,
                     end_line: 4,
+                    context: String::new(),
                 }],
                 vec![vec![0.0, 0.0, 1.0, 0.0]],
             )
@@ -480,12 +483,14 @@ mod tests {
                         text: "v1-chunk0".to_owned(),
                         start_line: 1,
                         end_line: 1,
+                        context: String::new(),
                     },
                     Chunk {
                         index: 1,
                         text: "v1-chunk1".to_owned(),
                         start_line: 2,
                         end_line: 2,
+                        context: String::new(),
                     },
                 ],
                 vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]],
@@ -510,6 +515,7 @@ mod tests {
                     text: "v2-chunk0".to_owned(),
                     start_line: 3,
                     end_line: 5,
+                    context: String::new(),
                 }],
                 vec![vec![1.0, 0.0, 0.0, 0.0]],
             )
@@ -545,6 +551,7 @@ mod tests {
                     text: "a0".to_owned(),
                     start_line: 1,
                     end_line: 1,
+                    context: String::new(),
                 }],
                 vec![vec![1.0, 0.0, 0.0, 0.0]],
             )
@@ -561,6 +568,7 @@ mod tests {
                     text: "b0".to_owned(),
                     start_line: 1,
                     end_line: 1,
+                    context: String::new(),
                 }],
                 vec![vec![1.0, 0.0, 0.0, 0.0]],
             )

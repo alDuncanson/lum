@@ -63,15 +63,15 @@ periodic full scans are the correctness backstop if watch delivery fails.
 
 ### Why results are whole functions
 
-Go, Rust, Python, Nix and Lua are parsed with tree-sitter and split where the
-language says one thing ends and the next begins, so a result is a declaration
-with its doc comment rather than the last half of one function and the first
-half of another. Everything else — Markdown, config, languages without a
-grammar yet — falls back to overlapping word windows, which is what lum used
-everywhere before.
+Go, Rust, Python, Nix, Lua and Markdown are parsed with tree-sitter and split
+where the language says one thing ends and the next begins, so a result is a
+declaration with its doc comment, or a section under its heading, rather than
+the last half of one and the first half of the next. Everything else — config,
+languages without a grammar yet — falls back to overlapping word windows.
 
-This is measurable, not a claim: on [lum's own benchmark](eval/README.md) it
-moved recall@1 from 0.525 to 0.600 and MRR from 0.627 to 0.688.
+This is measurable, not a claim: on [lum's own benchmark](eval/README.md),
+syntax chunking moved recall@1 from 0.525 to 0.600 and MRR from 0.627 to
+0.688, and markdown sections took recall@5 to 0.825.
 
 ## Neovim / Telescope
 

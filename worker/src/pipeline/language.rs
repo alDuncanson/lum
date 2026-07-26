@@ -19,6 +19,7 @@ pub enum Language {
     Python,
     Nix,
     Lua,
+    Markdown,
 }
 
 impl Language {
@@ -40,6 +41,7 @@ impl Language {
             "text/x-python" => Self::Python,
             "text/x-nix" => Self::Nix,
             "text/x-lua" => Self::Lua,
+            "text/markdown" => Self::Markdown,
             _ => return None,
         })
     }
@@ -52,6 +54,9 @@ impl Language {
             Self::Python => tree_sitter_python::LANGUAGE,
             Self::Nix => tree_sitter_nix::LANGUAGE,
             Self::Lua => tree_sitter_lua::LANGUAGE,
+            // The block grammar only. Inline structure — emphasis, links —
+            // is not where a chunk boundary belongs.
+            Self::Markdown => tree_sitter_md::LANGUAGE,
         }
         .into()
     }
@@ -63,18 +68,32 @@ impl Language {
             Self::Python => "python",
             Self::Nix => "nix",
             Self::Lua => "lua",
+            Self::Markdown => "markdown",
         }
+    }
+
+    /// Whether chunks of this language should carry the trail of headings
+    /// above them as embedded context.
+    ///
+    /// Prose is organized by headings the way code is organized by
+    /// declarations, but with one difference that matters: a declaration
+    /// repeats its own name in its body, and a paragraph three screens under
+    /// "## Ingestion data flow" contains no word that says so. The trail
+    /// restores what the document's shape already said.
+    pub fn uses_heading_context(self) -> bool {
+        matches!(self, Self::Markdown)
     }
 }
 
 /// Every language, so a test can assert that each grammar actually loads.
 #[cfg(test)]
-pub const ALL: [Language; 5] = [
+pub const ALL: [Language; 6] = [
     Language::Go,
     Language::Rust,
     Language::Python,
     Language::Nix,
     Language::Lua,
+    Language::Markdown,
 ];
 
 #[cfg(test)]
@@ -91,11 +110,19 @@ mod tests {
     }
 
     #[test]
-    fn prose_has_no_grammar() {
+    fn markdown_is_a_grammar_and_wants_heading_context() {
+        assert_eq!(Language::from_mime("text/markdown"), Some(Language::Markdown));
+        assert!(Language::Markdown.uses_heading_context());
+        // Code is organized by declarations that name themselves.
+        assert!(!Language::Go.uses_heading_context());
+    }
+
+    #[test]
+    fn unknown_types_have_no_grammar() {
         // Not an error: these chunk by word window.
-        assert_eq!(Language::from_mime("text/markdown"), None);
         assert_eq!(Language::from_mime("text/plain"), None);
         assert_eq!(Language::from_mime("text/yaml"), None);
+        assert_eq!(Language::from_mime("text/x-protobuf"), None);
     }
 
     #[test]

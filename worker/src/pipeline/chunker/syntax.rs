@@ -17,11 +17,13 @@
 //!
 //! Two details earn their complexity:
 //!
-//! - **Doc comments travel with what they document.** In every grammar here
-//!   a doc comment is a *sibling* of the declaration, not a child, so greedy
-//!   merging would happily end a chunk on the comment and start the next on
-//!   the function. When a merge has to break, any run of comments at the tail
-//!   of the finished chunk moves to the front of the new one instead.
+//! - **Leading text travels with what it introduces.** A doc comment is a
+//!   *sibling* of the declaration in every grammar here, and a markdown
+//!   heading is a sibling of the prose under it, so greedy merging would
+//!   happily end a chunk on the comment or heading and start the next one on
+//!   the thing it was introducing. When a merge has to break, any run of
+//!   leading text at the tail of the finished chunk moves to the front of the
+//!   new one instead.
 //! - **The budget is bytes, not tokens.** bge-small truncates at 512 tokens
 //!   and code runs about three characters per token, so 1200 bytes leaves
 //!   room for the path prefix (see `service::embed_text`) without truncating.
@@ -70,11 +72,13 @@ impl Chunker for SyntaxChunker {
 /// What a span holds, which decides how it may be merged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    Code,
-    Comment,
+    Body,
+    /// Text that introduces what comes after it: a doc comment, a heading.
+    /// Never the tail of a chunk if it can be the head of the next one.
+    Lead,
     /// Whitespace only. Never starts a chunk, never interrupts a run of
-    /// comments — a blank line between a doc comment and its function must
-    /// not make them look unrelated.
+    /// leads — a blank line between a doc comment and its function must not
+    /// make them look unrelated.
     Blank,
 }
 
@@ -101,32 +105,37 @@ impl SyntaxChunker {
         self.descend(root, src, 0, &mut spans);
         self.push_text(root.end_byte(), src.len(), src, &mut spans);
 
-        let spans = self.coalesce_comments(&spans, src);
-        Some(self.assemble(parsed, &spans))
+        let spans = self.coalesce_leads(&spans, src);
+        let headings = language
+            .uses_heading_context()
+            .then(|| HeadingTrail::build(root, src));
+        Some(self.assemble(parsed, &spans, headings.as_ref()))
     }
 
-    /// Fold a run of consecutive line comments into one span.
+    /// Fold a run of consecutive leads into one span.
     ///
     /// Every grammar here makes each `//` line its own node, so a ten-line
     /// doc comment arrives as ten siblings and greedy merging will happily
     /// break in the middle of it — which strands a fragment of a sentence as
     /// its own chunk and leaves the rest heading a chunk it does not
     /// introduce. Treating the run as one unit means it either travels with
-    /// the declaration below it or stands alone, but never splits.
+    /// what follows or stands alone, but never splits. Nested markdown
+    /// headings (`## Four` immediately above `### Four point one`) merge for
+    /// the same reason.
     ///
     /// A blank line ends a run: that is what a blank line is for.
-    fn coalesce_comments(&self, spans: &[Span], src: &[u8]) -> Vec<Span> {
+    fn coalesce_leads(&self, spans: &[Span], src: &[u8]) -> Vec<Span> {
         let mut out: Vec<Span> = Vec::with_capacity(spans.len());
         for span in spans {
-            if span.kind == Kind::Comment {
+            if span.kind == Kind::Lead {
                 let joinable = match out.last() {
-                    Some(prev) if prev.kind == Kind::Comment => Some(out.len() - 1),
+                    Some(prev) if prev.kind == Kind::Lead => Some(out.len() - 1),
                     // One line break between them, so they are consecutive
                     // lines of the same comment block.
                     Some(prev) if prev.kind == Kind::Blank && newlines(src, prev) <= 1 => out
                         .len()
                         .checked_sub(2)
-                        .filter(|i| out[*i].kind == Kind::Comment),
+                        .filter(|i| out[*i].kind == Kind::Lead),
                     _ => None,
                 };
                 if let Some(at) = joinable {
@@ -155,7 +164,7 @@ impl SyntaxChunker {
             out.push(Span {
                 start,
                 end,
-                kind: classify(&src[start..end], is_comment(node)),
+                kind: classify(&src[start..end], leads(node)),
             });
             return;
         }
@@ -237,12 +246,17 @@ impl SyntaxChunker {
     }
 
     /// Merge spans back up to the budget, then turn each run into a chunk.
-    fn assemble(&self, parsed: &ParsedText, spans: &[Span]) -> Vec<Chunk> {
+    fn assemble(
+        &self,
+        parsed: &ParsedText,
+        spans: &[Span],
+        headings: Option<&HeadingTrail>,
+    ) -> Vec<Chunk> {
         let text = &parsed.text;
         let mut ranges: Vec<(usize, usize)> = Vec::new();
         let mut current: Option<(usize, usize)> = None;
         // Start of the run of comments at the tail of `current`, if any.
-        let mut trailing_comment: Option<usize> = None;
+        let mut trailing_lead: Option<usize> = None;
 
         for span in spans {
             if span.end <= span.start {
@@ -256,10 +270,10 @@ impl SyntaxChunker {
                     current = Some((start, span.end.max(end)))
                 }
                 Some((start, end)) => {
-                    // A break, so decide what happens to any run of comments
-                    // sitting at the tail of the chunk being closed. Leaving
-                    // it there is always wrong: it describes what comes next.
-                    match trailing_comment {
+                    // A break, so decide what happens to any run of leading
+                    // text at the tail of the chunk being closed. Leaving it
+                    // there is always wrong: it introduces what comes next.
+                    match trailing_lead {
                         Some(c) if c > start && span.end - c <= self.max_bytes => {
                             // It fits with what follows. One chunk, comment
                             // first — the shape the descent is here to get.
@@ -267,11 +281,11 @@ impl SyntaxChunker {
                             current = Some((c, span.end));
                         }
                         Some(c) if c > start => {
-                            // It does not fit. Give the comment its own chunk
-                            // rather than making it the tail of something it
-                            // has nothing to do with: on its own it still
-                            // reads as a description of the declaration below
-                            // it, and its line range still points there.
+                            // It does not fit. Give it its own chunk rather
+                            // than leaving it as the tail of something it has
+                            // nothing to do with: alone it still reads as a
+                            // description of what is below it, and its line
+                            // range still points there.
                             ranges.push((start, c));
                             ranges.push((c, span.start));
                             current = Some((span.start, span.end));
@@ -281,14 +295,14 @@ impl SyntaxChunker {
                             current = Some((end, span.end));
                         }
                     }
-                    trailing_comment = None;
+                    trailing_lead = None;
                 }
             }
             match span.kind {
-                Kind::Comment => {
-                    trailing_comment.get_or_insert(span.start);
+                Kind::Lead => {
+                    trailing_lead.get_or_insert(span.start);
                 }
-                Kind::Code => trailing_comment = None,
+                Kind::Body => trailing_lead = None,
                 Kind::Blank => {}
             }
         }
@@ -311,18 +325,138 @@ impl SyntaxChunker {
             .enumerate()
             .map(|(index, (from, to, text))| Chunk {
                 index: index as u32,
-                text,
                 start_line: parsed.starting_line + line_at(&newlines, from),
                 end_line: parsed.starting_line + line_at(&newlines, to.saturating_sub(1)),
+                context: headings.map(|h| h.at(from, to)).unwrap_or_default(),
+                text,
             })
             .collect()
     }
 }
 
-/// Whether a node is a comment, in any of the spellings the grammars use
-/// (`comment`, `line_comment`, `block_comment`, `doc_comment`).
-fn is_comment(node: Node) -> bool {
-    node.kind().contains("comment")
+/// Whether a node introduces what follows it: a comment in any of the
+/// spellings the grammars use (`comment`, `line_comment`, `block_comment`,
+/// `doc_comment`), or a markdown heading.
+fn leads(node: Node) -> bool {
+    let kind = node.kind();
+    kind.contains("comment") || kind.contains("heading")
+}
+
+/// The heading trail in force at any point in a markdown document.
+///
+/// "protocol boundaries table" should find the table under
+/// `## 1. Boundaries and protocols`, but the paragraph holding it may not
+/// contain either word — the document said it once, in a heading, three
+/// screens up. Prepending the trail before embedding puts it back, the same
+/// way the repository path is prepended in `service::embed_text`.
+struct HeadingTrail {
+    entries: Vec<Entry>,
+}
+
+struct Entry {
+    start: usize,
+    text: String,
+    /// The full trail ending at this heading.
+    trail: String,
+}
+
+impl HeadingTrail {
+    fn build(root: Node, src: &[u8]) -> Self {
+        let mut headings = Vec::new();
+        collect_headings(root, src, &mut headings);
+        headings.sort_by_key(|(start, _, _)| *start);
+
+        // A document with exactly one top-level heading has a *title*, and
+        // the title says what the path already says. Carrying it on every
+        // chunk measurably hurt: it made whole documents more competitive for
+        // queries whose answer is code, and docs describe code. A document
+        // with several top-level headings has sections rather than a title,
+        // and those stay. See eval/README.md.
+        let title = headings
+            .iter()
+            .map(|(_, level, _)| *level)
+            .min()
+            .filter(|top| headings.iter().filter(|(_, level, _)| level == top).count() == 1);
+
+        let mut entries = Vec::with_capacity(headings.len());
+        let mut open: Vec<(usize, String)> = Vec::new();
+        for (start, level, text) in headings {
+            // A heading closes every heading at or below its own level: `##`
+            // ends the `###` before it and the previous `##` too.
+            while open.last().is_some_and(|(open_level, _)| *open_level >= level) {
+                open.pop();
+            }
+            open.push((level, text));
+            let trail = open
+                .iter()
+                .filter(|(level, _)| Some(*level) != title)
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>()
+                .join(" > ");
+            entries.push(Entry {
+                start,
+                text: open.last().map(|(_, text)| text.clone()).unwrap_or_default(),
+                trail,
+            });
+        }
+        Self { entries }
+    }
+
+    /// The trail in force over `[from, to)`, minus the headings the chunk
+    /// renders itself — those are already in its text, and spending the token
+    /// budget to say them twice makes a chunk look more like itself.
+    ///
+    /// "Renders itself" is decided by byte offset rather than by searching the
+    /// text for the heading: a document titled "lum" would otherwise have that
+    /// heading stripped from every chunk that so much as mentions the word.
+    fn at(&self, from: usize, to: usize) -> String {
+        let trail = match self.entries.partition_point(|entry| entry.start <= from) {
+            0 => return String::new(),
+            index => &self.entries[index - 1].trail,
+        };
+        let own: Vec<&str> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.start >= from && entry.start < to)
+            .map(|entry| entry.text.as_str())
+            .collect();
+        trail
+            .split(" > ")
+            .filter(|heading| !own.contains(heading))
+            .collect::<Vec<_>>()
+            .join(" > ")
+    }
+}
+
+fn collect_headings(node: Node, src: &[u8], out: &mut Vec<(usize, usize, String)>) {
+    if node.kind().contains("heading") {
+        if let Some((level, text)) = heading(node, src) {
+            out.push((node.start_byte(), level, text));
+        }
+        return;
+    }
+    let mut walker = node.walk();
+    for child in node.children(&mut walker) {
+        collect_headings(child, src, out);
+    }
+}
+
+/// A heading's level and text, for both markdown spellings: `## Title` and a
+/// line underlined with `===` or `---`.
+fn heading(node: Node, src: &[u8]) -> Option<(usize, String)> {
+    let raw = std::str::from_utf8(src.get(node.start_byte()..node.end_byte())?).ok()?;
+    let first = raw.lines().next()?.trim();
+    let (level, text) = if first.starts_with('#') {
+        let hashes = first.chars().take_while(|c| *c == '#').count();
+        (hashes, first[hashes..].trim().trim_end_matches('#').trim())
+    } else {
+        let underline = raw.lines().nth(1)?.trim();
+        (if underline.starts_with('=') { 1 } else { 2 }, first)
+    };
+    if text.is_empty() || level == 0 || level > 6 {
+        return None;
+    }
+    Some((level, text.to_owned()))
 }
 
 fn newlines(src: &[u8], span: &Span) -> usize {
@@ -332,13 +466,13 @@ fn newlines(src: &[u8], span: &Span) -> usize {
         .count()
 }
 
-fn classify(bytes: &[u8], comment: bool) -> Kind {
+fn classify(bytes: &[u8], lead: bool) -> Kind {
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         Kind::Blank
-    } else if comment {
-        Kind::Comment
+    } else if lead {
+        Kind::Lead
     } else {
-        Kind::Code
+        Kind::Body
     }
 }
 
@@ -580,6 +714,150 @@ func (r *Runner) Run(ctx context.Context, uri string) (int, error) {
         }
     }
 
+    const MARKDOWN: &str = r#"# lum
+
+Intro prose.
+
+## Ingestion data flow
+
+How a file becomes a vector.
+
+### Level 0
+
+Stores and flows.
+
+## Deletion
+
+Ordering invariants.
+
+Setext still works
+------------------
+
+Trailing prose.
+"#;
+
+    #[test]
+    fn markdown_chunks_carry_the_heading_trail() {
+        let chunker = SyntaxChunker {
+            max_bytes: 60,
+            ..Default::default()
+        };
+        let chunks = chunker.chunk(&code(MARKDOWN, Language::Markdown));
+        let level0 = chunks
+            .iter()
+            .find(|c| c.text.contains("Stores and flows"))
+            .expect("the Level 0 body must be somewhere");
+        // "### Level 0" opens this chunk, so it is filtered as the chunk's
+        // own heading; what the text cannot say for itself is what remains.
+        assert_eq!(level0.context, "Ingestion data flow");
+    }
+
+    #[test]
+    fn the_document_title_is_not_in_the_trail() {
+        // "# lum" repeats what the path says, and paying for it on every
+        // chunk of the file made docs outrank the code they describe.
+        for chunk in SyntaxChunker::default().chunk(&code(MARKDOWN, Language::Markdown)) {
+            assert!(!chunk.context.contains("lum"), "{:?}", chunk.context);
+        }
+    }
+
+    #[test]
+    fn a_document_with_no_single_title_keeps_every_heading() {
+        // Two top-level headings are sections, not a title.
+        let text = "## First\n\nalpha prose that runs on for a while here.\n\n\
+                    ## Second\n\nbeta prose that also runs on for a while.\n";
+        let chunker = SyntaxChunker {
+            max_bytes: 50,
+            ..Default::default()
+        };
+        let chunks = chunker.chunk(&code(text, Language::Markdown));
+        let beta = chunks.iter().find(|c| c.text.starts_with("beta")).unwrap();
+        assert_eq!(beta.context, "Second");
+    }
+
+    #[test]
+    fn a_sibling_heading_closes_the_one_before_it() {
+        let chunker = SyntaxChunker {
+            max_bytes: 60,
+            ..Default::default()
+        };
+        let chunks = chunker.chunk(&code(MARKDOWN, Language::Markdown));
+        let deletion = chunks
+            .iter()
+            .find(|c| c.text.contains("Ordering invariants"))
+            .unwrap();
+        // "## Deletion" ends "## Ingestion data flow" and its "### Level 0".
+        assert!(!deletion.context.contains("Ingestion"), "{:?}", deletion.context);
+        assert!(!deletion.context.contains("Level 0"), "{:?}", deletion.context);
+    }
+
+    #[test]
+    fn setext_headings_count_too() {
+        let text = "# Top\n\nintro\n\nUnderlined heading\n------------------\n\nA paragraph \
+                    long enough that it cannot share a chunk with the heading above it, \
+                    whatever the budget.\n";
+        let chunker = SyntaxChunker {
+            max_bytes: 80,
+            ..Default::default()
+        };
+        let chunks = chunker.chunk(&code(text, Language::Markdown));
+        let body = chunks
+            .iter()
+            .find(|c| c.text.starts_with("A paragraph"))
+            .expect("the paragraph should be its own chunk");
+        // "# Top" is the title and drops out; the setext heading stays.
+        assert_eq!(body.context, "Underlined heading");
+    }
+
+    #[test]
+    fn a_heading_the_chunk_shows_is_not_also_context() {
+        let chunks = SyntaxChunker::default().chunk(&code(MARKDOWN, Language::Markdown));
+        let first = &chunks[0];
+        assert!(first.text.starts_with("# lum"));
+        assert_eq!(first.context, "", "the chunk already shows every heading it is under");
+    }
+
+    #[test]
+    fn a_chunk_opening_with_its_own_heading_does_not_repeat_it() {
+        // The trail is there to supply what the text does not say. Saying it
+        // twice spends the token budget to make the chunk look like itself.
+        let chunks = SyntaxChunker::default().chunk(&code(MARKDOWN, Language::Markdown));
+        for chunk in &chunks {
+            for heading in chunk.context.split(" > ").filter(|h| !h.is_empty()) {
+                assert!(
+                    !chunk.text.contains(heading),
+                    "{heading:?} is in both the context and the text of {:?}",
+                    chunk.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hashes_inside_a_fence_are_not_headings() {
+        // The reason this uses a grammar rather than a line scanner: shell
+        // comments in a fenced block look exactly like ATX headings.
+        let text = "# Real\n\nprose\n\n```sh\n# not a heading\nlum add .\n```\n\nmore prose\n";
+        let chunker = SyntaxChunker {
+            max_bytes: 40,
+            ..Default::default()
+        };
+        for chunk in chunker.chunk(&code(text, Language::Markdown)) {
+            assert!(
+                !chunk.context.contains("not a heading"),
+                "fenced comment became a heading: {:?}",
+                chunk.context
+            );
+        }
+    }
+
+    #[test]
+    fn code_carries_no_heading_context() {
+        for chunk in SyntaxChunker::default().chunk(&code(GO_FILE, Language::Go)) {
+            assert_eq!(chunk.context, "");
+        }
+    }
+
     fn samples() -> Vec<(&'static str, Language)> {
         vec![
             (GO_FILE, Language::Go),
@@ -613,7 +891,9 @@ impl Chunker {
                 "local M = {}\n\n--- Show a line.\nfunction M.show(text)\n  return text\nend\n\nreturn M\n",
                 Language::Lua,
             ),
+            (MARKDOWN, Language::Markdown),
         ]
     }
 }
+
 

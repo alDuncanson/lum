@@ -103,19 +103,28 @@ fn batch_failure(
 /// payload-only. A dozen tokens of path is cheap against bge-small's 512
 /// budget and is exactly the context the query is reaching for.
 ///
+/// `chunk.context` is the same idea one level down: for markdown, the trail
+/// of headings above the chunk, which is where a document says what a
+/// paragraph is about without the paragraph repeating it.
+///
 /// Falls back to deriving a label from the URI when the dispatcher sends
 /// none, so an older peer degrades to something reasonable rather than to
 /// nothing.
-fn embed_text(display_path: &str, uri: &str, chunk_text: &str) -> String {
+fn embed_text(display_path: &str, uri: &str, chunk: &Chunk) -> String {
     let label = if display_path.is_empty() {
         derive_label(uri)
     } else {
         display_path.to_owned()
     };
-    if label.is_empty() {
-        return chunk_text.to_owned();
+    let mut out = String::with_capacity(label.len() + chunk.context.len() + chunk.text.len() + 2);
+    for prefix in [label.as_str(), chunk.context.as_str()] {
+        if !prefix.is_empty() {
+            out.push_str(prefix);
+            out.push('\n');
+        }
     }
-    format!("{label}\n{chunk_text}")
+    out.push_str(&chunk.text);
+    out
 }
 
 /// Last two path components of a URI — enough to be useful, short enough to
@@ -336,7 +345,7 @@ impl pb::worker_server::Worker for WorkerService {
 
                 let texts: Vec<String> = chunks
                     .iter()
-                    .map(|c| embed_text(&req.display_path, &req.uri, &c.text))
+                    .map(|c| embed_text(&req.display_path, &req.uri, c))
                     .collect();
                 let batch_size = texts.len();
                 let started = Instant::now();
@@ -533,13 +542,11 @@ impl pb::worker_server::Worker for WorkerService {
                         "batch produced more than 32768 chunks",
                     ));
                 }
-                texts.extend(chunks.iter().map(|chunk| {
-                    embed_text(
-                        &document.header.display_path,
-                        &document.header.uri,
-                        &chunk.text,
-                    )
-                }));
+                texts.extend(
+                    chunks
+                        .iter()
+                        .map(|chunk| embed_text(&document.header.display_path, &document.header.uri, chunk)),
+                );
                 prepared.push(PreparedDocument {
                     request_index,
                     document,
@@ -768,10 +775,37 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Internal);
     }
 
+    fn chunk(text: &str, context: &str) -> Chunk {
+        Chunk {
+            text: text.to_owned(),
+            context: context.to_owned(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn embed_text_prefixes_the_display_path_without_storing_it() {
-        let embedded = embed_text("docs/diagrams.md", "/abs/docs/diagrams.md", "flowchart LR");
+        let embedded = embed_text(
+            "docs/diagrams.md",
+            "/abs/docs/diagrams.md",
+            &chunk("flowchart LR", ""),
+        );
         assert_eq!(embedded, "docs/diagrams.md\nflowchart LR");
+    }
+
+    #[test]
+    fn embed_text_prefixes_the_heading_trail_too() {
+        // Path, then where in the document, then the chunk. Neither prefix is
+        // stored; both are what the query is reaching for.
+        let embedded = embed_text(
+            "docs/diagrams.md",
+            "/abs/docs/diagrams.md",
+            &chunk("flowchart LR", "Boundaries and protocols > Boundary reference"),
+        );
+        assert_eq!(
+            embedded,
+            "docs/diagrams.md\nBoundaries and protocols > Boundary reference\nflowchart LR"
+        );
     }
 
     #[test]
@@ -781,14 +815,14 @@ mod tests {
         let embedded = embed_text(
             "",
             "/Users/someone/code/lum/docs/diagrams.md",
-            "flowchart LR",
+            &chunk("flowchart LR", ""),
         );
         assert_eq!(embedded, "docs/diagrams.md\nflowchart LR");
     }
 
     #[test]
     fn embed_text_falls_back_to_bare_chunk_text() {
-        assert_eq!(embed_text("", "", "just text"), "just text");
+        assert_eq!(embed_text("", "", &chunk("just text", "")), "just text");
     }
 
     #[test]

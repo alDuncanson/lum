@@ -24,12 +24,17 @@ use super::parser::ParsedText;
 
 /// One piece of a document. `index` is the chunk's position (0-based)
 /// and is part of the vector point identity — see `store::point_uuid`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Chunk {
     pub index: u32,
     pub text: String,
     pub start_line: u32,
     pub end_line: u32,
+    /// Where this chunk sits in the document — for markdown, the trail of
+    /// headings above it. Embedded with the text and never stored, exactly
+    /// like the repository path (see `service::embed_text`): it is what the
+    /// query is often reaching for, and it is not what you want back.
+    pub context: String,
 }
 
 /// Strategy for splitting text. Implementations must be deterministic:

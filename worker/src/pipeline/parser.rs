@@ -163,7 +163,10 @@ mod tests {
         let md = b"---\ntags: [a, b]\n---\n# Hello";
         assert_eq!(
             registry.parse("text/markdown", md).unwrap(),
-            ParsedText::new("# Hello", 4)
+            ParsedText {
+                language: Some(Language::Markdown),
+                ..ParsedText::new("# Hello", 4)
+            }
         );
         // Plain text keeps the front matter verbatim.
         assert!(registry

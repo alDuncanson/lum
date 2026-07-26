@@ -66,6 +66,7 @@ impl Chunker for WordWindowChunker {
                     .join(" "),
                 start_line: words[start].1,
                 end_line: words[end - 1].2,
+                context: String::new(),
             });
             if end == words.len() {
                 break;

@@ -21,12 +21,24 @@ never depends on — or disturbs — your real index. Use `--fresh` whenever the
 change under test invalidates existing vectors, which anything touching the
 chunker, the parsers, or the model does.
 
-## Baseline
+## Current
 
-Word-window chunker (220 words, 40 overlap), `bge-small-en-v1.5`, path context
-`bge-small-en-v1.5`, path context in the embedded text, 40 phrase queries over
-69 documents. Both columns measured on the same tree on the same day, because
-the corpus is this repository and it changes underneath the benchmark:
+`bge-small-en-v1.5`, path context in the embedded text, tree-sitter chunking
+for code and markdown, 40 phrase queries over 70 documents / 705 chunks:
+
+| recall@1 | recall@5 | recall@10 | MRR | chunk hit | distinct@5 |
+|---|---|---|---|---|---|
+| 0.600 | 0.825 | 0.925 | 0.692 | 0.769 | 3.10 |
+
+Everything below is how it got there. Read the columns, not the rows across
+sections: the corpus is this repository and it changes underneath the
+benchmark, so only measurements taken on the same tree on the same day
+compare.
+
+### Syntax chunking beat word windows
+
+Word windows (220 words, 40 overlap) against tree-sitter, same tree, 69
+documents:
 
 | metric | word window | tree-sitter |
 |---|---|---|
@@ -39,15 +51,51 @@ the corpus is this repository and it changes underneath the benchmark:
 | distinct files in top 5 | **3.23** | 3.00 |
 
 Splitting code at declaration boundaries instead of every 220 words moved
-every retrieval metric. Only 43 of the 49 answer-key files are in a language
-with a grammar — markdown, YAML and the proto file still chunk as prose — so
-the whole gain comes from three quarters of the fixture.
+every retrieval metric. Only 43 of the 49 answer-key files were in a language
+with a grammar at the time, so the whole gain came from three quarters of the
+fixture.
 
-Duplication got worse again, 3.23 → 3.00 distinct files in the top five, for
-the same reason smaller chunks always cost duplication: 661 chunks over 69
-files means more of one file can crowd into five slots. Collapsing results by
-file is now the obvious next win, and would pay for both this regression and
-the one path context caused.
+Duplication got worse, 3.23 → 3.00 distinct files in the top five, for the
+reason smaller chunks always cost duplication: more of one file can crowd into
+five slots. Collapsing results by file would pay for this and for the
+regression path context caused.
+
+### Markdown: sections helped, the document title hurt
+
+Adding a markdown grammar was really two changes, and measuring them together
+would have shipped the wrong one. Four runs on one tree, 70 documents:
+
+| metric | prose | sections | + full trail | + trail, no title |
+|---|---|---|---|---|
+| chunks | 684 | 703 | 703 | 703 |
+| recall@1 | 0.600 | **0.625** | 0.575 | 0.600 |
+| recall@5 | 0.800 | 0.750 | 0.775 | **0.825** |
+| recall@10 | 0.875 | 0.900 | **0.925** | **0.925** |
+| MRR | 0.685 | 0.698 | 0.668 | **0.692** |
+| distinct files in top 5 | 3.17 | **3.20** | 3.12 | 3.12 |
+
+Splitting on headings rather than every 220 words helped on its own.
+
+Then the heading trail — prepending `Ingestion data flow > Level 0` before
+embedding, the same trick as the path — made things *worse*: recall@1 0.625 →
+0.575, MRR 0.698 → 0.668. It did what it was meant to, pulling both
+`docs/diagrams.md` queries from nowhere into the top ten, and then kept going:
+`README.md` and `docs/architecture.md` started outranking the code they
+describe, for queries like "telescope plugin setup" and "gitignore rules".
+Documentation describes implementation, so making documentation easier to find
+makes implementation harder to find.
+
+The cause was the document title. Every trail in a file began with the same
+`# lum`, which is also what the path says, so the cost was paid on every chunk
+and bought nothing. Dropping it — precisely: dropping the outermost heading
+level when a document has exactly one heading there, since a document with
+several has sections rather than a title — recovered the precision and kept
+the recall: recall@5 0.750 → 0.825, recall@10 0.925, MRR 0.692.
+
+The lesson is not about markdown. Context is not free: every token spent
+saying where a chunk lives is a token not spent on what it says, and context
+shared by every chunk in a file makes that file compete for queries it should
+lose.
 
 ### Chunk size is not monotonic
 
@@ -96,36 +144,36 @@ part of the measurement, and it is the part easiest to get wrong.
 
 ## What the current misses say
 
-Four of forty find nothing in the top ten, and four more rank outside the top
+Three of forty find nothing in the top ten, and four more rank outside the top
 five. They fall into three groups.
-
-**Prose still chunks as prose.**
-
-    ingestion diagram          -> wanted docs/diagrams.md
-    protocol boundaries table  -> wanted docs/diagrams.md
-    grpc contract              -> wanted proto/lum/v1/worker.proto
-
-There is no grammar for markdown or protobuf, so these three go through the
-word window, and the two `docs/diagrams.md` queries have been missing since
-the fixture was written. A markdown chunker that splits on headings — with the
-heading trail as context, the same trick the path prefix uses — is the obvious
-next thing to measure.
 
 **Tests outrank implementations.**
 
     change detection fingerprint  -> rank 6, above it: catalog.go, ingest_test.go, localdir_test.go
-    worker crashed state          -> rank 7, above it: client_test.go, manager_test.go x2
+    worker crashed state          -> rank 8, above it: client_test.go, manager_test.go x2
+    live activity tui             -> not in top 10; server_test.go leads
 
 A test names the feature repeatedly, in prose-like assertion messages, and
-does so in short focused functions — which is close to a description of what
-scores well here. It is not obviously wrong to return them, but nobody
-searching "worker crashed state" wants two test files before the state
-machine. Whether that is fixed by ranking, by a filter, or by leaving it
-alone is an open question.
+does so in short focused functions — close to a description of what scores
+well here. It is not obviously wrong to return them, but nobody searching
+"worker crashed state" wants two test files before the state machine. Whether
+that is fixed by ranking, by a filter, or by leaving it alone is open.
 
-**The rest are ordinary near-misses.** "telescope plugin setup" ranks the
-Telescope *extension* shim above the plugin (rank 6), and "live activity tui"
-returns the API server that feeds the TUI instead of the TUI.
+**One file crowds out the rest.**
+
+    picker entry formatting  -> not in top 10; three chunks of syntax.rs lead
+
+Nothing in the top five was the answer, and three of the five were the same
+file. Collapsing results by file would give the real answer somewhere to go.
+
+**No grammar for protobuf.**
+
+    grpc contract  -> wanted proto/lum/v1/worker.proto; got client.go and the generated stubs
+
+The `.proto` file is the contract; the generated Go and the hand-written
+client that calls it both describe it more verbosely than it describes itself.
+A protobuf grammar is one dependency and one match arm, now that markdown has
+proved the shape.
 
 ## The metrics
 
