@@ -84,13 +84,31 @@ func (c *Client) ListSources(ctx context.Context) ([]apiv1.Source, error) {
 	return out, err
 }
 
+// SearchOptions are the knobs GET /v1/search accepts beyond the query.
+type SearchOptions struct {
+	Limit int
+	// SourceID restricts results to one source; empty means all sources.
+	SourceID string
+	// PerFile caps how many chunks any one file may contribute. nil leaves
+	// the server's default in place; 0 asks for raw nearest neighbours.
+	PerFile *int
+}
+
 // Search runs a semantic query and returns the nearest chunks. sourceID
 // restricts results to one source; empty means all sources.
 func (c *Client) Search(ctx context.Context, query string, limit int, sourceID string) ([]apiv1.SearchResult, error) {
+	return c.SearchWith(ctx, query, SearchOptions{Limit: limit, SourceID: sourceID})
+}
+
+// SearchWith is Search with every knob exposed.
+func (c *Client) SearchWith(ctx context.Context, query string, opts SearchOptions) ([]apiv1.SearchResult, error) {
 	var out apiv1.SearchEnvelope
-	path := fmt.Sprintf("/v1/search?q=%s&limit=%d", url.QueryEscape(query), limit)
-	if sourceID != "" {
-		path += "&source=" + url.QueryEscape(sourceID)
+	path := fmt.Sprintf("/v1/search?q=%s&limit=%d", url.QueryEscape(query), opts.Limit)
+	if opts.SourceID != "" {
+		path += "&source=" + url.QueryEscape(opts.SourceID)
+	}
+	if opts.PerFile != nil {
+		path += fmt.Sprintf("&per_file=%d", *opts.PerFile)
 	}
 	err := c.call(ctx, "GET", path, nil, &out)
 	return out.Results, err

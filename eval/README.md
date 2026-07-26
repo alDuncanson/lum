@@ -24,11 +24,12 @@ chunker, the parsers, or the model does.
 ## Current
 
 `bge-small-en-v1.5`, path context in the embedded text, tree-sitter chunking
-for code and markdown, 40 phrase queries over 70 documents / 705 chunks:
+for code and markdown, at most two chunks per file, 40 phrase queries over 70
+documents / 705 chunks:
 
 | recall@1 | recall@5 | recall@10 | MRR | chunk hit | distinct@5 |
 |---|---|---|---|---|---|
-| 0.600 | 0.825 | 0.925 | 0.692 | 0.769 | 3.10 |
+| 0.600 | 0.825 | 0.950 | 0.695 | 0.692 | 3.77 |
 
 Everything below is how it got there. Read the columns, not the rows across
 sections: the corpus is this repository and it changes underneath the
@@ -141,6 +142,32 @@ measuring a capability the system does not have and was never going to.
 
 Worth keeping in mind whenever these numbers move: the query distribution is
 part of the measurement, and it is the part easiest to get wrong.
+
+### Collapsing by file trades precision for coverage
+
+Capping how many chunks one file may contribute, measured on one index by
+re-querying it — no re-ingest, so these four rows are exactly comparable:
+
+| per_file | recall@1 | recall@5 | recall@10 | MRR | chunk hit | distinct@5 |
+|---|---|---|---|---|---|---|
+| 0 (off) | 0.600 | 0.825 | 0.925 | 0.692 | **0.769** | 3.10 |
+| 1 | 0.600 | **0.900** | **0.975** | **0.713** | 0.538 | **5.00** |
+| **2** | 0.600 | 0.825 | **0.950** | 0.695 | 0.692 | 3.77 |
+| 3 | 0.600 | 0.825 | 0.925 | 0.692 | 0.692 | 3.42 |
+
+One chunk per file looks like the obvious winner and is not. It finds far more
+of the right *files* — recall@5 0.825 → 0.900, recall@10 0.975, five distinct
+files in five slots by construction — and lands on the wrong *lines* far more
+often: chunk hit rate 0.769 → 0.538. Where several chunks of the right file
+used to come back, only the highest-scoring one now does, and the substring
+the query was actually after was often in one of the others. For a picker that
+jumps to a line range, the right file at the wrong function is a worse answer
+than it looks in a recall column.
+
+Two is the default because it keeps most of the coverage (recall@10 0.950,
+distinct 3.10 → 3.77) for one query's worth of chunk-hit precision. Three
+gives back the coverage and keeps the precision loss, which is the worst of
+both.
 
 ## What the current misses say
 

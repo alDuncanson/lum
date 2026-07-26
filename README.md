@@ -42,8 +42,10 @@ lum search --root . --json  "daemon startup"   # one JSON document
 lum search --root . --jsonl "daemon startup"   # one result per line
 ```
 
-`--root` discovers and idempotently registers the repository, so there is no
-separate setup step. Lum indexes Markdown and common source extensions across
+By default at most two results come from any one file, so a single large file
+cannot fill the list; `--per-file 1` gives one result per file and `--per-file 0`
+returns raw nearest neighbours. `--root` discovers and idempotently registers
+the repository, so there is no separate setup step. Lum indexes Markdown and common source extensions across
 ~20 languages plus configuration and web formats. It honors nested `.gitignore`
 files including negation rules, watches the repository for changes, and returns
 inclusive, 1-based line ranges with every result.

@@ -43,6 +43,7 @@ func searchCmd() *cobra.Command {
 	var root string
 	var jsonOutput bool
 	var jsonl bool
+	var perFile int
 
 	cmd := &cobra.Command{
 		Use:   "search <query>",
@@ -67,7 +68,11 @@ func searchCmd() *cobra.Command {
 				}
 				sourceID = ensured.Source.ID
 			}
-			results, err := api.Search(cmd.Context(), query, limit, sourceID)
+			opts := apiclient.SearchOptions{Limit: limit, SourceID: sourceID}
+			if cmd.Flags().Changed("per-file") {
+				opts.PerFile = &perFile
+			}
+			results, err := api.SearchWith(cmd.Context(), query, opts)
 			if err != nil {
 				return err
 			}
@@ -104,6 +109,7 @@ func searchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&root, "root", "", "ensure and search only this local workspace")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit a compact JSON search envelope")
 	cmd.Flags().BoolVar(&jsonl, "jsonl", false, "emit one compact JSON result per line")
+	cmd.Flags().IntVar(&perFile, "per-file", 2, "chunks any one file may contribute; 0 returns raw nearest neighbours")
 	return cmd
 }
 

@@ -242,11 +242,22 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	sourceID := r.URL.Query().Get("source")
 
-	results, err := s.dp.Search(r.Context(), query, uint32(limit), sourceID)
+	perFile := defaultPerFile
+	if raw := r.URL.Query().Get("per_file"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > 100 {
+			httpError(w, http.StatusBadRequest, "per_file must be an integer in [0, 100]; 0 disables collapsing")
+			return
+		}
+		perFile = parsed
+	}
+
+	results, err := s.dp.Search(r.Context(), query, uint32(fetchLimit(limit, perFile)), sourceID)
 	if err != nil {
 		httpError(w, http.StatusBadGateway, "worker search failed: "+err.Error())
 		return
 	}
+	results = collapseByFile(results, perFile, limit)
 	out := make([]apiv1.SearchResult, 0, len(results))
 	for _, item := range results {
 		out = append(out, searchResultDTO(item))

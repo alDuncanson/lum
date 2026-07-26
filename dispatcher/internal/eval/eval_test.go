@@ -42,6 +42,7 @@ var (
 	writeJSON = flag.String("eval.json", "", "write the full result set to this path, for diffing between runs")
 	limit     = flag.Int("eval.limit", 10, "results to request per query")
 	label     = flag.String("eval.label", "", "name this run in the output (e.g. a chunker version)")
+	perFile   = flag.Int("eval.per-file", -1, "cap chunks per file; -1 leaves the server default, 0 disables collapsing")
 )
 
 // Query is one fixture entry: a search phrase and the files it should
@@ -165,7 +166,11 @@ func TestRetrieval(t *testing.T) {
 	hitsAt := map[int]int{1: 0, 5: 0, 10: 0}
 
 	for _, query := range f.Queries {
-		results, err := client.Search(ctx, query.Text, *limit, source.Source.ID)
+		opts := apiclient.SearchOptions{Limit: *limit, SourceID: source.Source.ID}
+		if *perFile >= 0 {
+			opts.PerFile = perFile
+		}
+		results, err := client.SearchWith(ctx, query.Text, opts)
 		if err != nil {
 			t.Fatalf("searching %q: %v", query.Text, err)
 		}
