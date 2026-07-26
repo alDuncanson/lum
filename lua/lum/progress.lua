@@ -8,15 +8,40 @@
 -- nvim-notify. Owning ~100 lines of window is the price of it working the
 -- same way everywhere.
 --
--- One line, bottom right, above Telescope, never focusable, gone when there
--- is nothing to say. Discrete events — a crash, a failure, a summary worth
--- keeping — still go through vim.notify, where they belong.
+-- One line, bottom right by default, above Telescope, never focusable, gone
+-- when there is nothing to say. Discrete events — a crash, a failure, a
+-- summary worth keeping — still go through vim.notify, where they belong.
+--
+-- The corner is configurable because bottom right is contested: fidget and
+-- noice put LSP progress there, so lum's line and rust-analyzer's end up
+-- stacked on the same cells. No zindex resolves that — whichever wins hides
+-- the other — so the fix is to move one of them.
 
 local M = {}
 
 local SPINNER = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
 local SPIN_MS = 120
 local BAR_WIDTH = 14
+
+local window = {
+  -- Which corner: "SE", "SW", "NE", "NW".
+  anchor = "SE",
+  -- Cells to move in from that corner. `row_offset = 1` in the default
+  -- corner lifts the line clear of a notifier already sitting there.
+  row_offset = 0,
+  col_offset = 0,
+  -- Above Telescope's windows (50), so the line stays readable while a
+  -- picker is open — which is exactly when it matters.
+  zindex = 100,
+  border = "rounded",
+  winblend = 10,
+}
+
+function M.setup(opts)
+  if type(opts) == "table" then
+    window = vim.tbl_extend("force", window, opts)
+  end
+end
 
 local state = {
   win = nil,
@@ -70,21 +95,26 @@ local function draw()
   vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, { line })
   vim.bo[state.buf].modifiable = false
 
-  -- Bottom right, clear of the statusline and the cmdline. Telescope's
-  -- windows sit lower than this zindex, so the line stays readable while a
-  -- picker is open — which is exactly when it matters.
+  -- Clear of the statusline and the cmdline at the bottom, of the tabline
+  -- at the top.
+  local south = window.anchor:sub(1, 1) ~= "N"
+  local row = south and math.max(1, vim.o.lines - vim.o.cmdheight - 1 - window.row_offset)
+    or math.min(vim.o.lines - 2, window.row_offset)
+  local east = window.anchor:sub(2, 2) ~= "W"
+  local col = east and math.max(0, vim.o.columns - window.col_offset) or window.col_offset
+
   local config = {
     relative = "editor",
-    anchor = "SE",
-    row = math.max(1, vim.o.lines - vim.o.cmdheight - 1),
-    col = vim.o.columns,
+    anchor = window.anchor,
+    row = row,
+    col = col,
     width = width,
     height = 1,
     style = "minimal",
-    border = "rounded",
+    border = window.border,
     focusable = false,
     noautocmd = true,
-    zindex = 250,
+    zindex = window.zindex,
   }
   if state.win and vim.api.nvim_win_is_valid(state.win) then
     vim.api.nvim_win_set_config(state.win, config)
@@ -94,7 +124,7 @@ local function draw()
       return
     end
     state.win = win
-    vim.wo[state.win].winblend = 10
+    vim.wo[state.win].winblend = window.winblend
     vim.wo[state.win].winhighlight = "NormalFloat:NormalFloat,FloatBorder:Comment"
   end
 end

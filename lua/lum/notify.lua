@@ -69,7 +69,10 @@ state.activity = new_activity()
 local defaults = {
   enabled = false,
   verbose = false,
-  -- The self-updating progress line.
+  -- The self-updating progress line. `false` turns it off; a table is
+  -- passed to lum.progress.setup — `{ row_offset = 1 }` or
+  -- `{ anchor = "SW" }` moves it out from under a notifier that already
+  -- owns the bottom-right corner, which fidget and noice both do.
   progress = true,
   -- Stay quiet about scans faster than this that changed nothing. A warm
   -- rescan finishes in milliseconds and announcing it is flicker.
@@ -87,6 +90,16 @@ local defaults = {
 }
 
 local config = vim.deepcopy(defaults)
+
+-- `progress` is a boolean or a table of window options, so "is it on" is a
+-- question rather than a field.
+local function progress_on()
+  local p = config.progress
+  if p == false or (type(p) == "table" and p.enabled == false) then
+    return false
+  end
+  return true
+end
 
 local function level_key(level)
   if level == vim.log.levels.ERROR then
@@ -147,7 +160,7 @@ function M.line()
 end
 
 local function render()
-  if not config.progress then
+  if not progress_on() then
     return
   end
   local text = M.line()
@@ -284,7 +297,7 @@ function M.describe(event)
     end
     local summary = ("%s in %.1fs"):format(table.concat(parts, ", "), took / 1000)
 
-    if config.progress then
+    if progress_on() then
       progress.finish(summary, config.summary_ms)
     end
     if failed > 0 then
@@ -297,6 +310,9 @@ end
 
 function M.setup(opts)
   config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
+  if type(config.progress) == "table" then
+    progress.setup(config.progress)
+  end
 end
 
 function M.is_running()
@@ -308,7 +324,7 @@ end
 -- progress off would be traffic nobody reads. Filtered server-side.
 local function subscribed_types()
   local types = { "scan_started", "scan_finished", "worker_state_changed", "snapshot" }
-  if config.progress then
+  if progress_on() then
     vim.list_extend(types, {
       "document_queued",
       "document_ingested",

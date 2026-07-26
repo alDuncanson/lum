@@ -123,11 +123,13 @@ so no file finishes until they all do, but chunks complete steadily throughout
 — and they are far more uniform in cost than files, so the bar moves smoothly
 instead of lurching.
 
-It needs a notifier that can replace a message rather than stack one. That is
-settled on the second update by checking whether the same handle comes back;
-if it does not, progress stops there and you get start and finish only. A
-notifier returning a handle is not evidence it replaced anything — that
-assumption is what once produced three hundred identical lines.
+Because lum owns that window, it can land on top of one your notifier already
+put there — fidget and noice both use the bottom right for LSP progress. No
+zindex fixes that; whichever wins hides the other. Move one of them:
+
+```lua
+notify = { progress = { row_offset = 1 } }   -- or anchor = "SW", "NE", "NW"
+```
 
 Errors stay on screen until dismissed. Progress stays while it runs. Routine
 information times out. Nothing is said about a warm rescan that changed
@@ -138,6 +140,8 @@ non-events is one you learn to ignore.
 notify = {
   verbose = false,     -- add per-document failures, no-op scans, worker churn
   progress = true,     -- the status line; false leaves only notifications
+                       -- or a table: { anchor, row_offset, col_offset,
+                       --               zindex, border, winblend }
   min_scan_ms = 750,   -- stay quiet about faster scans that changed nothing
   summary_ms = 4000,   -- how long the completion summary lingers
   timeouts = { info = 4000, warn = 10000, error = false },  -- false = sticky
