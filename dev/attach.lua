@@ -81,11 +81,16 @@ local function attach(quiet)
     require("lum.telescope").start_indexing()
   end)
 
+  -- One line, deliberately. A multi-line message overflows cmdheight and
+  -- Neovim answers with the hit-enter prompt — so a routine startup notice
+  -- becomes something you have to dismiss, and does it before a notifier
+  -- plugin has necessarily loaded to intercept it.
   vim.notify(
-    ("lum dev attached — :Telescope lum\n  binary: %s"):format(
-      vim.fn.exepath("lum") ~= "" and vim.fn.exepath("lum") or "NOT ON PATH"
+    ("lum dev attached (%s) — :Telescope lum"):format(
+      vim.fn.exepath("lum") ~= "" and vim.fn.exepath("lum") or "lum NOT ON PATH"
     ),
-    vim.log.levels.INFO
+    vim.log.levels.INFO,
+    { title = "lum", timeout = 4000 }
   )
   return true
 end

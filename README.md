@@ -108,13 +108,19 @@ you learn to ignore. Tune or replace the rules:
 
 ```lua
 notify = {
-  min_scan_ms = 750,          -- ignore faster scans that changed nothing
-  types = { "scan_finished" },-- narrow the subscription (filtered server-side)
-  on_event = function(event)  -- or take the raw stream and do your own thing
+  min_scan_ms = 750,           -- ignore faster scans that changed nothing
+  types = { "scan_finished" }, -- narrow the subscription (filtered server-side)
+  opts = { title = "lum", timeout = 4000 }, -- passed to vim.notify
+  on_event = function(event)   -- or take the raw stream and do your own thing
     vim.print(event)
   end,
 }
 ```
+
+Silence is the normal state. A second Neovim session on an unchanged
+repository reports nothing at all: the model is cached and the rescan finds no
+work, so there is nothing to say. Set `min_scan_ms = 0` to hear about every
+scan including the empty ones.
 
 ### Indexing before you ask
 

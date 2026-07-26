@@ -41,6 +41,15 @@ local defaults = {
   -- rescan finishes in a couple hundred milliseconds; announcing it is
   -- flicker, not information.
   min_scan_ms = 750,
+  -- Passed through to vim.notify as its opts table.
+  --
+  -- timeout is the one that matters. Without it every notifier applies its
+  -- own default, and several keep messages until they are dismissed by hand
+  -- — which turns a progress channel into a pile that outlives the work it
+  -- was describing. Progress should disappear when it stops being news.
+  -- Both nvim-notify and snacks.nvim honor this key; fidget and the built-in
+  -- ignore it harmlessly.
+  opts = { title = "lum", timeout = 4000 },
   -- Receives each decoded event instead of the built-in formatting.
   on_event = nil,
 }
@@ -151,7 +160,7 @@ local function handle(event)
   end
   local message, level = M.describe(event)
   if message then
-    vim.notify(message, level, { title = "lum" })
+    vim.notify(message, level, vim.deepcopy(config.opts))
   end
 end
 

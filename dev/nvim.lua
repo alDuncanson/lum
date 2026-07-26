@@ -107,7 +107,10 @@ do
       end, ttl)
     end
     -- Keep :messages working too, so nothing is lost if the float is missed.
-    vim.api.nvim_echo({ { "[lum] " .. tostring(message) } }, true, {})
+    -- Flattened to one line: echoing more lines than cmdheight triggers the
+    -- hit-enter prompt, which is a rude thing to do for a progress report.
+    local flat = tostring(message):gsub("%s*\n%s*", " · ")
+    vim.api.nvim_echo({ { "[lum] " .. flat } }, true, {})
     render()
   end
 end
