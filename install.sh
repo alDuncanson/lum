@@ -1,7 +1,6 @@
 #!/bin/sh
 # Install lum.
 #
-#   curl -fsSL https://lum.sh/install | sh
 #   curl -fsSL https://raw.githubusercontent.com/alDuncanson/lum/main/install.sh | sh
 #
 # Downloads the release for this platform, checks it against the published
