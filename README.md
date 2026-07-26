@@ -1,27 +1,67 @@
 # lum
 
-Lum is a local semantic code-search engine, with a Telescope integration for
+Lum is a local semantic code-search engine with a Telescope integration for
 Neovim. Point it at a repository, search by meaning instead of by pattern, and
 jump to the matching line range. Your code, the embeddings, and the index never
 leave the machine.
 
 ```sh
-lum search --root ~/code/my-project "where are retries handled?"
+$ lum search --root ~/code/lum "where is daemon startup coordinated?"
+ 1. 0.806  /home/you/code/lum/dispatcher/internal/worker/manager.go:421 (chunk 14)
+     // idleLoop periodically sheds lum-worker once idleTimeout has elapsed
+     since the // last real RPC. Health checks and status polling are…
 ```
+
+Nothing to configure, no API keys, no service to operate. The embedding model
+(BAAI/bge-small-en-v1.5, about 70 MB) downloads on first use and is cached;
+everything after that is offline.
 
 ## Install
 
-With [Nix](https://nixos.org/) flakes enabled:
+With [Nix](https://nixos.org/) flakes:
 
 ```sh
 nix profile install github:alDuncanson/lum
 ```
 
-That is the whole install — no containers, no API keys, no service to operate.
-The embedding model (BAAI/bge-small-en-v1.5, about 70 MB) downloads on first use
-and is cached locally; everything after that is offline.
+Or from source, with Go 1.26+ and Rust 1.97+ — the two binaries just need to
+sit in the same directory:
 
-With this repository as a flake input named `lum`:
+```sh
+git clone https://github.com/alDuncanson/lum && cd lum
+(cd worker && cargo build --release)
+(cd dispatcher && go build -o ../bin/lum ./cmd/lum)
+cp worker/target/release/lum-worker bin/
+```
+
+Put `bin/` on your `PATH`. There are no prebuilt release binaries yet.
+
+## Quick start
+
+```sh
+lum search --root ~/code/my-project "retry backoff"
+```
+
+That is the whole setup: `--root` registers the repository, indexes it, and
+keeps it current with file watching. Lum starts on demand and stops itself when
+idle.
+
+```sh
+lum status                      # daemon, worker, index counts
+lum top                         # live indexing activity
+lum stop
+```
+
+## Neovim
+
+```lua
+require("telescope").load_extension("lum")
+vim.keymap.set("n", "<leader>fs", function()
+  require("telescope").extensions.lum.lum()
+end)
+```
+
+With Nix, as a flake input named `lum`:
 
 ```nix
 home.packages = [ inputs.lum.packages.${pkgs.system}.lum ];
@@ -31,354 +71,36 @@ programs.neovim.plugins = [
 ];
 ```
 
-Flake outputs: `lum` (the product), `lum-nvim` (the Neovim plugin), and
-`lum-worker` (exposed for debugging; `lum` already pins its own).
+Indexing progress is reported as LSP `$/progress`, so whatever already renders
+rust-analyzer's progress renders lum's. See [docs/neovim.md](docs/neovim.md).
 
-## Search
-
-```sh
-lum search --root . "where is daemon startup coordinated?"
-lum search --root . --json  "daemon startup"   # one JSON document
-lum search --root . --jsonl "daemon startup"   # one result per line
-```
-
-By default at most two results come from any one file, so a single large file
-cannot fill the list; `--per-file 1` gives one result per file and `--per-file 0`
-returns raw nearest neighbours; `--no-tests` omits test files. `--root` discovers and idempotently registers
-the repository, so there is no separate setup step. Lum indexes Markdown and common source extensions across
-~20 languages plus configuration and web formats. It honors nested `.gitignore`
-files including negation rules, watches the repository for changes, and returns
-inclusive, 1-based line ranges with every result.
-
-Repositories can also be managed explicitly:
-
-```sh
-lum add ~/code/my-project
-lum status
-lum top                         # live indexing activity
-lum stop
-```
-
-Lum starts on demand — the first search, tool call, or `curl` brings it up. It
-keeps registered repositories current with recursive file watching; startup and
-periodic full scans are the correctness backstop if watch delivery fails.
-
-### Why results are whole functions
+## Why results are whole functions
 
 Go, Rust, Python, Nix, Lua and Markdown are parsed with tree-sitter and split
 where the language says one thing ends and the next begins, so a result is a
 declaration with its doc comment, or a section under its heading, rather than
-the last half of one and the first half of the next. Everything else — config,
-languages without a grammar yet — falls back to overlapping word windows.
+the last half of one and the first half of the next.
 
-This is measurable, not a claim: on [lum's own benchmark](eval/README.md),
-syntax chunking moved recall@1 from 0.525 to 0.600 and MRR from 0.627 to
-0.688, and markdown sections took recall@5 to 0.825.
+That claim is measured rather than asserted. `nix run .#eval` scores lum
+against 45 search phrases with known answers, and every retrieval change in
+this repository had to move those numbers — including the two that made things
+worse and were reverted.
 
-## Neovim / Telescope
+## Documentation
 
-```lua
-require("telescope").load_extension("lum")
-vim.keymap.set("n", "<leader>fs", function()
-  require("telescope").extensions.lum.lum()
-end)
-```
+- [docs/neovim.md](docs/neovim.md) — the Telescope extension, progress
+  reporting, and indexing before you ask
+- [docs/cli.md](docs/cli.md) — CLI, REST, Server-Sent Events, MCP, and where
+  state lives
+- [docs/architecture.md](docs/architecture.md) — the two-process design, and
+  why
+- [docs/diagrams.md](docs/diagrams.md) — data flow, protocol boundaries, and
+  lifecycle state machines
+- [eval/README.md](eval/README.md) — how retrieval is measured, and what has
+  and has not worked
+- [docs/development.md](docs/development.md) — dev shell, the Neovim loop, and
+  running the benchmark
 
-Run it with the mapping or `:Telescope lum`. Optional configuration:
+## License
 
-```lua
-require("telescope").setup({
-  extensions = {
-    lum = {
-      executable = "lum",
-      limit = 50,
-      debounce_ms = 200,
-      notify = false,          -- see below
-      index_on_open = false,   -- see below
-    },
-  },
-})
-```
-
-### Knowing what it is doing
-
-`notify = true` reports what lum is doing. Off by default: subscribing starts
-the daemon, and opening Neovim should not.
-
-Progress is reported as LSP `$/progress`, the same way rust-analyzer reports
-indexing. Whatever renders a language server's progress renders lum's — noice,
-fidget, snacks — in the same corner, in the same style, stacked alongside it
-rather than on top of it:
-
-```text
-▕█████████░░░░░▏ embedding 256/443 chunks (57%)  ⠹ indexing lum
-▕█████████████░▏ storing 57/69 documents (82%)   ⠼ indexing lum
-✔ indexing lum
-```
-
-Two operations, so two progress tokens, exactly as rust-analyzer separates
-"Roots Scanned" from "Indexing": `lum/model` for the one-time model download
-and `lum/index` for the work itself.
-
-lum is not a language server, and does not pretend to be one — it registers an
-in-process LSP client that implements `initialize`, `shutdown`, and nothing
-else, attaches to no buffer, and exists to emit progress. The tradeoff worth
-knowing: `vim.lsp.get_clients()` will list a client called `lum`. Nothing
-buffer-scoped sees it, which is what statusline components use.
-
-Anything that draws its own window instead is competing for the same cells as
-your notifier, and no zindex settles that — whichever wins hides the other.
-lum tried it, and it covered rust-analyzer. Speaking the protocol every
-notifier already understands is the fix.
-
-With nothing listening for `LspProgress` there is nothing to see, since core
-Neovim records progress but displays none of it. In that case lum falls back
-to drawing one line, bottom right — better than silence, and the reason
-`mode = "auto"` asks before choosing:
-
-```lua
-notify = { progress = { mode = "window" } }   -- or "lsp", or "auto" (default)
-```
-
-A successful index produces no notifications at all. Discrete events go
-through `vim.notify`, where your notifier renders and persists them:
-
-```text
-worker crashed: exited: exit status 3
-could not index src/huge.json: document exceeds 32 MiB ingest limit
-```
-
-The split is deliberate: `vim.notify` is built for discrete messages, and
-progress is a status display. It is why fidget exists separately from
-nvim-notify.
-
-Each phase counts whatever unit it actually advances in. Embedding counts
-chunks rather than files on purpose: the worker embeds a whole batch at once,
-so no file finishes until they all do, but chunks complete steadily throughout
-— and they are far more uniform in cost than files, so the bar moves smoothly
-instead of lurching. The percentage tracks the current phase rather than the
-whole scan, because the phase is the only thing that reports a denominator.
-
-Errors stay on screen until dismissed. Progress stays while it runs. Routine
-information times out. Nothing is said about a warm rescan that changed
-nothing, idle shedding, or the respawn after it — a channel that reports
-non-events is one you learn to ignore.
-
-```lua
-notify = {
-  verbose = false,     -- add per-document failures, no-op scans, worker churn
-  progress = true,     -- false leaves only notifications; a table configures
-                       -- it: { mode = "auto" | "lsp" | "window" } plus, for
-                       -- the window fallback, anchor / row_offset /
-                       -- col_offset / zindex / border / winblend
-  min_scan_ms = 750,   -- stay quiet about faster scans that changed nothing
-  summary_ms = 4000,   -- how long the completion summary lingers
-  timeouts = { info = 4000, warn = 10000, error = false },  -- false = sticky
-  opts = { title = "lum" },       -- merged into the vim.notify opts table
-  on_event = function(event)      -- or take the raw stream instead
-    vim.print(event)
-  end,
-}
-```
-
-### Indexing before you ask
-
-`index_on_open = true` registers and indexes the current Git repository when
-Neovim starts, instead of when the picker first opens.
-
-The picker registers its repository through `lum search --root`, which blocks
-until that repository's *first* index finishes — a model download plus a full
-embed on a cold repository. Telescope respawns the search on every keystroke,
-so typing during that window actively restarts the wait and the picker just
-sits empty. Indexing at open moves the work off the critical path, the way an
-LSP attaches when you open a file rather than when you first ask it something.
-
-Off by default because it starts a background daemon in every Neovim session,
-including ones where you never search. Worth turning on if you use lum
-regularly. It does nothing outside a Git repository, and on an already-indexed
-one it costs a path lookup and a rescan of unchanged files.
-
-Nothing here is Neovim-specific. `lum events` streams the same thing as
-newline-delimited JSON for any consumer:
-
-```sh
-lum events --kinds                        # what can be subscribed to
-lum events --types scan_finished          # filtered server-side
-lum events --no-replay | jq -r .kind      # only what happens from now on
-```
-
-The extension discovers the current Git root, registers it, and runs
-`lum search --root <repo> --jsonl`, using the line provenance in each result to
-preview and open the matching code. Install the `lum-nvim` flake output, or put
-this repository's `lua/` directory on Neovim's runtime path with your plugin
-manager.
-
-Notably, it is an ordinary CLI client. It reads no database, no vector index, and
-no private socket — which is the same deal every other integration gets.
-
-## Built to be extended
-
-Lum is API-first, and that is a constraint rather than a slogan: the CLI is a
-pure client of the REST API, so a capability that is not reachable over HTTP
-cannot exist in the CLI either. Every integration is peer to every other one.
-
-```sh
-curl 'localhost:7420/v1/search?q=retry+backoff&limit=3'
-curl 'localhost:7420/v1/search?q=retry+backoff&source=<source-id>'
-curl -X DELETE localhost:7420/v1/sources/<source-id>
-```
-
-Server-Sent Events expose scans, document lifecycle, worker readiness, queue
-depth, current work, and index totals — no client library required:
-
-```sh
-curl -N localhost:7420/v1/events
-curl -N 'localhost:7420/v1/events?types=document_ingested,document_failed'
-```
-
-`lum mcp` serves the Model Context Protocol over stdio with `search`,
-`add_source`, `list_sources`, and `status` tools, each delegating to that same
-REST API:
-
-```json
-{
-  "mcpServers": {
-    "lum": {
-      "command": "/path/to/bin/lum",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-Internally, the extension points are interfaces rather than forks: a new file
-format is a `Parser`, a new chunking strategy is a `Chunker`, a new embedding
-model is an `Embedder`, a different index is a `VectorStore`, and a new thing to
-index is a `Source`. Adding one is an implementation, not an architecture change.
-
-## How it runs
-
-```text
-CLI · Telescope · MCP · curl
-              │ REST + SSE over loopback (MCP speaks stdio, then REST)
-              ▼
-      lum — the dispatcher
-      repository scans · watching · catalog · public API
-              │ private gRPC over ~/.lum/lum-worker.sock
-              ▼
-      lum-worker — the worker
-      parse → line-aware chunks → embed → vector search
-```
-
-Two processes, one product. The dispatcher owns orchestration and every public
-interface; the worker owns parsing, embedding, and vector search. The dispatcher
-starts and supervises the worker, so there is never a second thing to install or
-run.
-
-The HTTP API listens on `127.0.0.1:7420` (`LUM_HTTP_ADDR` overrides it) and the
-worker opens no TCP port at all. The dispatcher exits after 15 minutes without a
-request. Its worker is shed after 5 minutes without an ingest or search, which
-releases the model and index memory, then respawned on demand; a worker crash is
-handled the same way. `lum serve` runs everything in the foreground for
-debugging.
-
-See [docs/architecture.md](docs/architecture.md) for the design and
-[docs/diagrams.md](docs/diagrams.md) for data flow, architecture, and
-protocol-boundary diagrams.
-
-## State and reset
-
-Everything lives under `~/.lum` (override with `LUM_DATA_DIR`):
-
-```text
-~/.lum/
-├── catalog.db              # repositories, documents, hashes, chunk counts, failures
-├── daemon.log              # detached logs from both processes
-├── daemon.lock             # held for the dispatcher's complete lifetime
-├── daemon-start.lock       # coordinates concurrent on-demand starts
-├── lum-worker.sock         # private dispatcher-to-worker gRPC socket
-├── models/                 # downloaded embedding model cache
-├── vectors/                # qdrant-edge index and chunk payloads
-└── vectors.manifest.json   # model and dimension the index was built with
-```
-
-Run `lum stop` before deleting that directory. `lum stop` waits until every file
-is released; on Unix, deleting state while Lum is running does not reset the open
-SQLite and vector files.
-
-`LUM_DATA_DIR` has to be shallow enough to hold the worker socket: a Unix domain
-socket address caps out at 104 bytes on macOS and 108 on Linux, path included.
-Lum checks this at startup and tells you if the path is too deep, so the default
-`~/.lum` and anything comparable is fine.
-
-The full-precision model is the default. For higher CPU throughput at a small
-retrieval-quality cost, use `lum serve --embedding-model quantized` or set
-`LUM_EMBEDDING_MODEL=quantized`. The two produce incompatible vectors, so when
-switching, stop Lum and remove `catalog.db`, `vectors/`, and
-`vectors.manifest.json`, then re-index — keep `models/` to avoid another
-download.
-
-## Development
-
-Lum targets Unix-like systems; its private transport is a Unix domain socket.
-
-```sh
-nix develop                      # pinned toolchains for both processes
-(cd dispatcher && go test ./...)
-(cd worker && cargo test)
-nix develop -c buf generate      # regenerate the committed protobuf stubs
-nix flake check                  # build and test everything
-nix run . -- serve               # build and run in the foreground
-```
-
-### Measuring retrieval
-
-```sh
-nix run .#eval                 # score lum against eval/queries.yaml
-nix run .#eval -- --fresh      # wipe the eval index first
-```
-
-Changes to parsing, chunking, or the embedding model are hard to judge by
-looking at results, so [eval/](eval/README.md) scores them: recall@k, MRR,
-whether the returned chunk is the part you wanted, and how much
-of the top five is duplicate files.
-
-`proto/lum/v1/worker.proto` is the contract between the two processes. The
-dispatcher's stubs are generated by `buf` and committed, so a plain `go build`
-needs no codegen step; the worker generates its own at build time.
-
-### Neovim loop
-
-```sh
-nix run .#nvim                    # build, then open Neovim on the local plugin
-nix run .#nvim -- --user-config   # ... using your own Neovim config instead
-nix run .#nvim -- --fresh         # ... on an empty index (keeps the model)
-nix run .#nvim -- --fresh-model   # ... and re-download the model too
-nix develop .#nvim                # or get a shell first: lum-nvim-dev
-```
-
-Flags combine in any order. `--fresh` keeps `models/`, because re-fetching
-70 MB on every iteration is slow for no benefit; `--fresh-model` is there for
-exercising the download and the notifications around it.
-
-Either one rebuilds the dispatcher from the working tree, takes the worker
-prebuilt from Nix (it compiles slowly and is rarely what you are changing), and
-opens Neovim with Telescope plus this repository's `lua/` on the runtimepath —
-so plugin edits need no rebuild at all, just a restart. `<leader>fs` opens the
-picker; `:LumRoot <dir>` searches somewhere else. See [dev/nvim.lua](dev/nvim.lua)
-for the config it uses, which is deliberately minimal rather than yours — when
-a result looks wrong, the only variable should be lum.
-
-`--user-config` starts your own Neovim instead, with the working-tree lum
-attached: your plugins, your notification handler, your keymaps. Use it to see
-the integration the way you actually use it; use the isolated config to debug
-lum itself, where no other plugin can be at fault.
-
-It needs Telescope in your configuration. If yours lazy-loads it, open Telescope
-once and run `:LumAttach` — attaching at startup cannot work when the plugin
-does not exist yet.
-
-It runs on `127.0.0.1:7421` with its data in `/tmp/lum-dev`, so a dev session
-never collides with an installed lum on the default port or touches a real
-index. The shell exports the same settings, so `lum` typed at the prompt and
-`lum` invoked from the picker are the same binary against the same index.
+[MIT](LICENSE)
