@@ -23,20 +23,28 @@ chunker, the parsers, or the model does.
 
 ## Baseline
 
-Word-window chunker (220 words, 40 overlap), `bge-small-en-v1.5`, 40 phrase
-queries over 65 documents / 398 chunks:
+Word-window chunker (220 words, 40 overlap), `bge-small-en-v1.5`, path context
+in the embedded text, 40 phrase queries over 65 documents / 402 chunks:
 
-| metric | value |
-|---|---|
-| recall@1 | 0.450 |
-| recall@5 | 0.775 |
-| recall@10 | 0.850 |
-| MRR | 0.584 |
-| chunk hit rate | 0.769 |
-| distinct files in top 5 | 3.52 |
+| metric | no path context | with path context |
+|---|---|---|
+| recall@1 | 0.450 | **0.550** |
+| recall@5 | 0.775 | **0.825** |
+| recall@10 | 0.850 | **0.925** |
+| MRR | 0.584 | **0.659** |
+| chunk hit rate | 0.769 | **0.846** |
+| distinct files in top 5 | 3.52 | 3.30 |
 
-Read that as: for six queries in seven a correct file is in the top ten, and
-for nearly half it is first.
+Prepending the repository-relative path to each chunk before embedding — not
+storing it, only embedding it — moved every retrieval metric. Three queries
+that previously found nothing in the top ten now rank ("protocol boundaries
+table", "live activity tui", "environment variables"), and no query fell out.
+
+The one number that got worse is duplication: 3.52 → 3.30 distinct files in
+the top five. Expected, and the cost of the trick. Every chunk of a file now
+shares a prefix, which makes chunks of the same file more similar to each
+other and more likely to cluster in one result list. Collapsing results by
+file would pay for itself here.
 
 ### The first baseline was measuring the wrong thing
 

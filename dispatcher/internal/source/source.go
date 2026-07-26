@@ -38,6 +38,16 @@ type DocumentRef struct {
 	// That asymmetry is what makes it safe: the failure mode of a stale
 	// fingerprint is one wasted read, not a missing document.
 	Fingerprint string
+	// DisplayPath is a short, human-meaningful label for the document —
+	// the repository-relative path for local directories.
+	//
+	// It is prepended to each chunk before embedding, so that searches
+	// using words from the path ("ingestion diagram", "telescope plugin
+	// setup") have something to match. The source provides it because only
+	// the source knows what a short label means for its own URI space: an
+	// absolute filesystem path is the wrong thing to embed, and a future
+	// RSS source would want an entry title rather than a path at all.
+	DisplayPath string
 }
 
 // Source enumerates and fetches documents from one registered location.

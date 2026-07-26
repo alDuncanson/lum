@@ -229,7 +229,10 @@ func (l *LocalDir) Scan(ctx context.Context) ([]DocumentRef, error) {
 		if err != nil {
 			return nil // racing deletes etc.; skip
 		}
-		ref := DocumentRef{URI: path, MimeType: mime, Fingerprint: fingerprint(info)}
+		ref := DocumentRef{
+			URI: path, MimeType: mime, Fingerprint: fingerprint(info),
+			DisplayPath: l.displayPath(path),
+		}
 		if time.Since(info.ModTime()) < fingerprintRaceWindow {
 			// Too fresh to trust a fingerprint; pay for the read now.
 			hash, err := hashFile(path)
@@ -441,6 +444,18 @@ func skipDirectory(root, path, name string) bool {
 
 func (l *LocalDir) Read(_ context.Context, ref DocumentRef) ([]byte, error) {
 	return os.ReadFile(ref.URI)
+}
+
+// displayPath is the path relative to the source root: what a person would
+// call the file, and what they are likely to type part of when searching for
+// it. The absolute path is deliberately not used — /Users/<name>/code adds
+// tokens that are identical for every document and describe nobody's query.
+func (l *LocalDir) displayPath(path string) string {
+	relative, err := filepath.Rel(l.root, path)
+	if err != nil {
+		return filepath.Base(path)
+	}
+	return relative
 }
 
 // fingerprint is the cheap change signal for a local file: size plus

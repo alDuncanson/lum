@@ -201,15 +201,16 @@ func readinessState(resp *lumv1.HealthResponse) ReadinessState {
 // via a filtered delete before upserting, so no chunk count is needed.
 func (c *Client) IngestDocument(
 	ctx context.Context,
-	documentID, sourceID, uri, mimeType string,
+	documentID, sourceID, uri, mimeType, displayPath string,
 	content []byte,
 ) (uint32, error) {
 	resp, err := c.rpc.IngestDocument(ctx, &lumv1.IngestDocumentRequest{
-		DocumentId: documentID,
-		SourceId:   sourceID,
-		Uri:        uri,
-		MimeType:   mimeType,
-		Content:    content,
+		DocumentId:  documentID,
+		SourceId:    sourceID,
+		Uri:         uri,
+		MimeType:    mimeType,
+		DisplayPath: displayPath,
+		Content:     content,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("ingest %s: %w", uri, err)
@@ -219,11 +220,12 @@ func (c *Client) IngestDocument(
 
 // IngestBatchDocument is one document sent through the streaming batch RPC.
 type IngestBatchDocument struct {
-	DocumentID string
-	SourceID   string
-	URI        string
-	MimeType   string
-	Content    []byte
+	DocumentID  string
+	SourceID    string
+	URI         string
+	MimeType    string
+	DisplayPath string
+	Content     []byte
 }
 
 // IngestBatchResult is the ordered outcome for one batch document.
@@ -255,6 +257,7 @@ func (c *Client) IngestBatch(
 					SourceId:      document.SourceID,
 					Uri:           document.URI,
 					MimeType:      document.MimeType,
+					DisplayPath:   document.DisplayPath,
 					ContentLength: uint64(len(document.Content)),
 				},
 			}})
@@ -334,6 +337,7 @@ func (c *Client) ingestBatchUnaryFallback(
 			document.SourceID,
 			document.URI,
 			document.MimeType,
+			document.DisplayPath,
 			document.Content,
 		)
 	}

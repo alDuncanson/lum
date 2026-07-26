@@ -778,7 +778,8 @@ func (i *Ingestor) documentRunner(ctx context.Context) {
 					job: job, contentHash: contentHash,
 					input: worker.IngestBatchDocument{
 						DocumentID: job.document.ID, SourceID: job.run.sourceID,
-						URI: job.ref.URI, MimeType: job.ref.MimeType, Content: content,
+						URI: job.ref.URI, MimeType: job.ref.MimeType,
+						DisplayPath: job.ref.DisplayPath, Content: content,
 					},
 				})
 				pendingBytes += len(content)

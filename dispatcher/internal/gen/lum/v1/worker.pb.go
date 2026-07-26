@@ -277,7 +277,7 @@ type IngestDocumentRequest struct {
 	// (a UUID). Chunk point IDs are derived from this, so it must not
 	// change across re-ingests of the same logical document.
 	DocumentId string `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
-	// The source this document belongs to (control-plane source UUID).
+	// The source this document belongs to (dispatcher source UUID).
 	// Stored in chunk payloads so results can be traced back.
 	SourceId string `protobuf:"bytes,2,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
 	// Human-meaningful location, e.g. "/Users/al/Documents/notes.md" or,
@@ -287,8 +287,18 @@ type IngestDocumentRequest struct {
 	// plane picks a Parser implementation based on this.
 	MimeType string `protobuf:"bytes,4,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	// Raw document bytes. Parsing happens in the worker so that new
-	// formats (PDF, HTML, ...) never require control-plane changes.
-	Content       []byte `protobuf:"bytes,5,opt,name=content,proto3" json:"content,omitempty"`
+	// formats (PDF, HTML, ...) never require dispatcher changes.
+	Content []byte `protobuf:"bytes,5,opt,name=content,proto3" json:"content,omitempty"`
+	// Short, human-meaningful label for the document, prepended to each
+	// chunk before embedding but never stored in the payload. For local
+	// directories this is the repository-relative path.
+	//
+	// People search with words that live in the path — "ingestion diagram",
+	// "telescope plugin setup" — and the URI is not otherwise part of what
+	// gets embedded, so those queries had nothing to match. The source
+	// supplies it because only the source knows what a short label means for
+	// its own URI space. Empty is allowed; the worker then derives one.
+	DisplayPath   string `protobuf:"bytes,7,opt,name=display_path,json=displayPath,proto3" json:"display_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -356,6 +366,13 @@ func (x *IngestDocumentRequest) GetContent() []byte {
 		return x.Content
 	}
 	return nil
+}
+
+func (x *IngestDocumentRequest) GetDisplayPath() string {
+	if x != nil {
+		return x.DisplayPath
+	}
+	return ""
 }
 
 type IngestDocumentResponse struct {
@@ -513,6 +530,8 @@ type IngestBatchDocumentHeader struct {
 	// Exact number of content bytes that follow. The server rejects
 	// truncated or overlong streams before modifying the vector store.
 	ContentLength uint64 `protobuf:"varint,6,opt,name=content_length,json=contentLength,proto3" json:"content_length,omitempty"`
+	// See IngestDocumentRequest.display_path.
+	DisplayPath   string `protobuf:"bytes,7,opt,name=display_path,json=displayPath,proto3" json:"display_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -580,6 +599,13 @@ func (x *IngestBatchDocumentHeader) GetContentLength() uint64 {
 		return x.ContentLength
 	}
 	return 0
+}
+
+func (x *IngestBatchDocumentHeader) GetDisplayPath() string {
+	if x != nil {
+		return x.DisplayPath
+	}
+	return ""
 }
 
 type IngestBatchEndDocument struct {
@@ -1153,14 +1179,15 @@ const file_lum_v1_worker_proto_rawDesc = "" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12)\n" +
 	"\x10contract_version\x18\x03 \x01(\tR\x0fcontractVersion\x12,\n" +
-	"\x05state\x18\x04 \x01(\x0e2\x16.lum.v1.ReadinessStateR\x05state\"\xba\x01\n" +
+	"\x05state\x18\x04 \x01(\x0e2\x16.lum.v1.ReadinessStateR\x05state\"\xdd\x01\n" +
 	"\x15IngestDocumentRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1b\n" +
 	"\tsource_id\x18\x02 \x01(\tR\bsourceId\x12\x10\n" +
 	"\x03uri\x18\x03 \x01(\tR\x03uri\x12\x1b\n" +
 	"\tmime_type\x18\x04 \x01(\tR\bmimeType\x12\x18\n" +
-	"\acontent\x18\x05 \x01(\fR\acontentJ\x04\b\x06\x10\aR\x14previous_chunk_count\"9\n" +
+	"\acontent\x18\x05 \x01(\fR\acontent\x12!\n" +
+	"\fdisplay_path\x18\a \x01(\tR\vdisplayPathJ\x04\b\x06\x10\aR\x14previous_chunk_count\"9\n" +
 	"\x16IngestDocumentResponse\x12\x1f\n" +
 	"\vchunk_count\x18\x01 \x01(\rR\n" +
 	"chunkCount\"\xbf\x01\n" +
@@ -1168,14 +1195,15 @@ const file_lum_v1_worker_proto_rawDesc = "" +
 	"\bdocument\x18\x01 \x01(\v2!.lum.v1.IngestBatchDocumentHeaderH\x00R\bdocument\x12\x1a\n" +
 	"\acontent\x18\x02 \x01(\fH\x00R\acontent\x12C\n" +
 	"\fend_document\x18\x03 \x01(\v2\x1e.lum.v1.IngestBatchEndDocumentH\x00R\vendDocumentB\a\n" +
-	"\x05frame\"\xcb\x01\n" +
+	"\x05frame\"\xee\x01\n" +
 	"\x19IngestBatchDocumentHeader\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1b\n" +
 	"\tsource_id\x18\x02 \x01(\tR\bsourceId\x12\x10\n" +
 	"\x03uri\x18\x03 \x01(\tR\x03uri\x12\x1b\n" +
 	"\tmime_type\x18\x04 \x01(\tR\bmimeType\x12%\n" +
-	"\x0econtent_length\x18\x06 \x01(\x04R\rcontentLengthJ\x04\b\x05\x10\x06R\x14previous_chunk_count\"\x18\n" +
+	"\x0econtent_length\x18\x06 \x01(\x04R\rcontentLength\x12!\n" +
+	"\fdisplay_path\x18\a \x01(\tR\vdisplayPathJ\x04\b\x05\x10\x06R\x14previous_chunk_count\"\x18\n" +
 	"\x16IngestBatchEndDocument\"V\n" +
 	"\x13IngestBatchResponse\x12?\n" +
 	"\tdocuments\x18\x01 \x03(\v2!.lum.v1.IngestBatchDocumentResultR\tdocuments\"\xc7\x01\n" +

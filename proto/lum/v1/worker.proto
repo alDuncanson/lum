@@ -111,6 +111,16 @@ message IngestDocumentRequest {
   bytes content = 5;
   reserved 6; // previous_chunk_count, replaced by a filtered delete on document_id (#3)
   reserved "previous_chunk_count";
+  // Short, human-meaningful label for the document, prepended to each
+  // chunk before embedding but never stored in the payload. For local
+  // directories this is the repository-relative path.
+  //
+  // People search with words that live in the path — "ingestion diagram",
+  // "telescope plugin setup" — and the URI is not otherwise part of what
+  // gets embedded, so those queries had nothing to match. The source
+  // supplies it because only the source knows what a short label means for
+  // its own URI space. Empty is allowed; the worker then derives one.
+  string display_path = 7;
 }
 
 message IngestDocumentResponse {
@@ -139,6 +149,8 @@ message IngestBatchDocumentHeader {
   // Exact number of content bytes that follow. The server rejects
   // truncated or overlong streams before modifying the vector store.
   uint64 content_length = 6;
+  // See IngestDocumentRequest.display_path.
+  string display_path = 7;
 }
 
 message IngestBatchEndDocument {}

@@ -87,6 +87,42 @@ fn batch_failure(
     }
 }
 
+/// Text handed to the embedder for one chunk: a short context label followed
+/// by the chunk itself.
+///
+/// The label is *not* stored — the payload keeps `chunk.text` alone, so
+/// results still show code rather than a synthetic header. It exists purely
+/// so the vector carries where the chunk came from.
+///
+/// People search with words that live in the path: "ingestion diagram",
+/// "telescope plugin setup", "live activity tui". None of those could match
+/// before, because only chunk text was ever embedded and the URI was
+/// payload-only. A dozen tokens of path is cheap against bge-small's 512
+/// budget and is exactly the context the query is reaching for.
+///
+/// Falls back to deriving a label from the URI when the dispatcher sends
+/// none, so an older peer degrades to something reasonable rather than to
+/// nothing.
+fn embed_text(display_path: &str, uri: &str, chunk_text: &str) -> String {
+    let label = if display_path.is_empty() {
+        derive_label(uri)
+    } else {
+        display_path.to_owned()
+    };
+    if label.is_empty() {
+        return chunk_text.to_owned();
+    }
+    format!("{label}\n{chunk_text}")
+}
+
+/// Last two path components of a URI — enough to be useful, short enough to
+/// leave out the parts of an absolute path that are identical for every
+/// document and describe nobody's query.
+fn derive_label(uri: &str) -> String {
+    let parts: Vec<&str> = uri.rsplit('/').take(2).collect();
+    parts.into_iter().rev().collect::<Vec<_>>().join("/")
+}
+
 /// Shared, immutable pipeline. Wrapped in `Arc` so request handlers can
 /// move a cheap clone onto blocking threads.
 struct Pipeline {
@@ -247,7 +283,10 @@ impl pb::worker_server::Worker for WorkerService {
                     return Ok(0); // empty file: nothing to index
                 }
 
-                let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+                let texts: Vec<String> = chunks
+                    .iter()
+                    .map(|c| embed_text(&req.display_path, &req.uri, &c.text))
+                    .collect();
                 let batch_size = texts.len();
                 let started = Instant::now();
                 let vectors = p.embedder.embed_passages(&texts)?;
@@ -438,7 +477,13 @@ impl pb::worker_server::Worker for WorkerService {
                         "batch produced more than 32768 chunks",
                     ));
                 }
-                texts.extend(chunks.iter().map(|chunk| chunk.text.clone()));
+                texts.extend(chunks.iter().map(|chunk| {
+                    embed_text(
+                        &document.header.display_path,
+                        &document.header.uri,
+                        &chunk.text,
+                    )
+                }));
                 prepared.push(PreparedDocument {
                     request_index,
                     document,
@@ -631,6 +676,29 @@ mod tests {
     fn pipeline_error_status_falls_back_to_internal_for_other_failures() {
         let status = pipeline_error_status(anyhow::anyhow!("store flush failed"));
         assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    #[test]
+    fn embed_text_prefixes_the_display_path_without_storing_it() {
+        let embedded = embed_text("docs/diagrams.md", "/abs/docs/diagrams.md", "flowchart LR");
+        assert_eq!(embedded, "docs/diagrams.md\nflowchart LR");
+    }
+
+    #[test]
+    fn embed_text_derives_a_label_when_the_dispatcher_sends_none() {
+        // An older dispatcher sends no display_path; a short suffix of the
+        // URI beats embedding nothing, and beats embedding /Users/<name>/...
+        let embedded = embed_text(
+            "",
+            "/Users/someone/code/lum/docs/diagrams.md",
+            "flowchart LR",
+        );
+        assert_eq!(embedded, "docs/diagrams.md\nflowchart LR");
+    }
+
+    #[test]
+    fn embed_text_falls_back_to_bare_chunk_text() {
+        assert_eq!(embed_text("", "", "just text"), "just text");
     }
 
     #[test]
