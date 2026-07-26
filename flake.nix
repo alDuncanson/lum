@@ -70,7 +70,7 @@
           pname = "lum";
           inherit version;
           src = ./dispatcher;
-          vendorHash = "sha256-zHlEd6CsKnjk3qvC4MUPh94sGj2YIdvLbvMXwgWxqvo=";
+          vendorHash = "sha256-vw2FQkf3X66T9oA7D0lfkp2NBj+pxxnvcQoo2D8wryk=";
           subPackages = [ "cmd/lum" ];
           ldflags = [
             "-X github.com/alDuncanson/lum/dispatcher/internal/version.Value=${version}"
