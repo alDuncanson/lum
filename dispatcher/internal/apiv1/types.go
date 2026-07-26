@@ -52,6 +52,18 @@ type Status struct {
 	Detail   string          `json:"detail,omitempty"`
 	Stats    Stats           `json:"stats"`
 	Failures []IngestFailure `json:"failures"`
+	// What is happening right now, so `lum status` can answer "is it doing
+	// anything?" — during a first index every count above reads zero for a
+	// minute, which is indistinguishable from being stuck.
+	Activity Activity `json:"activity"`
+}
+
+// Activity is the in-flight work at the moment status was asked.
+type Activity struct {
+	PendingScans     int    `json:"pending_scans"`
+	PendingDocuments int    `json:"pending_documents"`
+	Document         string `json:"document,omitempty"`
+	Stage            string `json:"stage,omitempty"`
 }
 type Error struct {
 	Error string `json:"error"`

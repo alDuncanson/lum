@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -148,11 +150,22 @@ func statusCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("daemon:      %s\n", resp.Daemon)
-			fmt.Printf("worker:      %s (%s)\n", resp.Worker, resp.Detail)
+			// A detail that restates the state ("starting (worker starting)")
+			// is noise; one that explains it is not.
+			if detail := strings.TrimSpace(resp.Detail); detail != "" && detail != resp.Worker && detail != "worker "+resp.Worker {
+				fmt.Printf("worker:      %s (%s)\n", resp.Worker, detail)
+			} else {
+				fmt.Printf("worker:      %s\n", resp.Worker)
+			}
 			fmt.Printf("sources:     %d\n", resp.Stats.Sources)
 			fmt.Printf("documents:   %d\n", resp.Stats.Documents)
 			fmt.Printf("chunks:      %d\n", resp.Stats.Chunks)
 			fmt.Printf("failures:    %d\n", resp.Stats.Failures)
+			// Every count above reads zero for the first minute of a first
+			// index, which looks exactly like nothing happening.
+			if line := activityLine(resp.Activity); line != "" {
+				fmt.Printf("indexing:    %s\n", line)
+			}
 			for _, failure := range resp.Failures {
 				fmt.Printf("  %s (attempts: %d): %s\n", failure.URI, failure.Attempts, failure.Error)
 			}
@@ -182,6 +195,93 @@ func stopCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// activityLine describes in-flight work, or "" when there is none.
+func activityLine(a apiv1.Activity) string {
+	var parts []string
+	if a.Document != "" {
+		stage := a.Stage
+		if stage == "" {
+			stage = "working on"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s", stage, a.Document))
+	}
+	if a.PendingDocuments > 0 {
+		parts = append(parts, fmt.Sprintf("%s queued", plural(a.PendingDocuments, "document")))
+	}
+	if a.PendingScans > 0 {
+		parts = append(parts, fmt.Sprintf("%s queued", plural(a.PendingScans, "scan")))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// removeCmd unregisters a source: `lum remove ~/code/old-project`.
+//
+// Takes a path as readily as an ID, because the ID is a UUID nobody has
+// memorized and the path is what they typed to `lum add`.
+func removeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "remove <source-id | path>",
+		Aliases: []string{"rm"},
+		Short:   "Unregister a source and delete everything indexed from it",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			api := apiclient.New()
+			id, uri, err := resolveSource(cmd.Context(), api, args[0])
+			if err != nil {
+				return err
+			}
+			if err := api.DeleteSource(cmd.Context(), id); err != nil {
+				return err
+			}
+			fmt.Printf("removed %s and everything indexed from it\n", uri)
+			return nil
+		},
+	}
+}
+
+// resolveSource turns a source ID or a path into the registered source.
+func resolveSource(ctx context.Context, api *apiclient.Client, wanted string) (id, uri string, err error) {
+	sources, err := api.ListSources(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	// Match a path the way the user is likely to have typed it: relative,
+	// with ~, or with a trailing slash.
+	var candidate string
+	if abs, absErr := filepath.Abs(expandHome(wanted)); absErr == nil {
+		candidate = filepath.Clean(abs)
+	}
+	for _, source := range sources {
+		if source.ID == wanted || (candidate != "" && filepath.Clean(source.URI) == candidate) {
+			return source.ID, source.URI, nil
+		}
+	}
+	if len(sources) == 0 {
+		return "", "", fmt.Errorf("no sources are registered")
+	}
+	known := make([]string, 0, len(sources))
+	for _, source := range sources {
+		known = append(known, source.URI)
+	}
+	return "", "", fmt.Errorf("no source matches %q; registered: %s", wanted, strings.Join(known, ", "))
+}
+
+func expandHome(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(path, "~"))
+		}
+	}
+	return path
 }
 
 // snippet trims chunk text to a single displayable line.

@@ -60,8 +60,9 @@ keeps it current with file watching. Lum starts on demand and stops itself when
 idle.
 
 ```sh
-lum status                      # daemon, worker, index counts
+lum status                      # daemon, worker, counts, work in flight
 lum top                         # live indexing activity
+lum remove ~/code/my-project    # unregister and delete its vectors
 lum stop
 ```
 

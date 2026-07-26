@@ -21,7 +21,12 @@ import (
 const daemonPollInterval = 250 * time.Millisecond
 
 // ensureDaemon starts the daemon if needed and waits for the worker to be
-// ready, which is what a command that is about to search or ingest needs.
+// ready. Only for callers that cannot proceed without it — searching, and
+// registering a source with `?wait=initial`.
+//
+// Everything else uses ensureDaemonListening. Waiting for the worker to
+// answer `lum sources` meant a first run spent the model download on a
+// command that reads one SQLite table.
 func (c *Client) ensureDaemon(ctx context.Context) error {
 	return c.ensureDaemonUp(ctx, true)
 }

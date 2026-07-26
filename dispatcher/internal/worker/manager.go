@@ -198,7 +198,24 @@ func (m *Manager) Health(ctx context.Context) (HealthResult, error) {
 		}
 		return HealthResult{State: StateIdle, Detail: "worker shed while idle to save memory; will restart on next request"}, nil
 	}
-	return client.Health(ctx)
+
+	health, err := client.Health(ctx)
+	if err != nil && m.processAlive() {
+		// gRPC connections are lazy, so a client exists from the moment the
+		// process was spawned — before lum-worker has bound its socket. The
+		// dial failure in that window is not news, and reporting it verbatim
+		// answers "what is the worker doing" with a sentence about a missing
+		// file in /tmp.
+		return HealthResult{State: StateStarting, Detail: "worker starting"}, nil
+	}
+	return health, err
+}
+
+// processAlive reports whether the supervised process is still running.
+func (m *Manager) processAlive() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sup != nil && !m.sup.Exited()
 }
 
 // EnsureRunning kicks off a respawn if lum-worker isn't running and isn't

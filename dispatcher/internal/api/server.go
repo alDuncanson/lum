@@ -284,12 +284,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if failures == nil {
 		failures = []catalog.IngestFailure{}
 	}
+	pendingScans, pendingDocuments := s.ingestor.QueueDepth()
+	activeDocument, activeStage := s.ingestor.ActiveWork()
 	stats.Failures = len(failures)
 	failureDTOs := make([]apiv1.IngestFailure, 0, len(failures))
 	for _, f := range failures {
 		failureDTOs = append(failureDTOs, apiv1.IngestFailure{SourceID: f.SourceID, URI: f.URI, Attempts: f.Attempts, Error: f.Error, FailedAt: f.FailedAt})
 	}
-	resp := apiv1.Status{Daemon: "ok", Stats: apiv1.Stats{Sources: stats.Sources, Documents: stats.Documents, Chunks: stats.Chunks, Failures: stats.Failures}, Failures: failureDTOs}
+	resp := apiv1.Status{
+		Daemon:   "ok",
+		Stats:    apiv1.Stats{Sources: stats.Sources, Documents: stats.Documents, Chunks: stats.Chunks, Failures: stats.Failures},
+		Failures: failureDTOs,
+		Activity: apiv1.Activity{
+			PendingScans:     pendingScans,
+			PendingDocuments: pendingDocuments,
+			Document:         activeDocument,
+			Stage:            activeStage,
+		},
+	}
 	health, _ := s.dp.Health(r.Context())
 	resp.Worker = string(health.State)
 	resp.Detail = health.Detail

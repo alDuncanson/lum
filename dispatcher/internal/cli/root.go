@@ -6,7 +6,11 @@
 // the CLI can't have it either.
 package cli
 
-import "github.com/spf13/cobra"
+import (
+	"github.com/spf13/cobra"
+
+	productversion "github.com/alDuncanson/lum/dispatcher/internal/version"
+)
 
 // Root builds the top-level `lum` command.
 func Root() *cobra.Command {
@@ -16,11 +20,15 @@ func Root() *cobra.Command {
 		Long: `Lum indexes repositories locally and searches them by meaning from the
 CLI, Neovim, REST API, or MCP. Source code, embeddings, and the index stay
 on your machine.`,
+		// Both spellings: `lum version` for the subcommand people discover in
+		// --help, and `--version` for the flag they type without looking.
+		Version:      productversion.Value,
 		SilenceUsage: true,
 		// main() prints the returned error; without this cobra would
 		// print it a second time.
 		SilenceErrors: true,
 	}
+	root.SetVersionTemplate("{{.Version}}\n")
 	root.AddCommand(
 		serveCmd(),
 		addCmd(),
@@ -32,6 +40,7 @@ on your machine.`,
 		stopCmd(),
 		mcpCmd(),
 		versionCmd(),
+		removeCmd(),
 	)
 	return root
 }

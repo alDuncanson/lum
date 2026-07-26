@@ -27,10 +27,15 @@ Repositories can also be managed explicitly:
 
 ```sh
 lum add ~/code/my-project
-lum status
+lum remove ~/code/my-project    # and everything indexed from it
+lum status                      # health, counts, and what is in flight
 lum top                         # live indexing activity
 lum stop
 ```
+
+`lum status` names the document being worked on and the queue behind it. On a
+first index every count reads zero for a minute while the first batch embeds,
+and without that line it is indistinguishable from being stuck.
 
 Lum starts on demand — the first search, tool call, or `curl` brings it up. It
 

@@ -73,7 +73,7 @@ func (c *Client) AddSource(ctx context.Context, uri string) (AddSourceResult, er
 // scan attempt to finish.
 func (c *Client) EnsureSource(ctx context.Context, uri string) (AddSourceResult, error) {
 	var out AddSourceResult
-	err := c.call(ctx, "POST", "/v1/sources?wait=initial", apiv1.AddSourceRequest{URI: uri}, &out)
+	err := c.callNeedingWorker(ctx, "POST", "/v1/sources?wait=initial", apiv1.AddSourceRequest{URI: uri}, &out)
 	return out, err
 }
 
@@ -115,8 +115,17 @@ func (c *Client) SearchWith(ctx context.Context, query string, opts SearchOption
 	if opts.ExcludeTests {
 		path += "&exclude_tests=true"
 	}
-	err := c.call(ctx, "GET", path, nil, &out)
+	err := c.callNeedingWorker(ctx, "GET", path, nil, &out)
 	return out.Results, err
+}
+
+// DeleteSource unregisters a source and removes every vector it produced.
+//
+// Synchronous, unlike AddSource: it walks the source's documents, deletes
+// their vectors, and only then drops the catalog row, so a returned nil means
+// the index is actually clean.
+func (c *Client) DeleteSource(ctx context.Context, id string) error {
+	return c.call(ctx, "DELETE", "/v1/sources/"+url.PathEscape(id), nil, nil)
 }
 
 // Status is the response of GET /v1/status.
@@ -299,7 +308,26 @@ func (c *Client) doStream(ctx context.Context, path string) (int, string, io.Rea
 // ---- transport ----
 
 // call performs one JSON request/response round trip. `out` may be nil.
+//
+// Starting the daemon on demand is part of this, but waiting for the *worker*
+// is not: listing sources or reading status never touches it, and on a first
+// run that wait is a seventy-megabyte model download. Commands that do need
+// the worker say so with callNeedingWorker.
 func (c *Client) call(ctx context.Context, method, path string, body, out any) error {
+	return c.roundTrip(ctx, method, path, body, out, false)
+}
+
+// callNeedingWorker is call for the requests that cannot be answered until
+// lum-worker is up: searching, and registering a source with `?wait=initial`.
+//
+// The server waits for readiness on its own, so this is not what makes those
+// requests correct. It is what makes a crashed worker say so in seconds
+// instead of looking like a slow search.
+func (c *Client) callNeedingWorker(ctx context.Context, method, path string, body, out any) error {
+	return c.roundTrip(ctx, method, path, body, out, true)
+}
+
+func (c *Client) roundTrip(ctx context.Context, method, path string, body, out any, needsWorker bool) error {
 	var requestBody []byte
 	if body != nil {
 		var err error
@@ -311,7 +339,11 @@ func (c *Client) call(ctx context.Context, method, path string, body, out any) e
 
 	statusCode, status, raw, err := c.do(ctx, method, path, requestBody)
 	if isConnectionRefused(err) || statusCode == http.StatusServiceUnavailable {
-		if err := c.ensureDaemon(ctx); err != nil {
+		start := c.ensureDaemonListening
+		if needsWorker {
+			start = c.ensureDaemon
+		}
+		if err := start(ctx); err != nil {
 			return err
 		}
 		statusCode, status, raw, err = c.do(ctx, method, path, requestBody)

@@ -1,7 +1,9 @@
 package source
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,7 +61,13 @@ func normalizePath(p string) (string, error) {
 	}
 	real, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", fmt.Errorf("resolving symlinks in path %q: %w", abs, err)
+		// EvalSymlinks reports the first component it could not resolve, so a
+		// missing ~/code/nope comes back as "lstat /Users/x/code: ..." — an
+		// answer about a directory that does exist. Say what was asked for.
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("no such directory: %s", abs)
+		}
+		return "", fmt.Errorf("reading path %q: %w", abs, err)
 	}
 	return filepath.Clean(real), nil
 }

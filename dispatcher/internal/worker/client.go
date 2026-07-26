@@ -114,6 +114,12 @@ func requestIDInterceptor(
 func logRPC(ctx context.Context, id, method string, started time.Time, err error) {
 	code := codes.OK
 	level := slog.LevelInfo
+	// Health is polled every two seconds for as long as the daemon runs. At
+	// info level that is forty thousand lines a day saying nothing happened,
+	// which buries the lines that do say something.
+	if method == "/lum.v1.Worker/Health" {
+		level = slog.LevelDebug
+	}
 	if err != nil {
 		code = status.Code(err)
 		level = slog.LevelWarn
