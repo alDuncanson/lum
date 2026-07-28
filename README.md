@@ -90,7 +90,16 @@ lum search --root ~/code/my-project "retry backoff"
 
 That is the whole setup: `--root` registers the repository, indexes it, and
 keeps it current with file watching. Lum starts on demand and stops itself when
-idle.
+idle. The first run downloads the model and embeds the whole repository, and
+reports both while it does:
+
+```text
+⠇ downloading the embedding model (~70 MB, first run)
+⠙ embedding ▕██████████░░░░▏ 64/89 chunks
+```
+
+That line is on stderr and only when stderr is a terminal, so piping to `jq`
+gets clean JSON. `-q` silences it.
 
 ```sh
 lum status                      # daemon, worker, counts, work in flight

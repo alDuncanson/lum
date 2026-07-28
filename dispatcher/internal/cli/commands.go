@@ -47,6 +47,7 @@ func searchCmd() *cobra.Command {
 	var jsonl bool
 	var perFile int
 	var noTests bool
+	var quiet bool
 
 	cmd := &cobra.Command{
 		Use:   "search <query>",
@@ -65,7 +66,12 @@ func searchCmd() *cobra.Command {
 			query := strings.Join(args, " ")
 			api := apiclient.New()
 			if root != "" {
+				// This is the wait worth reporting: `--root` blocks until the
+				// repository's *first* index finishes, which on a cold start is
+				// a model download plus a full embed.
+				stop := startProgress(cmd.Context(), quiet, indexKinds)
 				ensured, err := api.EnsureSource(cmd.Context(), root)
+				stop()
 				if err != nil {
 					return err
 				}
@@ -114,6 +120,7 @@ func searchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonl, "jsonl", false, "emit one compact JSON result per line")
 	cmd.Flags().IntVar(&perFile, "per-file", 2, "chunks any one file may contribute; 0 returns raw nearest neighbours")
 	cmd.Flags().BoolVar(&noTests, "no-tests", false, "omit test files from results")
+	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "do not report indexing progress on stderr")
 	return cmd
 }
 
@@ -228,7 +235,8 @@ func plural(n int, noun string) string {
 // Takes a path as readily as an ID, because the ID is a UUID nobody has
 // memorized and the path is what they typed to `lum add`.
 func removeCmd() *cobra.Command {
-	return &cobra.Command{
+	var removeQuiet bool
+	cmd := &cobra.Command{
 		Use:     "remove <source-id | path>",
 		Aliases: []string{"rm"},
 		Short:   "Unregister a source and delete everything indexed from it",
@@ -239,13 +247,22 @@ func removeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := api.DeleteSource(cmd.Context(), id); err != nil {
+			// Deletion walks every document the source owns, removing vectors
+			// as it goes, and is synchronous by design so a nil error means
+			// the index really is clean. On a large source that is ten seconds
+			// of nothing to look at.
+			stop := startProgress(cmd.Context(), removeQuiet, deleteKinds)
+			err = api.DeleteSource(cmd.Context(), id)
+			stop()
+			if err != nil {
 				return err
 			}
 			fmt.Printf("removed %s and everything indexed from it\n", uri)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVarP(&removeQuiet, "quiet", "q", false, "do not report deletion progress on stderr")
+	return cmd
 }
 
 // resolveSource turns a source ID or a path into the registered source.

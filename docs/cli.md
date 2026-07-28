@@ -33,6 +33,32 @@ lum top                         # live indexing activity
 lum stop
 ```
 
+### Knowing what it is doing
+
+Two commands block for a while, and both now say why on stderr:
+
+```text
+⠙ starting the worker
+⠇ downloading the embedding model (~70 MB, first run)
+⠙ embedding ▕██████████░░░░▏ 64/89 chunks
+⠧ storing ▕███████████░░░▏ 4/5 documents
+```
+
+`lum search --root <repo>` waits for that repository's *first* index — a model
+download plus a full embed, which is twenty seconds on a small repository and
+minutes on a large one. `lum remove` walks every document deleting vectors,
+counting as it goes. Previously both printed nothing until they finished, which
+is indistinguishable from a hang.
+
+The line lives on stderr and only when stderr is a terminal, so
+`lum search --jsonl | jq` receives exactly the JSON and a redirected log gets
+no cursor-control characters. `TERM=dumb` disables it, and `--quiet` / `-q`
+turns it off explicitly. It erases itself when the command finishes, so
+results never share a line with a stale spinner.
+
+This is the same event stream the Neovim integration renders and `lum events`
+prints; none of it is CLI-specific.
+
 Registering a directory inside — or containing — one already registered is
 refused. Documents are scoped to the source that produced them, so an overlap
 is indexed twice and returned twice under two document IDs that nothing can
