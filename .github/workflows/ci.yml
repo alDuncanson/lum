@@ -1,21 +1,18 @@
-# CI is paused while the repository-semantic-search direction is still being
-# built out: `nix flake check` builds the dispatcher and the worker plus the
-# ONNX runtime on two runners, which is a slow signal to wait on for
-# exploratory commits.
+# Builds and tests both binaries plus the Neovim plugin, on Linux and macOS,
+# through `nix flake check` — the same command used locally, so a green run
+# here means the same thing as a green run on a laptop.
 #
-# The job below is unchanged and still runnable by hand from the Actions tab
-# (or `gh workflow run ci.yml`). To resume automatic runs, restore:
-#
-#   on:
-#     push:
-#       branches: [main]
-#     pull_request:
-#
-# Run the same checks locally in the meantime: `nix flake check`.
+# Paused for a while during the pivot to repository semantic search, because
+# waiting on an ONNX Runtime build for every exploratory commit is a slow
+# signal. Back on now that the repository is public: a stranger reading a
+# broken main branch has no way to know it is broken on purpose.
 
 name: CI
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
