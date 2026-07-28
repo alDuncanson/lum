@@ -2,6 +2,8 @@
 /bin/
 /worker/target/
 /result
+/dist/
+/dispatcher/lum
 
 # Local protoc plugin installs. Not needed to build: `nix develop` provides
 # buf and both plugins. Ignored so a stale local copy is never committed.

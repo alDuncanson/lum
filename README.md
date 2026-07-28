@@ -33,9 +33,14 @@ everything after that is offline.
 curl -fsSL https://raw.githubusercontent.com/alDuncanson/lum/main/install.sh | sh
 ```
 
-macOS and Linux, arm64 and x86_64. Downloads the release for your platform,
-verifies it against the published `SHA256SUMS`, and installs to
+Apple Silicon macOS, and Linux on arm64 or x86_64. Downloads the release for
+your platform, verifies it against the published `SHA256SUMS`, and installs to
 `~/.local/bin`. Nothing else to install: ONNX Runtime is statically linked.
+
+Intel macOS is not supported: lum's inference dependency publishes no prebuilt
+ONNX Runtime for it, so there is nothing to link against. Linux needs glibc
+2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39), for the same reason — the
+vendored runtime sets the floor.
 
 **Nix**, as a flake input:
 

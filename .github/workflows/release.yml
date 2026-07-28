@@ -9,11 +9,21 @@
 #
 # Native runners for every target rather than cross-compilation: the ONNX
 # Runtime build script fetches per-target artifacts, and cross-linking that is
-# a much worse trade than four parallel jobs.
+# a much worse trade than parallel jobs.
 #
-# Linux builds on 22.04 rather than 24.04 on purpose — glibc is
-# backward-compatible but not forward-compatible, so the oldest runner sets the
-# oldest distro a release will start on.
+# Linux builds on 24.04, not 22.04. Choosing the older runner to widen distro
+# support was wrong twice over: the prebuilt ONNX Runtime `ort` downloads is
+# itself compiled against glibc 2.38+, so linking on 22.04 (glibc 2.35) fails
+# outright on `__isoc23_strtoull`, and even if it linked, the vendored library
+# — not the runner — sets the floor.
+#
+# There is no Intel macOS target: `ort` publishes no prebuilt ONNX Runtime for
+# x86_64-apple-darwin, so that build fails at the dependency, not here.
+# Supporting it means compiling ONNX Runtime from source or pointing
+# ORT_LIB_LOCATION at a local copy.
+#
+# Every step below is `scripts/build-release.sh`, so this path can be run on a
+# laptop instead of only on a tag.
 #
 # Trigger with a tag (`git tag v0.1.0 && git push --tags`) or from the Actions
 # tab, which builds without publishing so the pipeline can be exercised on a
@@ -41,11 +51,9 @@ jobs:
         include:
           - runner: macos-15
             target: darwin-arm64
-          - runner: macos-15-intel
-            target: darwin-x86_64
-          - runner: ubuntu-22.04
+          - runner: ubuntu-24.04
             target: linux-x86_64
-          - runner: ubuntu-22.04-arm
+          - runner: ubuntu-24.04-arm
             target: linux-arm64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -96,78 +104,12 @@ jobs:
           workspaces: worker
           key: ${{ matrix.target }}
 
-      - name: Build the worker
-        working-directory: worker
-        run: cargo build --release --locked
-
-      - name: Build the dispatcher
-        working-directory: dispatcher
-        run: |
-          go build -trimpath \
-            -ldflags "-s -w -X github.com/alDuncanson/lum/dispatcher/internal/version.Value=${{ steps.version.outputs.version }}" \
-            -o lum ./cmd/lum
-
-      - name: Check the binaries are self-contained
-        run: |
-          # The failure this guards against is silent: a binary that links
-          # something only the build machine has starts fine in CI and not on
-          # anyone else's computer.
-          set -e
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            for bin in dispatcher/lum worker/target/release/lum-worker; do
-              echo "== $bin"; otool -L "$bin"
-              if otool -L "$bin" | grep -vE '^\S|/usr/lib/|/System/Library/'; then
-                echo "$bin links something outside the system libraries" >&2; exit 1
-              fi
-            done
-          else
-            for bin in dispatcher/lum worker/target/release/lum-worker; do
-              echo "== $bin"; ldd "$bin" || true
-              if ldd "$bin" | grep -qiE 'libssl|libcrypto|onnxruntime'; then
-                echo "$bin expects a shared library a user may not have" >&2; exit 1
-              fi
-            done
-          fi
-
-      - name: Smoke test
-        run: |
-          # Proves the pair actually runs, and that the dispatcher finds its
-          # worker as a sibling — which is what the install instructions rely
-          # on. No network: an empty directory has nothing to embed, so no
-          # model is fetched.
-          set -e
-          mkdir -p stage empty
-          cp dispatcher/lum worker/target/release/lum-worker stage/
-          test "$(./stage/lum version)" = "${{ steps.version.outputs.version }}"
-          export LUM_DATA_DIR="$PWD/smoke" LUM_HTTP_ADDR=127.0.0.1:7431
-          ./stage/lum serve &
-          for _ in $(seq 1 100); do
-            ./stage/lum status >/dev/null 2>&1 && break
-            sleep 0.3
-          done
-          ./stage/lum status
-          ./stage/lum stop
-
-      - name: Package
-        id: package
-        run: |
-          name="lum-${{ steps.version.outputs.version }}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp dispatcher/lum worker/target/release/lum-worker "dist/$name/"
-          cp README.md LICENSE "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          cd dist
-          if command -v sha256sum >/dev/null; then
-            sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-          else
-            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
-          fi
-          cat "$name.tar.gz.sha256"
-          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Build, verify, smoke test, and package
+        run: scripts/build-release.sh "${{ steps.version.outputs.version }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.package.outputs.name }}
+          name: lum-${{ steps.version.outputs.version }}-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
