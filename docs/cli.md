@@ -45,6 +45,37 @@ and without that line it is indistinguishable from being stuck.
 
 Lum starts on demand — the first search, tool call, or `curl` brings it up. It
 
+## Tuning memory
+
+Indexing peaks in ONNX Runtime, which sizes its allocations to the largest
+batch it has ever embedded and then keeps that memory until the worker exits.
+Peak scales linearly with the embedding batch, measured on this repository:
+
+| `LUM_EMBED_BATCH_SIZE` | peak worker memory |
+|---|---|
+| 64 (default) | 3979 MB |
+| 32 | 2210 MB |
+| 16 | 1182 MB |
+| 8 | 718 MB |
+
+Smaller batches cost throughput — 16 indexed the same repository in 114s
+against 90s for 64 — so the default favours speed on a machine with memory to
+spare. On a smaller one, set it lower:
+
+```sh
+LUM_EMBED_BATCH_SIZE=16 lum serve
+```
+
+`LUM_EMBED_THREADS` caps the threads ONNX Runtime uses inside one inference
+call. It does not change peak memory at all, only speed, and ORT's default is
+one thread per logical core. On a 16-core machine capping it to 8 was
+consistently faster (59s against 114s at batch 16), which suggests the default
+over-subscribes — but that is one machine, so it is a knob rather than a new
+default.
+
+Neither setting changes the vectors that come out, so switching them does not
+require a re-index.
+
 ## HTTP and events
 
 ```sh
