@@ -200,7 +200,7 @@ require("telescope").setup({
       -- honest: it exercises the same lookup a real user's setup does.
       executable = "lum",
       limit = 50,
-      debounce_ms = 200,
+      debounce_ms = 80,
       -- Both on here, off by default in the plugin: watching indexing happen
       -- is most of the point of a dev session, and waiting on a cold index
       -- inside the picker is the thing being avoided.

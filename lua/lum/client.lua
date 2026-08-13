@@ -150,7 +150,11 @@ local function open(executable, callback)
       end
       if attempts > 600 then
         state.status = "closed"
-        return fail_everything("lum: the daemon did not start; see ~/.lum/daemon.log")
+        return fail_everything(
+          ("lum: no daemon appeared at %s. If `lum` on your PATH is older than 0.2, "):format(M.socket_path())
+            .. "it serves HTTP instead of this socket and will never create one — "
+            .. "point `executable` at the new binary. Otherwise see the daemon log."
+        )
       end
       local timer = vim.uv.new_timer()
       timer:start(50, 0, function()

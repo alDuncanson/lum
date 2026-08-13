@@ -82,8 +82,11 @@
           # pollutes — a real index. Short path: the socket lives here and Unix
           # socket addresses are length-limited.
           export LUM_DATA_DIR="''${LUM_DATA_DIR:-${dataDir}}"
-          export ORT_LIB_LOCATION="${lib.getLib pkgs.onnxruntime}/lib"
-          export ORT_PREFER_DYNAMIC_LINK=1
+          # Deliberately no ORT_LIB_LOCATION here. Setting it would relink
+          # against nixpkgs' onnxruntime, forcing a full rebuild of ort-sys on
+          # the first dev launch and running a different runtime version than
+          # a release does. The sandboxed Nix package sets it because it has no
+          # network; a dev loop does.
 
           fresh=0
           freshModel=0
@@ -131,7 +134,7 @@
           # user's own Neovim — and --user-config exists precisely to run
           # theirs, with their plugins and their notification handler. The
           # isolated mode references the pinned one by store path instead.
-          runtimeInputs = [ pkgs.git rustToolchain pkgs.onnxruntime ];
+          runtimeInputs = [ pkgs.git rustToolchain ];
           text = (devPreamble "/tmp/lum-dev") + ''
             echo "lum:  $(command -v lum)"
             echo "data: $LUM_DATA_DIR"
@@ -173,7 +176,7 @@
         # every existing vector.
         lum-eval = pkgs.writeShellApplication {
           name = "lum-eval";
-          runtimeInputs = [ pkgs.git rustToolchain pkgs.onnxruntime ];
+          runtimeInputs = [ pkgs.git rustToolchain ];
           text = (devPreamble "/tmp/lum-eval") + ''
             # Keep eval/ out of the index. queries.yaml contains the phrases
             # verbatim, so indexing it made the fixture the best match for its
@@ -239,10 +242,8 @@
 
         devShells = {
           default = pkgs.mkShell {
-            packages = [ rustToolchain pkgs.onnxruntime pkgs.curl pkgs.perl ];
+            packages = [ rustToolchain pkgs.curl pkgs.perl ];
             shellHook = ''
-              export ORT_LIB_LOCATION="${lib.getLib pkgs.onnxruntime}/lib"
-              export ORT_PREFER_DYNAMIC_LINK=1
               echo "lum dev shell. Neovim loop: nix develop .#nvim   (or nix run .#nvim)"
             '';
           };
@@ -257,11 +258,9 @@
           # in packages: it would shadow the user's own, which --user-config
           # needs. lum-nvim-dev pins the isolated one by store path.
           nvim = pkgs.mkShell {
-            packages = [ rustToolchain pkgs.onnxruntime pkgs.git lum-nvim-dev ];
+            packages = [ rustToolchain pkgs.git lum-nvim-dev ];
             shellHook = ''
               export LUM_DATA_DIR="''${LUM_DATA_DIR:-/tmp/lum-dev}"
-              export ORT_LIB_LOCATION="${lib.getLib pkgs.onnxruntime}/lib"
-              export ORT_PREFER_DYNAMIC_LINK=1
               if root=$(git rev-parse --show-toplevel 2>/dev/null); then
                 export PATH="$root/target/release:$PATH"
               fi
