@@ -1,0 +1,113 @@
+# lum — local semantic code search, in one process.
+#
+# One binary. It is the daemon, the CLI, the MCP server, and the TUI; which
+# one depends on the subcommand. There is no second executable to install,
+# no inter-process protocol to version, and no serialization hop between
+# the thing that answers a query and the thing that computes the answer.
+
+[package]
+name = "lum"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT"
+description = "Local semantic code search with a Neovim picker"
+repository = "https://github.com/alDuncanson/lum"
+
+[[bin]]
+name = "lum"
+path = "src/main.rs"
+
+# This package is the whole workspace. Declared explicitly so the old
+# dispatcher/ and worker/ trees can be deleted in a later commit without
+# cargo trying to adopt them in the meantime.
+[workspace]
+
+[dependencies]
+# --- async runtime and the one socket ---
+# The daemon is I/O-bound on the socket and CPU-bound on inference. Inference
+# runs on spawn_blocking; everything else is a handful of tasks.
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "io-util",
+  "io-std",
+  "sync",
+  "time",
+  "signal",
+  "process",
+  "fs",
+] }
+
+# --- wire format ---
+# Newline-delimited JSON over a Unix socket. Chosen because the two clients
+# that matter can already speak it with nothing added: Neovim has vim.json
+# and vim.uv, and a shell has jq and socat.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- inference ---
+# ort drives ONNX Runtime directly rather than through fastembed. That is
+# what makes a single Session shared by `&self` across threads possible, so a
+# query never waits behind an ingest batch, and it is what exposes the
+# allocator knobs that keep the arena from growing to gigabytes.
+ort = { version = "2.0.0-rc.10", features = ["ndarray"] }
+ndarray = "0.16"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+# Model download on first run, into the same HuggingFace cache layout the
+# previous fastembed build used, so an existing ~/.lum/models is reused
+# rather than re-downloaded.
+hf-hub = { version = "0.4", default-features = false, features = [
+  "ureq",
+  "rustls-tls",
+] }
+
+# --- storage ---
+# One SQLite file holds sources, documents, chunks, and vectors. Bundled so
+# `cargo build` needs no system sqlite, and so there is exactly one file to
+# back up, copy, or delete.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# --- chunking ---
+tree-sitter = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-nix = "0.3"
+tree-sitter-lua = "0.5"
+tree-sitter-md = "0.5.3"
+
+# --- filesystem ---
+# The `ignore` crate is ripgrep's walker: gitignore semantics at every
+# directory level, including nested files and negations, already correct and
+# already fast. It replaces a hand-rolled matcher.
+ignore = "0.4"
+notify = "8"
+blake3 = "1"
+dirs = "6"
+
+# --- interface ---
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+
+# --- utilities ---
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Only for the page size behind /proc/self/statm; macOS talks to mach directly.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+# ONNX Runtime is the bulk of the binary; thin LTO keeps it lean without
+# making a release build take all afternoon.
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

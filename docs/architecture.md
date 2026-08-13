@@ -1,497 +1,322 @@
 # lum architecture
 
 Lum's product boundary is local semantic code search for a repository. Users
-interact through `lum search --root <repo>`, the Neovim/Telescope extension,
-REST/SSE, or MCP. They install and operate one product. Internally it runs as
-two processes: a **dispatcher** (`lum`) that owns orchestration and every public
-interface, and a **worker** (`lum-worker`) that owns compute. The worker is
-private — the dispatcher starts, supervises, and recovers it, and users never
-install or run it themselves.
+interact through `lum search --root <repo>`, the Neovim/Telescope extension, a
+Unix socket, or MCP. It runs as **one process**: a daemon that owns the index
+and answers queries, started on demand and stopped when idle.
 
-A note on vocabulary: earlier revisions called these the control plane and the
-data plane, borrowed from distributed-systems writing. The split is real but the
-terms oversold it — nothing here is deployed separately or independently
-scalable. Dispatcher and worker describe what the two processes actually do.
+This document explains that design and, more importantly, *why* — including
+where the previous design was right, where it was wrong, and which of the
+things that sounded like they would help actually did.
 
-This document explains that multi-process design and, more importantly, *why*.
-It is written alongside the code; every section names the files it describes.
+See [diagrams.md](diagrams.md) for the same system drawn out.
 
-See [diagrams.md](diagrams.md) for the same system drawn out: protocol
-boundaries, per-interface request flows from CLI to Neovim, the ingestion data
-flow, the representation each payload takes at every hop, and the lifecycle
-state machines.
+## The previous design, and what it cost
+
+Until v0.2 lum ran as two processes: a Go **dispatcher** owning orchestration
+and every public interface, and a Rust **worker** owning parsing, embedding,
+and vector search. They spoke gRPC over a Unix socket; clients spoke HTTP to
+the dispatcher. The split was justified on three grounds, and it is worth being
+specific about how each held up, because two of them did not.
+
+**"It buys memory."** The worker peaked at 4507 MB — measured, on an index of
+811 chunks whose vectors are 1.2 MB — so the dispatcher killed it after five
+minutes idle and respawned it on demand. That machinery worked. But the four
+gigabytes were never the price of doing inference; they were the price of one
+tuning decision: batches of 64 sequences padded to 512 tokens, meeting an arena
+allocator that keeps the largest allocation it ever made. Budgeting batches by
+padded tokens instead of by rows brings the peak to 740 MB in one process, with
+no supervisor, no readiness state machine, and no respawn path. The second
+process was solving a problem the batch size created.
+
+**"Crash isolation."** Real, and genuinely lost. A segfault in native inference
+code now takes the daemon with it rather than just the worker. The mitigation
+is that the daemon is cheap to restart and every client already starts one on
+demand, so the observable cost is a reconnect. That is a smaller loss than it
+sounds, but it is a loss, and it is the honest entry on this side of the ledger.
+
+**"Two kinds of work, two languages."** True, and the learning goal behind the
+whole project. It was achieved. Keeping the split afterwards cost daily
+usability for a benefit already banked.
+
+What the split cost, concretely, was most of the code. Of ~6600 non-generated
+Go lines, roughly 1500 were the actual work — catalog, walk, watch, planner,
+queue, retries. The rest existed because there was a boundary: a supervisor, a
+six-state readiness machine with two "why is it absent" causes, an idle shed
+with lazy respawn, a gRPC client wrapper, a streaming batch protocol with six
+size limits, a contract version, `daemon.lock` plus `daemon-start.lock`, 503
+replay logic, and an SSE bridge to carry worker progress back across. Plus 4800
+lines of tests holding it in place, a protobuf contract, a code generator, and
+its committed output.
+
+It also cost the thing lum is for. Telescope spawned a process per keystroke —
+`sh -c 'sleep 0.2; exec lum search …'` — so typing cost 290 ms per character
+against 7 ms of actual search, and 1300 ms while indexing, because queries and
+ingest shared one mutex around the embedding model.
 
 ## Design constraints
 
-These were chosen up front and drive everything else:
+1. **Local-only.** Not "local-first with a cloud story" — local, period. One
+   Unix socket inside a 0700 directory. No port, no auth, no TLS, no
+   multi-tenancy.
+2. **One process.** Everything below is downstream of this.
+3. **Interactive latency is the budget.** A keystroke in the picker is the
+   design target, not a batch job. Anything that can make a query wait for
+   indexing is a bug, not a tuning problem.
+4. **Interface-driven extension points.** New parsers, chunkers, and languages
+   are new implementations, never architectural changes.
+5. **Nothing to operate.** No Docker, no protoc, no API keys, no second
+   executable. First use needs network access to download the model.
 
-1. **Local-only.** Not "local-first with a cloud story" — local, period.
-   The public API binds loopback and the private inter-process hop uses an
-   owner-only Unix socket. This deletes entire problem classes (auth, TLS,
-   multi-tenancy) and buys a zero-dependency UX.
-2. **One product, two internal processes.** A dispatcher for orchestration
-   (concurrency, servers, scheduling) and a worker for compute (parsing,
-   embedding, vector search — where performance and memory control
-   matter). The worker is private: started, stopped, and recovered by the
-   dispatcher, never installed or run by the user.
-3. **API-first.** The CLI is a pure client of the REST API. If a feature
-   isn't reachable over HTTP, the CLI can't have it — which keeps the
-   API honest and makes every client (CLI, MCP, curl, a future TUI)
-   an equal.
-4. **Interface-driven extension points.** New source types, parsers,
-   chunkers, embedders, and vector stores are new implementations of
-   existing interfaces, never architectural changes.
-5. **No services to operate.** No Docker, no protoc, no model API
-   keys, and no second service for the user to operate. The package contains
-   all executables and native runtime libraries; first use requires network
-   access to download the embedding model.
-
-## Why two processes
-
-The honest test of this decision is what collapsing it would cost, and that
-turns out to be measurable. Indexing 80 documents on an M-series Mac:
-
-| | physical footprint |
-|---|---|
-| dispatcher alone, worker shed | **22 MB** |
-| worker, model loaded, one search | 239 MB |
-| worker, after indexing 80 documents | **3960 MB** |
-
-The worker's peak is dominated by ONNX Runtime's arena allocator, which grows
-to the largest activation it has ever needed — attention over a batch of 64
-sequences at 512 tokens is inherently in the gigabytes — and then keeps it.
-Arenas are not designed to give memory back.
-
-That is what the split buys. Five minutes after the last search, the worker is
-killed and the operating system takes all of it back, leaving a 22 MB daemon
-that still answers `lum status`, still watches for file changes, and still
-starts a new worker the moment anyone searches. In one process there is no
-equivalent move: dropping the model frees what the allocator chooses to free,
-and a background editor integration that holds four gigabytes until you
-reboot is not one anyone would keep installed.
-
-Two smaller reasons follow the same shape. A segfault in native inference code
-takes the worker down and not the API, and recovery is a respawn on the next
-request rather than a lost daemon. And the two halves are genuinely different
-work — orchestration and scheduling against parsing and linear algebra — so
-they get to be written in the language each is good at.
-
-What it costs is one extra file to install, which the installer and the
-release archive both handle. That is the trade, and it is not close.
-
-(The 3960 MB peak is worth attacking on its own — a smaller embedding batch
-would cut it directly. It is a real number about this design's *current*
-tuning, not an argument that four gigabytes is required.)
-
-## Internal processes
-
-### Dispatcher — `dispatcher/` (Go, binary: `lum`)
-
-Owns *what and when*: which sources exist, what documents they contained
-at last scan, what changed, what to (re)ingest, and the public API.
-
-| Package | Responsibility |
-|---|---|
-| `internal/cli` | cobra commands; `serve` runs the daemon, the rest are auto-starting HTTP clients |
-| `internal/config` | data dir + addresses, env overrides |
-| `internal/api` | REST endpoints (the system's only front door) |
-| `internal/apiclient` | typed Go client for the REST API (shared by cli and mcpserver) |
-| `internal/mcpserver` | MCP stdio server: four tools, each a thin wrapper over the REST API |
-| `internal/source` | the `Source` interface, URI → implementation dispatch, `localdir` |
-| `internal/catalog` | SQLite bookkeeping: sources, documents, hashes, chunk counts, ingest failures |
-| `internal/ingest` | scan planner + document runner: diff source state, batch jobs, retry failures |
-| `internal/worker` | lum-worker child-process supervisor + typed gRPC client wrapper |
-| `internal/gen` | generated proto code (committed, so `go build` just works) |
-
-### Worker — `worker/` (private, binary: `lum-worker`)
-
-Owns *bytes and math*: parse → chunk → embed → store/search. Spawned by
-`lum serve` as a child process; users never run it directly.
+## The modules
 
 | Module | Responsibility |
 |---|---|
-| `service.rs` | gRPC glue: compose pipeline, hop to blocking threads, map errors |
-| `pipeline/parser.rs` | `Parser` trait + registry (plain text, markdown) |
-| `pipeline/language.rs` | MIME type → tree-sitter grammar, and whether that language wants heading context |
-| `pipeline/chunker/` | `Chunker` trait; syntax-aware splitting for code and markdown, word windows for everything else |
-| `pipeline/embedder.rs` | `Embedder` trait + fastembed (bge-small-en-v1.5) |
-| `store/` | `VectorStore` trait + qdrant-edge implementation |
+| `main.rs`, `cli.rs` | clap commands; `serve` runs the daemon, everything else is a socket client |
+| `config.rs` | data dir, socket path, the knobs that decide how much memory inference may want |
+| `wire.rs` | the protocol: request, reply, event |
+| `server.rs` | socket listener, per-connection framing, idle shutdown |
+| `client.rs` | socket client, on-demand daemon spawn, lock-based liveness |
+| `engine.rs` | the whole pipeline: sources, scans, planning, ingest, search |
+| `db.rs` | one SQLite file — sources, documents, chunks, vectors |
+| `index.rs` | in-memory int8 vectors, exhaustive scan, exact rescore |
+| `embed.rs` | ONNX Runtime sessions, tokenization, batching, pooling |
+| `model.rs` | model download and cache resolution |
+| `scan.rs`, `watch.rs`, `mime.rs` | walking, change detection, file typing |
+| `parse.rs`, `chunk/`, `language.rs` | bytes → text → chunks, tree-sitter |
+| `events.rs` | the broadcast bus every observer reads |
+| `render.rs`, `top.rs` | terminal output and the live TUI |
+| `mcp.rs` | MCP stdio server, four tools, all socket clients |
 
-The worker is **stateless between calls**: every RPC carries all
-context it needs (document IDs, source IDs, content). It can be killed
-and restarted at any time without coordination — its only persistent
-artifacts are the vector index and the model cache.
+## The protocol — `wire.rs`
 
-## The contract — `proto/lum/v1/worker.proto`
+Newline-delimited JSON over one Unix socket. Every message is one JSON object
+on one line, and there are exactly two kinds: a **reply** carries `id`, matching
+the request that asked for it; an **event** carries `event` and arrives
+unsolicited after a `subscribe`.
 
-Five RPCs: `Health`, `IngestDocument`, `IngestBatch`, `DeleteDocument`, and
-`Search`. The narrowness is the point: repository discovery, file watching,
-CLI output formats, Telescope, and MCP all live above this line and reuse these
-RPCs.
-
-Codegen is available in `nix develop` without a system protobuf toolchain:
-- Go: `buf generate` → protoc-gen-go(-grpc), output committed.
-- Rust: `build.rs` → protox at build time, nothing committed.
-
-## Data ownership: one home per fact
-
-```
-catalog.db  (dispatcher)  WHAT EXISTS    sources, documents, content
-                                          hashes, chunk counts, failures
-vectors/    (worker)      WHAT IT MEANS   embeddings + chunk payloads
+```text
+→ {"id":1,"op":"search","q":"retry backoff","limit":10}
+← {"id":1,"ok":{"results":[…]}}
+← {"event":"progress","phase":"embedding","done":48,"total":96}
 ```
 
-The catalog is never asked "what matches this query?"; the vector store
-is never enumerated to answer "what have we ingested?". Search results
-are self-describing because chunk payloads carry their provenance
-(document id, source id, URI, text, and inclusive 1-based line range).
+This replaced HTTP+JSON on one hop and gRPC+protobuf on another. The reason is
+not that JSON is better than protobuf; it is that the two clients that matter
+can speak this with nothing added. Neovim has `vim.json` and `vim.uv`; a shell
+has `jq` and `socat`. The previous design's API-first rule — "if a feature is
+not reachable over HTTP, the CLI cannot have it" — was a good rule that
+produced a bad outcome, because the editor's hot path had to reach HTTP through
+a process spawn.
 
-### Chunk identity and deletion
+Requests on one connection are handled concurrently and answered independently,
+which is what lets the picker keep one connection for a session and fire a
+query per keystroke down it.
 
-Vector points get **deterministic IDs**: `UUIDv5(namespace, "{document_id}/{chunk_index}")`,
-so re-ingesting the same document_id overwrites points in place instead
-of writing new ones — idempotent, and no needless churn.
+## One database — `db.rs`
 
-Deletion (a shrinking re-ingest's stale tail, or an explicit
-`DeleteDocument`) is a **filtered delete** on a payload index over
-`document_id` (`qdrant-edge`'s `DeletePointsByFilter`), not a chunk
-count. Earlier, the wire contract carried `previous_chunk_count` /
-`chunk_count` so the worker could derive exactly which point IDs to
-remove — a physical detail of the vector store's layout leaking across
-the process boundary, and a cross-process invariant ("catalog
-chunk_count must exactly match points on disk") that could drift after a
-hard crash. The filtered delete removes that invariant entirely: the
-dispatcher no longer tracks or echoes back a count for this to work (#3).
+Sources, documents, chunks, and the vectors themselves, in one SQLite file.
 
-### Document identity and source deletion
+The previous design split "what exists" (a SQLite catalog) from "what it means"
+(a qdrant-edge index), and then spent real effort keeping them agreeing:
+deterministic point IDs, filtered deletes, a flush ordered before the catalog
+write, a rule named *durability before bookkeeping*, and a known gap for the
+drift that could still happen after a hard crash.
 
-Documents are keyed on `(source_id, uri)`, not `uri` alone: nothing
-prevents registering two sources whose scans see the same path (an
-overlapping directory, or later a source type that reuses another's
-URI space), and a globally-unique `uri` let the second source's scan
-find and silently adopt the first source's document row —
-misattributed provenance with no error raised. Scoping identity to the
-source that produced it makes that impossible; each source's rows are
-independent even at an identical URI (#4).
+All of that was the cost of two stores. With one, a document and its chunks and
+their vectors are written in a single transaction and removed by a foreign key.
+There is no ordering to get right, no invariant to audit, and no `lum verify` to
+write. It is also 10× smaller on disk: 59 MB became 6 MB, because the old store
+was 27 MB of segments and 32 MB of write-ahead log around 1.2 MB of vectors.
 
-`DELETE /v1/sources/{id}` walks every document the source owns, deletes
-its vectors from the worker, *then* deletes its catalog row —
-deliberately in that order and synchronously, unlike the fire-and-forget
-`POST /v1/sources`. The schema's `ON DELETE CASCADE` only ever cleans up
-catalog rows; deleting the source row first, before vectors are
-confirmed gone, would orphan them as unreachable-but-still-searchable
-ghosts. If any document fails to delete, the source and its remaining
-documents are left in place (not partially cleaned up) so the client
-gets a clear error and can retry, rather than a 200 papering over
-lingering vectors.
+Two connections, not one. WAL lets a reader proceed while a writer holds the
+write lock, so a query does not queue behind an ingest transaction.
 
-### Durability ordering
+## Search — `index.rs`
 
-`EdgeStore` flushes qdrant-edge **before** acking an ingest, because the
-dispatcher writes its catalog row (hash + chunk count) after the ack.
-If vectors could be lost after that row is written, the next scan would
-see a matching hash, skip the document forever, and search would
-silently miss it. Rule: durability before bookkeeping.
+A flat array, scanned exhaustively. No HNSW, no segments, no second store.
 
-Relatedly, the supervisor uses `exec.Command`, not `exec.CommandContext`
-— CommandContext SIGKILLs the child on context cancellation, racing the
-graceful shutdown that lets qdrant-edge flush. (Found the hard way; see
-the comment in `supervisor.go`.)
+At this scale an approximate structure is not merely unnecessary, it is slower:
+811 chunks × 384 dimensions is 311k multiply-adds. Even a 100k-chunk monorepo is
+~38M operations, a few milliseconds that autovectorize. HNSW starts winning
+somewhere past a million chunks, which is two orders of magnitude beyond what
+anyone points a personal code-search tool at.
 
-## Ingestion flow
+Two representations, for two jobs:
 
-```
-lum add ~/Documents
-  └▶ POST /v1/sources ──▶ catalog row ──▶ enqueue scan ──▶ 202
-                                             │
-                              scan planner (deduped by source)
-                                             ▼
-                    Source.Scan → refs (uri, mime, content hash)
-                                             │
-                       diff against catalog by uri + hash
-                       ├─ unchanged → skip (the common case)
-                       ├─ new/changed ─┐
-                       └─ vanished ────┴▶ document job queue
-                                             │
-                                  one document runner
-                                  ├─ Read → gRPC IngestBatch
-                                  │          └▶ parse→chunk→embed→upsert
-                                  │    → catalog upsert (hash, count)
-                                  └─ gRPC DeleteDocument → catalog delete
-```
+- **In memory, int8.** Symmetric per-vector quantization: 388 bytes per chunk
+  rather than 1536, so 100k chunks is 39 MB resident rather than 153 MB.
+- **On disk, f32.** The exact vector, used to rescore the shortlist.
 
-Scans are idempotent and cheap when nothing changed, which makes the
-recovery story trivial: rescan everything on daemon startup.
+Rescoring is what makes the approximation invisible. The int8 scan may get the
+order of near-ties slightly wrong, so the top few hundred are re-scored in f32
+and re-sorted, and the result is identical to a full exact search. Chunk *text*
+stays on disk and is fetched only for results, so an index costs its vectors and
+nothing else in resident memory.
 
-For the repository-oriented path, `lum search --root <path>` canonicalizes that
-directory and ensures its source exists before searching. The Telescope
-extension first discovers the current Git root and passes it through the same
-CLI path, so neither interface requires a prior `lum add`. Directory discovery
-recognizes the supported source and configuration extensions and applies
-`.gitignore` rules at each directory level, including nested files and
-negations. Hidden trees that Lum excludes are skipped consistently by both scans
-and watches.
+## Memory: what worked and what did not
 
-Pending scans are deduplicated by source. Explicit and startup scans run
-immediately; fsnotify change notifications have a one-second debounce path.
-Local directory watches are recursive (new directories are added dynamically),
-skip the same hidden trees as scans, and degrade to five-minute full rescans if
-OS watch limits or event delivery fail. A planner turns each authoritative
-source snapshot into document upsert/delete jobs. Those jobs are consumed by a single document runner —
-single because ingestion throughput is bounded by the embedding model
-anyway — and
-small documents are combined into cross-document batches. The job channel is
-the "event bus" in miniature; a real broker could replace it without changing
-what flows through it.
+The rewrite's headline number, and the one that most invited wrong conclusions.
+Recorded here because all three of these sounded equally plausible beforehand.
 
-Read, ingest, and delete failures are persisted per `(source_id, uri)` and
-retried by scheduling another source reconciliation after 1s, 2s, and 4s.
-Already-successful documents hash-skip during those retries. The failure is
-cleared on success (or when a never-indexed document disappears); exhausted
-failures remain visible through `/v1/status` and `lum status`.
+**Token-budgeted batching worked.** Activation memory scales with rows × padded
+width, so a fixed row count makes a batch of long chunks cost sixteen times a
+batch of short ones — and it is the long batch that sets the arena's high-water
+mark forever. Budgeting by padded tokens holds that product flat. Sweeping it on
+this repository:
 
-On daemon startup, lumd starts its HTTP API immediately while lum-worker loads its
-model and vector store. `/v1/status` reports `worker` as `starting`,
-`downloading-model`, `ready`, `unavailable`, `idle`, or `crashed` — the last two
-synthesized by `worker.Manager` rather than reported by lum-worker (see idle
-shedding below).
-Startup watches and scans begin only after readiness.
+| tokens per call | peak RSS | full index |
+|---|---|---|
+| 8192 | 1229 MB | 70 s |
+| 4096 | 1096 MB | 64 s |
+| 2048 | 779 MB | 59 s |
+| 1024 | **748 MB** | **51 s** |
 
-A scan that gets queued before lum-worker is ready is neither rejected nor failed.
-The planner takes its filesystem snapshot regardless (that needs no worker),
-and the document runner then blocks inside `worker.Manager.awaitReady` until
-lum-worker reports ready, bounded by `StartupTimeout`. That is what keeps a
-transient startup state from being persisted as an ingestion failure. Earlier,
-a `requireDataPlaneReady` gate returned 503 from every scan-triggering endpoint
-to achieve the same thing; blocking one level down replaced it, so callers no
-longer have to distinguish "not ready yet" from a real error. `apiclient` still
-treats a 503 like a refused connection — wait for readiness, then replay the
-request — which is also what makes on-demand daemon startup invisible.
+Smaller is both leaner *and* faster, because attention is quadratic in the
+padded width and a wide batch spends most of it on padding. Length-sorting
+before batching is what makes the budget tight, since padding is per batch.
 
-The dispatcher and the worker communicate over `lum-worker.sock` inside the 0700 data
-directory, avoiding a fixed private port and preventing other local users from
-bypassing the HTTP API. lum-worker also watches a pipe on stdin and shuts down when
-the dispatcher disappears, including after an ungraceful parent exit.
+**Dropping the session did not work.** ORT's CPU arena belongs to the
+environment, not the session, so releasing the ingest session left RSS
+unchanged at 1.2 GB. `release_ingest` still runs — it frees the model weights
+and lets the allocator reuse the arena — but it is not why peak memory came
+down, and the version of this document that claimed otherwise was wrong.
 
-## Search flow
+**Thread count is not a memory knob.** Sweeping ORT's intra-op threads from 8 to
+1 moved the peak by under 3% and made indexing 2.5× slower. It is a speed and
+politeness knob; indexing gets half the machine's cores because it is background
+work competing with whatever the user is actually doing.
+
+Where it lands: ~350 MB with only the query session live, peaking around 740 MB
+while indexing and plateauing there across repeated full re-indexes rather than
+creeping.
+
+## Concurrency: two sessions — `embed.rs`
+
+The previous build shared one `Mutex<TextEmbedding>` between queries and bulk
+ingest. A 64-passage batch held it for 735 ms, so a keystroke in the picker
+queued behind one — and you index right after saving a file, which is exactly
+when you search.
+
+ort's `Session::run` takes `&mut self`, so a session cannot be shared lock-free.
+Rather than tune the lock, there are **two sessions**: one reserved for queries,
+one for ingest. A query never waits for indexing because it never touches the
+session indexing is using. Measured at 9 ms median under full indexing load,
+against 1300 ms before.
+
+The ingest session is created when indexing starts and dropped when the queue
+drains, so its weights are not resident during the long stretches when nothing
+is being indexed.
+
+## Ingestion — `engine.rs`
 
 ```
-lum search --root <repo> "..."
-  ├─▶ discover/register repository (idempotent)
-  └─▶ GET /v1/search ──▶ gRPC Search
-                           └▶ embed("query: ...") → qdrant-edge
-                              nearest-neighbor (cosine) → hits
+lum add ~/code/thing
+  └▶ register source ──▶ queue scan ──▶ reply
+                             │
+                    scan (deduped by source)
+                             ▼
+              walk with gitignore → refs (uri, mime, fingerprint)
+                             │
+              diff against the database by fingerprint, then hash
+              ├─ unchanged → skip (the common case)
+              ├─ new/changed ─┐
+              └─ vanished ────┴▶ batch → parse → chunk → embed → one transaction
 ```
 
-Chunks are embedded as `"passage: ..."` and queries as `"query: ..."` —
-the asymmetric-prefix convention bge models are trained with. An
-optional `?source=<id>` restricts results to one source, applied as a
-payload-indexed filter on `source_id` (the same mechanism `document_id`
-filtering uses for deletes, see below) (#7).
+Scans are stat-only in the common case: a scan reports a size+mtime fingerprint
+and only the files whose fingerprint moved are read and hashed. Hashing the
+whole tree on every scan would make watching a large repository cost a full read
+of it per save.
 
-Chunking tracks the source offsets consumed by each chunk. Those inclusive,
-1-based start/end lines are stored in vector payloads and returned through gRPC,
-REST, and the CLI rather than reconstructed by clients. Human CLI output uses
-them directly; `--json` emits a single JSON result document and `--jsonl` emits
-one result per line. The Telescope extension in `lua/` runs
-`lum search --root <workspace> --jsonl`, parses that stream, and uses each hit's
-URI and line range for preview and selection. It remains an ordinary CLI client
-and has no access to the catalog, vector files, or private gRPC socket.
+Anything written within two seconds is hashed anyway. That is git's "racily
+clean" problem: a file modified again inside the same mtime tick, with no change
+in size, has an identical fingerprint and its edit is invisible.
 
-## MCP — `internal/mcpserver`
+Scans are idempotent and cheap when nothing changed, which makes recovery
+trivial — rescan everything on startup — and makes it safe for the watcher to be
+approximate. `notify` watches recursively, so the previous build's tree-of-
+watches bookkeeping is gone. A watch that fails degrades to a five-minute
+fallback rescan: latency, not correctness.
 
-`lum mcp` speaks the Model Context Protocol over stdio: an agent spawns
-it as a child process and calls its tools (`search`, `add_source`,
-`list_sources`, `status`) via JSON-RPC on stdin/stdout.
+Read, parse, and store failures are recorded per document and retried with 1s,
+2s, 4s backoff. A failure the input caused rather than lum — a PDF, a file with
+no parser — is recorded as *permanent* and skipped by later scans, instead of
+being rediscovered three more times per scan.
 
-```
-agent ──spawns──▶ lum mcp ──HTTP──▶ lumd (started on first tool call)
-        stdio (JSON-RPC)
-```
+Ingest runs on its own OS thread as plain synchronous code, because every step
+of it is blocking work and expressing that as blocking code avoids parking a
+runtime worker inside ONNX.
 
-Two design points worth copying:
+## Lifecycle
 
-- **It's a client, not a daemon.** Every tool delegates to the REST API
-  through `internal/apiclient` — the same typed client the CLI uses.
-  The MCP process holds no state, opens no database, and touches no
-  gRPC; kill it freely.
-- **Typed tools, inferred schemas.** The official Go SDK
-  (`modelcontextprotocol/go-sdk`) derives each tool's JSON Schema from
-  plain Go structs, validates arguments before our handlers run, and
-  returns outputs as structured content. The handler bodies are ~10
-  lines each.
+Commands connect to the socket. A refused connection takes an exclusive
+`daemon-start.lock`, rechecks, and spawns a detached `lum serve` only if still
+needed, so concurrent commands converge on one daemon.
 
-One stdio rule: the process must never print to stdout (that's the
-protocol channel); diagnostics go to stderr.
+The daemon holds `daemon.lock` for its entire lifetime. A lock that can be taken
+is the authoritative "it is fully gone" signal — deliberately not "the socket
+stopped answering", because the listener closes before the database and the
+model do, so the socket can go quiet while the process is still mid-cleanup.
+`lum stop` waits on the lock for that reason, and `serve` takes it before doing
+anything else so a failed startup is detectable in milliseconds rather than by
+waiting out a timeout.
 
-## On-demand daemon lifecycle
+Every request resets a 15-minute idle timer; an open event subscription counts
+as activity, because something is watching this daemon work.
 
-CLI commands and MCP tools first try the loopback HTTP API. A refused
-connection takes an exclusive `daemon-start.lock` flock, rechecks the API, and
-starts a detached `lum serve` only when still needed. This makes concurrent
-commands converge on one daemon. The daemon itself holds `daemon.lock` until
-all resources finish shutting down, preventing a replacement from overlapping
-the old lum-worker process. Calls poll `/v1/status` through model startup before
-replaying the original request; waits are bounded at five minutes and detached
-output goes to `daemon.log`.
+## Events — `events.rs`
 
-Every HTTP request resets a 15-minute idle timer. When it expires, the normal
-ordered shutdown path stops ingestion, drains HTTP, and gracefully terminates
-lum-worker. The next client request starts a fresh daemon.
+A broadcast bus with a 512-event ring buffer. Every observer reads the same
+stream: the CLI spinner, the Neovim progress bridge, the Neovim notifier, and
+`lum top` differ only in which kinds they subscribe to and what they draw.
+Nothing computes a number the stream does not carry — `top`'s docs/min is
+`indexed / elapsed`, arithmetic a `jq` user could do.
 
-`lum stop` (`POST /v1/shutdown`) ends the daemon on demand rather than
-waiting out the idle timer, going through the identical ordered path: the
-handler responds 202 before signaling, so the client always gets an
-answer, then the daemon's main loop selects on that signal exactly like
-an OS SIGINT or the idle timer firing. `apiclient.Client.Stop` then waits
-for `daemon.lock` to actually release before returning — deliberately
-*not* for the HTTP port to stop answering, since `listener.Close()` runs
-before `dp.Close()` (stops lum-worker) and `cat.Close()` in the shutdown
-sequence, so the port can go quiet while the process is still mid
-cleanup (confirmed by hand: the PID stayed alive nearly a second after
-`/v1/status` started refusing connections). The flock is the same
-authoritative "fully gone" signal the on-demand spawn above already
-relies on before starting a replacement. `Stop` never triggers that
-auto-spawn on a refused connection, unlike every other command — nothing
-listening just means nothing to stop.
+One flat schema discriminated by `event`, rather than a type per kind:
+consumers are a Lua table lookup and a `match`, and a union of twelve shapes
+would make both worse for a payload nobody stores.
 
-Deleting the data directory is only a full reset once the daemon has
-actually exited: on Unix, `rm -rf` only removes the directory entry, and
-a still-running process keeps its open files (catalog, vector index)
-alive by inode regardless, so it keeps serving the old state and
-`lum status`/`lum search` look completely unaffected by the deletion
-until the process holding them exits.
+## Neovim
 
-## Worker idle shedding
+The picker is a custom async Telescope finder over one socket held for the
+session (`lua/lum/client.lua`), rather than `new_job` spawning a process per
+keystroke. Two things follow that the old shape could not do:
 
-lum-worker carries its own, independent (and shorter) idle lifetime nested
-inside lumd's: `worker.Manager` tracks the last ingest/search RPC and, by
-default, gracefully stops lum-worker after 5 minutes without one — reclaiming the
-hundreds of MB the ONNX model and qdrant-edge hold resident, the sleeper
-benefit of splitting the two processes into separate processes in the first
-place. Deliberately excluded from "activity": `/v1/status` and other health
-checks, so monitoring lum doesn't itself keep the model warm.
+- **A query does not wait for indexing.** It asks for what is indexed now and
+  renders it, while progress for the rest arrives on the same connection. The
+  old picker blocked on the first full index, showing nothing, and Telescope
+  restarted that wait on every keystroke.
+- **A superseded keystroke is cancelled**, not merely ignored. Debouncing is a
+  `vim.uv` timer that gets reset, so the request is never sent — where the old
+  one was `sleep 0.2` inside a shell that had already been spawned.
 
-A request that actually needs the worker (add source, scan, search)
-respawns it lazily and waits for readiness, exactly mirroring the on-demand
-daemon flow above one level down: `lum status` reports `worker: idle`
-while shed, `starting`/`downloading-model` while the respawn is in flight,
-then `ready`. An unexpected lum-worker crash *recovers* identically — Manager
-treats a dead supervisor the same as a deliberate shed, so the next request
-respawns it rather than failing until `lum serve` is restarted by hand.
-
-It does not *report* identically, though, and that distinction was learned the
-hard way. Reporting a crash as `idle` meant every startup failure explained
-itself as "worker shed while idle to save memory": confident, specific, and
-wrong, with nothing pointing at the real cause. `Manager` now records why no
-worker is running — `absenceShed` from the idle timer, `absenceExited` from a
-process that ended on its own or never started — and reports `crashed` with the
-exit status or spawn error in `detail` for the latter.
-
-Two waits shortened as a result. `awaitReady` watches `Supervisor.Done()` while
-polling for readiness, so a worker that exits during startup ends the wait
-immediately instead of polling a socket nothing is listening on until
-`StartupTimeout`. And `apiclient` treats `crashed` as terminal rather than
-something to wait out; if the daemon itself exited (its own startup failed), a
-free `daemon.lock` proves it, since the daemon holds that lock for its entire
-lifetime. Both cases used to cost five minutes and produce
-`context deadline exceeded`; they now fail in seconds and name `daemon.log`.
-
-## Internal event bus
-
-`internal/events.Bus` is lum's one observability contract: a small
-in-memory pub/sub that system components publish to and any number of
-subscribers consume from, with a ring buffer (512 events by default) so a
-late-joining subscriber gets recent context. There's no persistence —
-htop doesn't have history either.
-
-One flat `Event` schema (a tagged union discriminated by `Kind`) covers
-two kinds of message:
-
-- **Discrete events**: `scan_started`/`scan_finished` bracket a source
-  scan; `document_queued → document_reading → document_embedding →
-  document_ingested`/`document_failed` trace one document through the
-  pipeline (`document_deleted` for the delete path); `worker_state_changed`
-  fires on every lum-worker readiness transition; `rpc_completed` covers
-  whole-RPC latency for both the worker gRPC hop and the public HTTP
-  API.
-- **Periodic snapshots** (`kind: snapshot`, every 2s): scan queue depth,
-  the document runner's current document and stage, worker state,
-  and index totals — a heartbeat for anything that wants a gauge reading
-  rather than tracking discrete events itself.
-
-Every event carries the request ID (#11) so it correlates with logs. The
-dispatcher doesn't reach into lum-worker for finer-grained visibility: it
-knows when it sent an IngestBatch RPC and when it returned, and treats
-that duration as the "embedding" phase from outside, the same opaque
-treatment of the gRPC boundary described above. This bus is a
-prerequisite for `lum top`.
-
-## Events endpoint (SSE)
-
-`GET /v1/events` exposes the bus above the process boundary as
-Server-Sent Events: one-directional, plain HTTP, so `curl -N
-localhost:7420/v1/events` works with zero client-side dependencies — the
-same API-first rule that keeps every other endpoint curl-able. On
-connect, the handler replays the ring buffer, publishes one fresh
-snapshot (so a new subscriber doesn't wait up to 2s for the next tick),
-then streams live; an optional `?types=k1,k2` filter narrows which
-`Kind`s are sent. A `: heartbeat` comment every 15s keeps the connection
-alive through idle proxies and, deliberately, counts as activity against
-lumd's own idle timer (#13) — a connected observability client is real
-activity, not just the request that opened the stream.
-
-## `lum top`
-
-A bubbletea TUI over `GET /v1/events` (`internal/cli/top.go`), added
-through `internal/apiclient` exactly like every other command — a pure
-REST client with no privileged side channel into the daemon. It starts
-the daemon on demand on connection refused, the same as any other CLI
-command (#13).
-
-The renderer is deliberately dumb: `topModel.apply` folds one `Event` at
-a time into display state with a single `switch` on `Kind`, and the
-rates it shows (docs/min, chunks/min) are `ingestedTotal / elapsed` — the
-same arithmetic a `curl -N | jq` user watching the raw stream could do.
-No semantics live in the TUI that aren't already in the event schema
-(#19).
+Progress is emitted as LSP `$/progress` from an in-process client that attaches
+to no buffer (`lua/lum/lsp.lua`). Whatever renders rust-analyzer's progress
+renders lum's, in the same place and style. That module is unchanged by this
+rewrite: it was transport-agnostic and correct.
 
 ## Key dependency choices
 
 | Choice | Over | Because |
 |---|---|---|
-| qdrant-edge (embedded) | Qdrant server in Docker | zero services; "SQLite for vectors"; beta risk fenced behind the `VectorStore` trait |
-| fastembed / ONNX | Ollama or API embeddings | in-process, auto-downloaded, offline after first run |
-| SQLite via modernc (pure Go) | mattn/go-sqlite3 (cgo) | `go build` works without a C toolchain |
-| channel + worker | NATS/Kafka | right-sized for local-only; interface allows upgrading |
-| REST between CLI and daemon | gRPC everywhere | curl-ability; gRPC learning happens on the inter-process hop |
-
-## Hardening nits (#7)
-
-Small fixes from an architecture review:
-
-- **Swallowed `time.Parse` errors** in catalog row scanners now propagate
-  instead of silently producing a zero-value `time.Time` — in practice
-  only reachable via DB corruption, since every write goes through
-  `time.Format`, but a corrupted row should error, not look like it was
-  created at the Unix epoch.
-- **`WalkDir` now logs** (`slog.Warn`) when it skips an unreadable path
-  during a scan instead of silently continuing. One bad permission still
-  doesn't hide every document, but now it's diagnosable instead of an
-  invisible gap in the index.
-- **gRPC error taxonomy**: `run_blocking` (worker) mapped every
-  pipeline error to `Status::internal`, including "no parser registered
-  for MIME type," which is the caller's fault, not lum-worker's. A small
-  `InvalidArgument` marker error (downcast from the `anyhow::Error`) lets
-  it choose `Status::invalid_argument` instead — a first step toward
-  distinguishing retryable from permanent failures, not a full
-  taxonomy.
-- **`SearchRequest` gained a `source_id` filter** (see Search flow above)
-  — the first field a real user asks for.
+| one SQLite file | SQLite + qdrant-edge | no cross-store invariant to maintain; 10× smaller on disk |
+| flat int8 scan + f32 rescore | HNSW | exact, no index to build, faster below ~1M chunks |
+| `ort` directly | fastembed | control over sessions, batching, and the allocator — the whole memory fix |
+| `ignore` | a hand-rolled matcher | ripgrep's walker: nested gitignores, negations, already correct |
+| NDJSON over a Unix socket | HTTP + gRPC | both clients speak it with nothing added; no codegen |
+| `notify` recursive watch | fsnotify + manual recursion | deletes the subtree bookkeeping entirely |
 
 ## Known gaps (deliberate, ordered)
 
-1. **Catalog/vector drift after a hard crash** is prevented by flush
-   ordering, but there's no `lum verify` to audit/repair the invariant.
-2. **Scan status is coarse** — `lum status` shows counts, not per-scan
-   progress. A jobs table in the catalog would fix this.
+1. **A crash in native inference takes the daemon with it.** The cost the
+   two-process design was paying for. Recovery is a reconnect, since every
+   client already starts a daemon on demand.
+2. **The arena is never returned to the OS.** Peak is bounded and plateaus, but
+   a process that has indexed once keeps ~700 MB until it idles out. Fixing it
+   properly needs `enable_cpu_mem_arena=false`, which `ort` does not expose.
+3. **Scan progress is coarse.** `lum status` shows the current document and a
+   queue depth, not a per-scan percentage.
+4. **No hybrid search.** BM25 alongside the vector scan would be cheap at this
+   size and would fix the queries the eval still misses, which are mostly ones
+   where the exact identifier is in the file and the phrasing is not.

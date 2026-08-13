@@ -7,16 +7,15 @@ results feel better to whoever just changed them.
 ```sh
 nix run .#eval                          # against the existing eval index
 nix run .#eval -- --fresh               # wipe and re-index first
-nix run .#eval -- -eval.json /tmp/after.json -eval.label "tree-sitter"
 ```
 
 Or directly, against whatever daemon is already running:
 
 ```sh
-cd dispatcher && go test -tags eval -v -timeout 30m ./internal/eval/
+cargo test --release --test eval -- --ignored --nocapture
 ```
 
-It runs on its own port and data directory (`/tmp/lum-eval`), so a measurement
+It runs against its own data directory (`/tmp/lum-eval`), so a measurement
 never depends on — or disturbs — your real index. Use `--fresh` whenever the
 change under test invalidates existing vectors, which anything touching the
 chunker, the parsers, or the model does.
@@ -24,15 +23,26 @@ chunker, the parsers, or the model does.
 ## Current
 
 `bge-small-en-v1.5`, path context in the embedded text, tree-sitter chunking
-for code and markdown, at most two chunks per file, 45 phrase queries over 70
-documents / 705 chunks:
+for code and markdown, at most two chunks per file, 54 phrase queries over 113
+documents / 1119 chunks:
 
-| recall@1 | recall@5 | recall@10 | MRR | chunk hit | distinct@5 |
-|---|---|---|---|---|---|
-| 0.578 | 0.844 | 0.956 | 0.686 | 0.706 | 3.76 |
+| recall@1 | recall@5 | recall@10 | MRR | chunk hit |
+|---|---|---|---|---|
+| 0.59 | 0.89 | 0.89 | 0.693 | 0.73 |
 
-(The five test-seeking queries added below moved these off the 40-query
-numbers in the sections that follow. They are harder than average.)
+> [!NOTE]
+> **These are not comparable with anything below them.** The single-process
+> rewrite changed every path in the answer key — a fixture pointing at deleted
+> files measures nothing but its own staleness — so both the queries and the
+> corpus are new. Everything from "Syntax chunking beat word windows" down was
+> measured against the two-process tree and is kept as a record of *why* the
+> retrieval pipeline is shaped the way it is, not as a baseline to beat.
+>
+> What can be compared: the rewrite ported chunking, prefixing, and the model
+> unchanged, and a query run against both builds returned the same files, the
+> same chunks, and the same scores to three decimals. MRR landing at 0.693
+> against the old tree's best 0.692 is consistent with that, and the identical
+> results are the stronger evidence.
 
 Everything below is how it got there. Read the columns, not the rows across
 sections: the corpus is this repository and it changes underneath the

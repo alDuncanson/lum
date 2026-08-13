@@ -4,8 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/alDuncanson/lum/main/install.sh | sh
 #
 # Downloads the release for this platform, checks it against the published
-# SHA256SUMS, and puts both binaries in one directory. They have to stay
-# together: `lum` looks for `lum-worker` beside itself.
+# SHA256SUMS, and installs a single binary.
 #
 # Environment:
 #   LUM_INSTALL_DIR   where to put the binaries (default ~/.local/bin)
@@ -30,7 +29,7 @@ os=$(uname -s)
 case "$os" in
   Darwin) os=darwin ;;
   Linux)  os=linux ;;
-  *) die "no lum build for $os. lum needs a Unix domain socket, so Windows is not supported; WSL works." ;;
+  *) die "no lum build for $os. lum listens on a Unix domain socket, so Windows is not supported; WSL works." ;;
 esac
 
 arch=$(uname -m)
@@ -106,14 +105,18 @@ unpacked="$tmp/lum-$version-$target"
 [ -x "$unpacked/lum" ] || [ -f "$unpacked/lum" ] || die "$archive did not contain lum"
 
 mkdir -p "$INSTALL_DIR"
-# Both, into the same directory: lum finds lum-worker as a sibling.
-for binary in lum lum-worker; do
-  cp "$unpacked/$binary" "$INSTALL_DIR/$binary.tmp"
-  chmod 755 "$INSTALL_DIR/$binary.tmp"
-  # Replacing a running binary in place fails on some systems; a rename does
-  # not, and is atomic.
-  mv -f "$INSTALL_DIR/$binary.tmp" "$INSTALL_DIR/$binary"
-done
+cp "$unpacked/lum" "$INSTALL_DIR/lum.tmp"
+chmod 755 "$INSTALL_DIR/lum.tmp"
+# Replacing a running binary in place fails on some systems; a rename does not,
+# and is atomic.
+mv -f "$INSTALL_DIR/lum.tmp" "$INSTALL_DIR/lum"
+
+# A daemon from a previous version is still running and still answering. Every
+# command talks to whatever holds the socket, so without this the binary you
+# just installed is not the one that serves your next search.
+if [ -S "''${LUM_DATA_DIR:-$HOME/.lum}/lum.sock" ]; then
+  "$INSTALL_DIR/lum" stop >/dev/null 2>&1 || true
+fi
 
 say "installed lum $version to $INSTALL_DIR"
 

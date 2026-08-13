@@ -100,8 +100,8 @@ A successful index produces no notifications at all. Discrete events go
 through `vim.notify`, where your notifier renders and persists them:
 
 ```text
-worker crashed: exited: exit status 3
-could not index src/huge.json: document exceeds 32 MiB ingest limit
+lum could not start: no network access to download the embedding model
+could not index src/vendored.min.js: no parser registered for MIME type
 ```
 
 The split is deliberate: `vim.notify` is built for discrete messages, and
@@ -109,7 +109,7 @@ progress is a status display. It is why fidget exists separately from
 nvim-notify.
 
 Each phase counts whatever unit it actually advances in. Embedding counts
-chunks rather than files on purpose: the worker embeds a whole batch at once,
+chunks rather than files on purpose: a whole batch embeds at once,
 so no file finishes until they all do, but chunks complete steadily throughout
 — and they are far more uniform in cost than files, so the bar moves smoothly
 instead of lurching. The percentage tracks the current phase rather than the
@@ -117,12 +117,11 @@ whole scan, because the phase is the only thing that reports a denominator.
 
 Errors stay on screen until dismissed. Progress stays while it runs. Routine
 information times out. Nothing is said about a warm rescan that changed
-nothing, idle shedding, or the respawn after it — a channel that reports
-non-events is one you learn to ignore.
+nothing — a channel that reports non-events is one you learn to ignore.
 
 ```lua
 notify = {
-  verbose = false,     -- add per-document failures, no-op scans, worker churn
+  verbose = false,     -- add per-document failures, no-op scans, lifecycle churn
   progress = true,     -- false leaves only notifications; a table configures
                        -- it: { mode = "auto" | "lsp" | "window" } plus, for
                        -- the window fallback, anchor / row_offset /
