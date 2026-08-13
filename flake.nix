@@ -28,12 +28,26 @@
         # One crate at the repository root, so this is Crane's ordinary path:
         # no nested manifest, no protobuf contract to keep in the source tree,
         # no second package to wrap around the first.
+        #
+        # A denylist, not an allowlist. The allowlist this replaced named `src`
+        # and the manifests, and silently omitted `rustfmt.toml` — so the
+        # sandboxed fmt check ran with rustfmt's defaults and failed on 164
+        # diffs that `cargo fmt` calls clean. Anything else it forgot would have
+        # failed the same quiet way, and `tests/` needs `eval/` while the eval
+        # fixture asserts against paths all over the repository, so the set of
+        # things that must be present is closer to "everything" than to a list
+        # worth maintaining.
+        #
+        # The cost is that editing a doc rebuilds the crate. It does not rebuild
+        # the dependencies — `buildDepsOnly` is keyed on the lockfile — so that
+        # is ~30 s, not the ONNX Runtime build.
         rustSrc = lib.cleanSourceWith {
-          src = ./.;
+          src = lib.cleanSource ./.;
           filter = path: type:
             let rel = lib.removePrefix "${toString ./.}/" (toString path);
-            in rel == "src" || lib.hasPrefix "src/" rel
-              || rel == "Cargo.toml" || rel == "Cargo.lock";
+            in !(rel == "target" || lib.hasPrefix "target/" rel
+              || rel == "result" || lib.hasPrefix "result/" rel
+              || rel == "dist" || lib.hasPrefix "dist/" rel);
         };
         rustArgs = {
           pname = "lum";
