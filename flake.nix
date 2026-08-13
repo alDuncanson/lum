@@ -61,6 +61,12 @@
           # whose entire point is being managed.
           ORT_LIB_LOCATION = "${lib.getLib pkgs.onnxruntime}/lib";
           ORT_PREFER_DYNAMIC_LINK = "1";
+          # Drops the `vendored-onnxruntime` default feature, and with it ort's
+          # downloader — which is `ureq` + `native-tls`, so on Linux it wants
+          # openssl and pkg-config in the sandbox to fetch a file this build
+          # does not fetch. Applies to every crane invocation below so they all
+          # share one set of artifacts.
+          cargoExtraArgs = "--no-default-features";
         };
         cargoArtifacts = craneLib.buildDepsOnly rustArgs;
         lum = craneLib.buildPackage (rustArgs // {

@@ -52,7 +52,11 @@ serde_json = "1"
 # what makes a single Session shared by `&self` across threads possible, so a
 # query never waits behind an ingest batch, and it is what exposes the
 # allocator knobs that keep the arena from growing to gigabytes.
-ort = { version = "2.0.0-rc.10", features = ["ndarray"] }
+ort = { version = "2.0.0-rc.10", default-features = false, features = [
+  "std",
+  "ndarray",
+  "tracing",
+] }
 ndarray = "0.16"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 # Model download on first run, into the same HuggingFace cache layout the
@@ -97,6 +101,24 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["vendored-onnxruntime"]
+
+# Let `ort` fetch and link its own ONNX Runtime build.
+#
+# On by default, because it is what makes `cargo build` work with no system
+# dependency and what a release binary needs to run anywhere. Off for the Nix
+# build, which links nixpkgs' copy through ORT_LIB_LOCATION — and whose sandbox
+# has no network to download with regardless.
+#
+# Worth a feature rather than a build-time environment variable because of what
+# it drags in: the downloader is `ureq` with `native-tls`, which on macOS is
+# Security.framework but on Linux is `openssl-sys`, `pkg-config`, and
+# `libssl-dev`. That is an entire TLS stack compiled into the *build* graph to
+# fetch one file, and it is why `nix flake check` failed on Linux while passing
+# on macOS.
+vendored-onnxruntime = ["ort/download-binaries", "ort/copy-dylibs"]
 
 # Only for the page size behind /proc/self/statm; macOS talks to mach directly.
 [target.'cfg(target_os = "linux")'.dependencies]
