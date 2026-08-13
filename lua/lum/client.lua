@@ -26,22 +26,44 @@ local state = {
 }
 
 --- Where the daemon listens. Mirrors src/config.rs.
+---
+--- `os.getenv` rather than `vim.env`, and memoized. `vim.env` goes through
+--- Vimscript's `getenv`, which throws E5560 in a fast event context — and the
+--- connect retry runs inside a `vim.uv` timer callback, which is one. The
+--- first attempt would succeed and every retry after it would throw, so a
+--- daemon that was not already running could never be connected to.
+local socket_path
 function M.socket_path()
-  local dir = vim.env.LUM_DATA_DIR
-  if not dir or dir == "" then
-    dir = vim.fs.joinpath(vim.uv.os_homedir() or ".", ".lum")
+  if not socket_path then
+    local dir = os.getenv("LUM_DATA_DIR")
+    if not dir or dir == "" then
+      dir = (vim.uv.os_homedir() or ".") .. "/.lum"
+    end
+    socket_path = dir .. "/lum.sock"
   end
-  return vim.fs.joinpath(dir, "lum.sock")
+  return socket_path
+end
+
+--- Hand control back to a consumer, always on the main loop.
+---
+--- Connect, write, and timer callbacks all run in a fast event context, where
+--- most of the Vim API is unavailable. Scheduling here means no caller of this
+--- module has to know that — which is the mistake `socket_path` above records.
+local function resolve(callback, ...)
+  local args = { ... }
+  vim.schedule(function()
+    callback(unpack(args))
+  end)
 end
 
 local function fail_everything(reason)
   local pending, waiters = state.pending, state.waiters
   state.pending, state.waiters = {}, {}
   for _, callback in pairs(pending) do
-    callback(reason, nil)
+    resolve(callback, reason, nil)
   end
   for _, waiter in ipairs(waiters) do
-    waiter(reason)
+    resolve(waiter, reason)
   end
 end
 
@@ -58,6 +80,8 @@ local function teardown(reason)
   fail_everything(reason or "lum: connection closed")
 end
 
+--- Called from `on_data`, which is `vim.schedule_wrap`ped — so consumers here
+--- are already on the main loop and need no further scheduling.
 local function dispatch(message)
   if message.id then
     local callback = state.pending[message.id]
@@ -98,12 +122,23 @@ end
 
 --- Start a daemon. One spawn per session at most, and only when nothing is
 --- listening — the binary starts itself on demand for every other client too.
+---
+--- Through a shell so the daemon's stderr lands in `daemon.log`, which is where
+--- every other way of starting it puts them and where its own error messages
+--- tell you to look. `vim.system` would otherwise buffer them inside Neovim and
+--- discard them on exit, so a daemon that failed to start left an empty log and
+--- nothing to read. Values after the script are positional parameters, never
+--- shell source.
 local function spawn(executable)
   if state.spawn_attempted then
     return
   end
   state.spawn_attempted = true
-  vim.system({ executable, "serve" }, { detach = true })
+  local log = M.socket_path():gsub("lum%.sock$", "daemon.log")
+  vim.system(
+    { "sh", "-c", 'exec "$1" serve >>"$2" 2>&1', "lum-spawn", executable, log },
+    { detach = true }
+  )
 end
 
 local function open(executable, callback)
@@ -133,7 +168,7 @@ local function open(executable, callback)
         local waiters = state.waiters
         state.waiters = {}
         for _, waiter in ipairs(waiters) do
-          waiter(nil)
+          resolve(waiter, nil)
         end
         return
       end
@@ -144,6 +179,7 @@ local function open(executable, callback)
       -- first run includes a 133 MB model download, so the ceiling is
       -- generous; every attempt after the first is a cheap connect.
       if attempts == 1 then
+        -- vim.system touches the Vim API, and this is a connect callback.
         vim.schedule(function()
           spawn(executable)
         end)
@@ -171,6 +207,13 @@ function M.request(executable, request, callback)
   open(executable, function(err)
     if err then
       return callback(err, nil)
+    end
+    -- The connection can go away between `open` resolving and this running —
+    -- an idle-timeout shutdown lands exactly here. Without the guard that is a
+    -- Lua error indexing a nil pipe, thrown from inside a Telescope callback,
+    -- which reports as a broken picker rather than a closed socket.
+    if state.status ~= "open" or not state.pipe then
+      return callback("lum: connection closed before the request was sent", nil)
     end
     local id = state.next_id
     state.next_id = id + 1
