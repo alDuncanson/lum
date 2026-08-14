@@ -1,16 +1,10 @@
 -- One socket, held open for the session.
 --
--- The previous plugin spawned a process per keystroke: Telescope's `new_job`
--- finder ran `sh -c 'sleep 0.2; exec lum search …'`, so every character cost a
--- shell, a Go binary start, an HTTP connection, and a fresh gRPC dial. Measured
--- end to end that was 290 ms per keystroke on a quiet daemon and 1.3 s while
--- indexing, against 7 ms of actual search.
---
--- This connects once with `vim.uv` and speaks newline-delimited JSON down that
--- one pipe. A query costs a write and a read. Debouncing is a `vim.uv` timer
--- rather than `sleep(1)` in a shell, so it is free and — the part that matters
--- — cancellable: a superseded keystroke stops existing instead of racing to
--- deliver results nobody wants.
+-- Connects once with `vim.uv` and speaks newline-delimited JSON down that one
+-- pipe, so a query costs a write and a read (~5 ms per keystroke, measured)
+-- rather than a process spawn. Debouncing is a `vim.uv` timer: free, and —
+-- the part that matters — cancellable, so a superseded keystroke stops
+-- existing instead of racing to deliver results nobody wants.
 
 local M = {}
 

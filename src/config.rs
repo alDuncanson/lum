@@ -82,9 +82,8 @@ impl Model {
     }
 
     /// HuggingFace repository and the ONNX file within it. Both variants are
-    /// published by Xenova in the layout `hf-hub` caches, which is also the
-    /// layout the previous fastembed-based build left in `~/.lum/models` — so
-    /// an existing install reuses its download instead of repeating it.
+    /// published by Xenova in the layout `hf-hub` caches, so an existing
+    /// `~/.lum/models` download is reused instead of repeated.
     pub fn repo(self) -> (&'static str, &'static str) {
         match self {
             Self::Standard => ("Xenova/bge-small-en-v1.5", "onnx/model.onnx"),
@@ -214,7 +213,7 @@ impl Config {
         self.data_dir.join("models")
     }
 
-    /// Leftovers from the two-process build. Reported once at startup rather
+    /// Leftovers from lum 0.1's data layout. Reported once at startup rather
     /// than deleted: they are the user's data, and an index is expensive
     /// enough to rebuild that removing it silently would be rude.
     pub fn stale_paths(&self) -> Vec<PathBuf> {
@@ -277,8 +276,8 @@ fn env_usize(key: &str) -> Result<Option<usize>> {
     }
 }
 
-/// Accepts the Go-style durations the previous build documented (`5m`,
-/// `90s`, `2h`) so existing shell profiles keep working.
+/// Accepts durations the way people write them in shell profiles: `500ms`,
+/// `90s`, `5m`, `2h`.
 fn env_duration(key: &str) -> Result<Option<Duration>> {
     let Ok(raw) = std::env::var(key) else {
         return Ok(None);
@@ -317,8 +316,7 @@ mod tests {
 
     #[test]
     fn durations_accept_go_style_units() {
-        // The previous build documented LUM_WORKER_IDLE_TIMEOUT=5m, and a
-        // profile that says that should not start meaning five seconds.
+        // A profile that says 5m must never start meaning five seconds.
         for (raw, expected) in
             [("90s", 90.0), ("5m", 300.0), ("2h", 7200.0), ("500ms", 0.5), ("30", 30.0)]
         {

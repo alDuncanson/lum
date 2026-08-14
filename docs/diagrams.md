@@ -3,12 +3,6 @@
 The same system [architecture.md](architecture.md) describes in prose, drawn
 out: boundaries, request flows, ingestion, and the lifecycles.
 
-Much shorter than it used to be. The previous version of this file was 891
-lines, and most of that was the two-process design's protocol boundaries,
-readiness state machine, batch wire framing, and nested idle lifetimes. Those
-diagrams were accurate and are now unnecessary, which is the clearest single
-measure of what the rewrite removed.
-
 ## 1. Boundaries and protocols
 
 There is one process and one boundary that matters: the socket between a client
@@ -48,8 +42,8 @@ flowchart LR
 | daemon → disk | SQLite | the daemon alone |
 | daemon → HuggingFace | HTTPS, first run only | model download |
 
-Everything else that used to be a boundary — HTTP between CLI and dispatcher,
-gRPC between dispatcher and worker, SSE for events — is now a function call.
+Everything inside the daemon — parsing, embedding, storage, search — is a
+function call behind that one socket.
 
 ## 2. Process lifecycle
 
@@ -174,11 +168,10 @@ flowchart TD
     DEL --> IDX
 ```
 
-The single transaction is what replaced an ordering rule. Previously the
-vectors lived in one store and the bookkeeping in another, so the flush had to
-happen before the catalog write or a crash between them would leave a document
-recorded as indexed with no vectors behind it — invisible forever, because the
-next scan would see a matching hash and skip it.
+The single transaction is the whole consistency story: a document's
+bookkeeping and its vectors commit together, so a crash can never record a
+document as indexed while losing its vectors — a state the next scan would
+otherwise skip forever, because the stored hash would match.
 
 ### 4.2 Batching
 
@@ -193,7 +186,7 @@ flowchart LR
 Sorted descending so the widest batch runs first and the arena's high-water
 mark is set immediately rather than creeping up over a long index. Budgeting by
 padded tokens rather than rows is what holds peak memory flat; the measurements
-are in [architecture.md](architecture.md#memory-what-worked-and-what-did-not).
+are in [architecture.md](architecture.md#memory).
 
 ## 5. State machines
 
@@ -210,9 +203,9 @@ stateDiagram-v2
     failed --> [*]: reported, then the daemon exits
 ```
 
-Four states, against the previous design's six plus two "why is it absent"
-causes. The difference is that there is no longer a second process that can be
-absent for reasons distinct from its own health.
+Four states, and `failed` carries the reason — the difference between a
+daemon that explains itself and five minutes of polling a socket that will
+never answer.
 
 ### 5.2 Ingest failure and retry
 
@@ -232,8 +225,8 @@ stateDiagram-v2
     retry_3 --> ok
 ```
 
-The `permanent` branch is new. A PDF will not become parseable on the third
-attempt, and rediscovering that once per scan forever is noise in every
+The `permanent` branch exists because a PDF will not become parseable on the
+third attempt, and rediscovering that once per scan forever is noise in every
 subsequent status.
 
 ### 5.3 One idle lifetime
@@ -246,11 +239,9 @@ stateDiagram-v2
     gone --> [*]
 ```
 
-The previous design had two nested idle timers — the worker shed after 5
-minutes, the daemon exited after 15 — because the worker was the expensive half
-and could be killed independently. There is now one process and one timer; the
-inference session is released when the ingest queue drains, which is a function
-call rather than a lifecycle.
+One process, one timer. The expensive transient — the ingest inference
+session — is released the moment the queue drains, which is a function call
+rather than a lifecycle.
 
 ## 6. Identity and ownership
 

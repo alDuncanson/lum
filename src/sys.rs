@@ -1,9 +1,8 @@
 //! Resident set size, reported by `lum status`.
 //!
-//! lum exists in its current shape because of a memory measurement, so making
-//! that measurement a first-class thing the tool reports about itself — rather
-//! than something you go to `ps` for — is the point. A regression here should
-//! be visible to whoever notices it first.
+//! Memory is the number lum is most accountable for, so the tool reports it
+//! about itself rather than sending anyone to `ps`. A regression should be
+//! visible to whoever notices it first.
 
 /// Current resident bytes, or 0 if the platform will not say.
 pub fn resident_bytes() -> u64 {

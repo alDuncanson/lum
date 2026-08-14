@@ -16,10 +16,9 @@
 -- tells them something broke. `verbose = true` adds per-document failures,
 -- scans that changed nothing, and routine lifecycle churn.
 --
--- The transport is the shared socket (lum/client.lua) rather than a subprocess
--- streaming events over stdout. That removes the failure mode this module used
--- to have to apologize for: a stream that died on its own, leaving a spinner up
--- forever with no way to tell that from "nothing is happening".
+-- The transport is the shared socket (lum/client.lua), and subscriptions
+-- survive the daemon idling out and restarting — a spinner must never outlive
+-- the work it reports.
 
 local M = {}
 
@@ -175,7 +174,7 @@ function M.state_transition(to, detail)
     if progress_on() then
       progress.report("model", {
         title = "downloading the embedding model",
-        message = "~70 MB, first run",
+        message = "~130 MB, first run",
       })
     end
     return

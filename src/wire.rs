@@ -11,11 +11,9 @@
 //! ← {"event":"progress","phase":"embedding","done":48,"total":96}
 //! ```
 //!
-//! It is deliberately something both clients that matter can speak with
-//! nothing added. Neovim has `vim.json` and `vim.uv`; a shell has `jq` and
-//! `socat`. Replacing HTTP+JSON on one hop and gRPC+protobuf on another with
-//! this deleted a code generator, a schema compiler, a build script, and the
-//! committed output of all three.
+//! It is deliberately something every client can speak with nothing added:
+//! Neovim has `vim.json` and `vim.uv`, a shell has `jq` and `socat`, and any
+//! editor with async I/O is a couple of hundred lines from a working client.
 //!
 //! Requests on one connection may be pipelined and are answered
 //! independently, so a client is never blocked behind its own slow call —
@@ -77,8 +75,6 @@ pub struct SearchRequest {
     /// promising results it does not have would be a lie. The picker does
     /// not: it wants whatever is indexed *now*, this keystroke, and watches
     /// the progress events on the same connection to know more is coming.
-    /// The old build could not offer that choice — one process spawn per
-    /// keystroke had nowhere to put the second half of the answer.
     #[serde(default)]
     pub wait: bool,
 }
@@ -215,8 +211,8 @@ pub struct Status {
     /// Resident bytes held by the searchable vectors themselves.
     pub vector_memory_bytes: u64,
     /// Whether the ingest inference session is currently loaded. It is
-    /// released when indexing goes idle, which is where the old build's
-    /// second process used to go.
+    /// released when indexing goes idle, so its memory is not held between
+    /// edits.
     pub ingest_session: bool,
     pub pending_scans: usize,
     pub pending_documents: usize,

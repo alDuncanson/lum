@@ -1,10 +1,7 @@
 //! Live change detection.
 //!
-//! `notify` watches recursively on every platform lum supports, which deletes
-//! the tree-of-watches bookkeeping the previous build needed: adding each new
-//! subdirectory as it appeared, removing whole subtrees on delete, re-adding
-//! everything when a `.gitignore` changed, and a special case for renames
-//! being unreliable on one platform.
+//! `notify` watches recursively on every platform lum supports, so there is
+//! no per-directory watch bookkeeping to maintain.
 //!
 //! Watching is an optimization, never the source of truth. A scan is
 //! authoritative and cheap when nothing changed, so a watch that fails or

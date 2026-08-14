@@ -1,15 +1,12 @@
 -- Telescope picker for lum.
 --
--- The finder is a custom async one rather than `new_job`. Telescope's job
--- finder spawns a process per keystroke, which is what made the old picker cost
--- 290 ms per character; this one writes a line to a socket that is already
--- open. Two things follow that the process-per-keystroke shape could not do:
+-- The finder is a custom async one rather than `new_job`: Telescope's job
+-- finder spawns a process per prompt change, where this one writes a line to
+-- a socket that is already open. Two properties follow:
 --
--- - **The query does not wait for indexing.** It asks for what is indexed right
+-- - **A query does not wait for indexing.** It asks for what is indexed right
 --   now and renders it, while progress for the rest arrives on the same
---   connection and is reported through `$/progress`. The old picker blocked on
---   the first full index, showing nothing, and Telescope restarted that wait on
---   every keystroke.
+--   connection and is reported through `$/progress`.
 -- - **A superseded keystroke is cancelled**, not merely ignored. Debouncing is
 --   a `vim.uv` timer that gets reset, so the request is never sent.
 
@@ -35,10 +32,9 @@ local config = {
   -- Register and index the current Git repository when Neovim opens, rather
   -- than when the picker is first opened.
   --
-  -- Much less load-bearing than it used to be: the picker no longer blocks on
-  -- a first index, so a cold repository shows results as they arrive instead
-  -- of nothing at all. Still worth turning on if you use lum regularly, since
-  -- it moves the embedding off the moment you first want to search.
+  -- The picker never blocks on a first index — a cold repository shows
+  -- results as they arrive — but turning this on moves the embedding off the
+  -- moment you first want to search.
   index_on_open = false,
 }
 

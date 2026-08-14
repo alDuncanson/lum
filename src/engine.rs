@@ -1,14 +1,8 @@
-//! The engine: everything that used to be split across two processes.
+//! The engine: sources, scans, ingest, and search, in one address space.
 //!
-//! Scanning, planning, chunking, embedding, storing, and searching all happen
-//! here, in one address space. What that deletes is worth naming, because it
-//! was most of the previous build: a child-process supervisor, a readiness
-//! state machine with six states and two "why is it absent" causes, an idle
-//! shed with a lazy respawn, a gRPC client wrapper, a streaming batch protocol
-//! with six size limits, a contract version, and the tests for all of it.
-//!
-//! What survives is the part that was always real work: diff a directory
-//! against what we indexed, embed what changed, and answer queries fast.
+//! Everything between "a file changed" and "here are your results" happens
+//! here: diff a directory against what is indexed, embed what changed, store
+//! it, and keep answering queries while that is still happening.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -76,7 +70,7 @@ impl EmbedderState {
     fn detail(&self) -> String {
         match self {
             Self::Starting => "loading".to_owned(),
-            Self::Downloading => "downloading the embedding model (~70 MB, first run)".to_owned(),
+            Self::Downloading => "downloading the embedding model (~130 MB, first run)".to_owned(),
             Self::Ready(embedder) => {
                 let (query, ingest) = embedder.threads();
                 format!(
@@ -202,7 +196,7 @@ impl Engine {
             *state.write().unwrap() = EmbedderState::Downloading;
             bus.publish(Event::state(
                 "downloading-model",
-                "downloading the embedding model (~70 MB, first run)",
+                "downloading the embedding model (~130 MB, first run)",
             ));
         })?;
         let embedder = Arc::new(embedder);
@@ -273,8 +267,7 @@ impl Engine {
     /// Wait until the model is loaded, or fail with the reason it will not be.
     ///
     /// Bounded by `startup_timeout`. A failed load is terminal and reported
-    /// immediately rather than waited out — the old build's equivalent cost
-    /// five minutes and produced `context deadline exceeded`.
+    /// immediately rather than waited out.
     async fn embedder(&self) -> Result<Arc<Embedder>> {
         let deadline = Instant::now() + self.config.startup_timeout;
         loop {

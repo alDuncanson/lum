@@ -149,7 +149,7 @@ Unix, `rm -rf` removes the directory entry but a running process keeps its open
 files alive by inode, so it keeps serving the old index and `lum status` looks
 unaffected until it exits. `lum stop` first.
 
-If you are upgrading from v0.1, `catalog.db`, `vectors/` and `lum-worker.sock`
+Upgrading from lum 0.1: its `catalog.db`, `vectors/` and `lum-worker.sock`
 are left in place and reported once at startup. They are yours to delete; lum
 will not remove an index it did not write.
 
@@ -171,5 +171,5 @@ Durations accept `500ms`, `90s`, `5m`, `2h`.
 
 `LUM_EMBED_TOKEN_BUDGET` is the one worth knowing about. It bounds padded
 tokens per inference call, which is what activation memory actually scales
-with; smaller is both leaner and faster, up to a point. The measurements are in
-[architecture.md](architecture.md#memory-what-worked-and-what-did-not).
+with; smaller is both leaner and faster, up to a point. The measurements are
+in [architecture.md](architecture.md#memory).

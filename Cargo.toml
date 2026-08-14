@@ -1,9 +1,7 @@
-# lum — local semantic code search, in one process.
+# lum — local semantic code search.
 #
-# One binary. It is the daemon, the CLI, the MCP server, and the TUI; which
-# one depends on the subcommand. There is no second executable to install,
-# no inter-process protocol to version, and no serialization hop between
-# the thing that answers a query and the thing that computes the answer.
+# One binary: the daemon, the CLI, the MCP server, and the TUI, depending on
+# the subcommand.
 
 [package]
 name = "lum"
@@ -18,9 +16,7 @@ repository = "https://github.com/alDuncanson/lum"
 name = "lum"
 path = "src/main.rs"
 
-# This package is the whole workspace. Declared explicitly so the old
-# dispatcher/ and worker/ trees can be deleted in a later commit without
-# cargo trying to adopt them in the meantime.
+# This package is the whole workspace.
 [workspace]
 
 [dependencies]
@@ -48,10 +44,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # --- inference ---
-# ort drives ONNX Runtime directly rather than through fastembed. That is
-# what makes a single Session shared by `&self` across threads possible, so a
-# query never waits behind an ingest batch, and it is what exposes the
-# allocator knobs that keep the arena from growing to gigabytes.
+# ort drives ONNX Runtime directly: it is what allows separate query and
+# ingest sessions, so a query never waits behind an ingest batch, and it
+# exposes the allocator knobs that keep the arena from growing to gigabytes.
 ort = { version = "2.0.0-rc.10", default-features = false, features = [
   "std",
   "ndarray",
@@ -59,9 +54,8 @@ ort = { version = "2.0.0-rc.10", default-features = false, features = [
 ] }
 ndarray = "0.16"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
-# Model download on first run, into the same HuggingFace cache layout the
-# previous fastembed build used, so an existing ~/.lum/models is reused
-# rather than re-downloaded.
+# Model download on first run, into HuggingFace's standard cache layout, so
+# an existing ~/.lum/models is reused rather than re-downloaded.
 hf-hub = { version = "0.4", default-features = false, features = [
   "ureq",
   "rustls-tls",
@@ -85,7 +79,7 @@ tree-sitter-md = "0.5.3"
 # --- filesystem ---
 # The `ignore` crate is ripgrep's walker: gitignore semantics at every
 # directory level, including nested files and negations, already correct and
-# already fast. It replaces a hand-rolled matcher.
+# already fast.
 ignore = "0.4"
 notify = "8"
 blake3 = "1"
@@ -116,8 +110,8 @@ default = ["vendored-onnxruntime"]
 # it drags in: the downloader is `ureq` with `native-tls`, which on macOS is
 # Security.framework but on Linux is `openssl-sys`, `pkg-config`, and
 # `libssl-dev`. That is an entire TLS stack compiled into the *build* graph to
-# fetch one file, and it is why `nix flake check` failed on Linux while passing
-# on macOS.
+# fetch one file, and it is why a sandboxed Linux build fails without this
+# feature turned off.
 vendored-onnxruntime = ["ort/download-binaries", "ort/copy-dylibs"]
 
 # Only for the page size behind /proc/self/statm; macOS talks to mach directly.

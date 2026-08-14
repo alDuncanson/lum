@@ -1,10 +1,9 @@
 //! Getting the model onto disk.
 //!
 //! Two files — the ONNX graph and its tokenizer — cached under
-//! `<data-dir>/models` in HuggingFace's layout. That layout is not an
-//! accident: the previous build reached the same cache through fastembed, so
-//! an existing install already has these blobs and this resolves without
-//! touching the network.
+//! `<data-dir>/models` in HuggingFace's layout, so a cache populated by an
+//! earlier lum release (or any other hf-hub tool) is reused rather than
+//! re-downloaded.
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +20,7 @@ pub struct ModelFiles {
 /// Whether every file is already cached.
 ///
 /// Checked before resolving so the daemon can announce `downloading-model`
-/// only when it is actually about to download 133 MB, rather than on every
+/// only when it is actually about to download ~130 MB, rather than on every
 /// start. The distinction matters: that state is what the CLI spinner and the
 /// Neovim progress bridge use to explain a wait that would otherwise look
 /// like a hang.

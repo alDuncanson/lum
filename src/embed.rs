@@ -1,54 +1,39 @@
-//! Text → vectors, via ONNX Runtime directly.
+//! Text → vectors, via ONNX Runtime.
 //!
-//! This module is where the previous build's two worst numbers came from, so
-//! it is worth being explicit about both and about what replaced them.
+//! **Two sessions, not one.** ort's `Session::run` takes `&mut self`, so a
+//! session cannot be shared lock-free — and a query that shares a lock with
+//! bulk ingest waits behind a whole batch, at exactly the moment you search:
+//! right after saving a file. One session is reserved for queries and one
+//! belongs to ingest, so a keystroke never waits on indexing (measured: 9 ms
+//! median under full indexing load). The ingest session is created when
+//! indexing starts and dropped when the queue drains, so the weights it holds
+//! are not resident between edits.
 //!
-//! **4.5 GB resident.** Measured, on an index of 811 chunks whose vectors are
-//! 1.2 MB. The cause was not the model and not the index: it was ONNX
-//! Runtime's arena allocator meeting a batch of 64 sequences padded to 512
-//! tokens. Attention is quadratic in length and linear in batch, and an arena
-//! keeps the largest allocation it ever made.
+//! **Batches are budgeted by padded tokens, not rows.** Activation memory
+//! scales with rows × padded width, so a fixed row count makes a batch of
+//! long chunks cost sixteen times a batch of short ones — and ONNX Runtime's
+//! arena keeps the largest allocation it has ever served, so that one wide
+//! batch sets resident memory for the life of the process. Sweeping the
+//! budget on this repository: 8192 tokens/call peaks at 1229 MB and indexes
+//! in 70 s; 1024 peaks at 748 MB in 51 s. Smaller is leaner *and* faster,
+//! because attention is quadratic in the padded width and a wide batch spends
+//! most of it on padding. Length-sorting before batching is what keeps the
+//! padding small.
 //!
-//! The fix that worked was **budgeting batches by padded tokens rather than by
-//! rows**. Activation memory scales with rows × width, so a fixed row count
-//! makes a batch of long chunks cost sixteen times a batch of short ones, and
-//! it is the long batch that sets the arena's high-water mark forever. A token
-//! budget holds that product flat. Measured on this repository, sweeping the
-//! budget moves the peak nearly proportionally — 8192 tokens peaks at 1229 MB,
-//! 1024 at 748 MB — and, because attention is quadratic, the smaller budgets
-//! are also *faster*: 70 s at 8192 against 51 s at 1024. Length-sorting before
-//! batching is what makes the budget tight, since padding is per batch.
+//! Two negative results, recorded so nobody re-derives them:
 //!
-//! Two things that sound like they should have helped, and did not, recorded
-//! so nobody re-derives them:
-//!
-//! - **Dropping the session does not give the memory back.** ORT's CPU arena
-//!   belongs to the environment, not the session; releasing the ingest session
-//!   left RSS unchanged at 1.2 GB. `release_ingest` is still worth doing — it
-//!   frees the weights and lets the allocator reuse the arena — but it is not
-//!   the reason peak memory came down.
+//! - **Dropping a session does not give its memory back.** ORT's CPU arena
+//!   belongs to the environment, not the session; releasing the ingest
+//!   session leaves RSS unchanged. `release_ingest` is still worth doing — it
+//!   frees the weights and lets the allocator reuse the arena — but the token
+//!   budget is what bounds the peak.
 //! - **Thread count is not a memory knob.** Sweeping ORT's intra-op threads
-//!   from 8 to 1 moved the peak by under 3% while making indexing 2.5× slower.
+//!   from 8 to 1 moved the peak by under 3% while making indexing 2.5×
+//!   slower.
 //!
-//! Where that lands: ~350 MB with only the query session live, peaking around
-//! 740 MB while indexing and plateauing there across repeated full re-indexes
-//! rather than creeping. Against 4507 MB, and without a second process to
-//! supervise.
-//!
-//! **735 ms of query latency during indexing.** `embed_query` and the bulk
-//! passage path shared one `Mutex<TextEmbedding>`, so a keystroke in the
-//! picker queued behind a full ingest batch — and you index right after
-//! saving a file, which is exactly when you search.
-//!
-//! ort's `Session::run` takes `&mut self`, so a session cannot be shared
-//! lock-free. Rather than tune the lock, this uses **two sessions**: one
-//! reserved for queries and one for ingest. A query never waits for indexing
-//! because it never touches the session indexing is using — measured at 9 ms
-//! median under full indexing load, against 1.3 s before.
-//!
-//! The ingest session is created when indexing starts and dropped when the
-//! queue drains, so the model weights it holds are not resident during the
-//! long stretches when nothing is being indexed.
+//! Where that lands: ~350 MB with only the query session live, ~740 MB peak
+//! while indexing, plateauing there across repeated full re-indexes rather
+//! than creeping.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -302,13 +287,13 @@ impl Embedder {
 fn open_session(onnx: &Path, threads: usize) -> Result<Session> {
     // The plain device allocator rather than ONNX Runtime's arena.
     //
-    // The arena is why the previous build held four gigabytes: it grows to the
-    // largest allocation it has ever served and never shrinks, and it is owned
-    // by the environment rather than the session, so dropping a session does
-    // not give it back. Measured directly — releasing the ingest session left
-    // RSS at 1.2 GB, unchanged. Going through the ordinary allocator means
-    // inference buffers are freed when inference is done, which is what makes
-    // "release the session when indexing stops" mean anything at all.
+    // The arena grows to the largest allocation it has ever served and never
+    // shrinks, and it is owned by the environment rather than the session, so
+    // dropping a session does not give it back (measured: releasing the
+    // ingest session leaves RSS unchanged). Going through the ordinary
+    // allocator means inference buffers are freed when inference is done,
+    // which is what makes "release the session when indexing stops" mean
+    // anything at all.
     //
     // The cost is a malloc per intermediate tensor instead of a bump pointer.
     // Against ~40 ms of matrix multiplication per batch that does not register.

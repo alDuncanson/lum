@@ -77,7 +77,7 @@ impl Activity {
         let mut text = if self.state == "downloading-model" {
             // The one that takes minutes on a first run, and the one most
             // likely to be read as a hang.
-            "downloading the embedding model (~70 MB, first run)".to_owned()
+            "downloading the embedding model (~130 MB, first run)".to_owned()
         } else if !self.phase.is_empty() && self.total > 0 {
             format!(
                 "{} {} {}/{} {}",

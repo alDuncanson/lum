@@ -1,9 +1,5 @@
 //! The vector index: a flat array, scanned exhaustively.
 //!
-//! The previous build used qdrant-edge — HNSW, segments, a write-ahead log,
-//! payload indexes — and paid 59 MB on disk for 1.2 MB of vectors, plus a beta
-//! dependency whose API it had to wrap in a trait to contain.
-//!
 //! At this scale an approximate nearest-neighbour structure is not just
 //! unnecessary, it is slower. 811 chunks × 384 dimensions is 311k
 //! multiply-adds — well under a millisecond, no index to build, no index to

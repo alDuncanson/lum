@@ -1,18 +1,10 @@
 //! One SQLite file: sources, documents, chunks, and the vectors themselves.
 //!
-//! The previous build split these across a SQLite catalog ("what exists") and
-//! a qdrant-edge index ("what it means"), and then spent real design effort on
-//! keeping them agreeing: deterministic point IDs, filtered deletes, a flush
-//! that had to happen before the catalog row was written, a rule named
-//! "durability before bookkeeping", and a known gap for the drift that could
-//! still occur after a hard crash.
-//!
-//! All of that was the cost of two stores. With one, a document and its chunks
-//! and their vectors are written in a single transaction and deleted by a
-//! foreign key. There is no ordering to get right, no invariant to audit, and
-//! no `lum verify` to write. It is also 48× smaller on disk: the old store
-//! held 59 MB (27 MB of segments and 32 MB of write-ahead log) for 1.2 MB of
-//! actual vectors.
+//! One store on purpose. A document, its chunks, and their vectors are written
+//! in a single transaction and deleted by a foreign key, so the bookkeeping
+//! and the searchable vectors cannot disagree: there is no write ordering to
+//! get right, no cross-store invariant to audit, and no `lum verify` to
+//! write.
 //!
 //! Two connections, not one. WAL lets a reader proceed while a writer holds
 //! the write lock, so a query does not queue behind an ingest transaction —
@@ -223,9 +215,7 @@ impl Db {
     ///
     /// One statement. The cascade removes its documents, their chunks, and
     /// with them every vector — which is why this needs no ordering rule and
-    /// cannot half-succeed. The old build walked every document, deleted its
-    /// vectors over gRPC, and only then dropped the catalog row, in that order
-    /// and synchronously, precisely because it could.
+    /// cannot half-succeed.
     pub fn delete_source(&self, id: &str) -> Result<Vec<i64>> {
         let mut conn = self.write.lock().unwrap();
         let transaction = conn.transaction()?;

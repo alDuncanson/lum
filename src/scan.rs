@@ -9,8 +9,7 @@
 //!
 //! Gitignore handling is the `ignore` crate's, which is ripgrep's walker:
 //! per-directory `.gitignore` files, nested rules, negations, global excludes,
-//! and `.git/info/exclude`, all already correct. It replaced a hand-rolled
-//! matcher and a hand-rolled recursive walk.
+//! and `.git/info/exclude`, all already correct.
 
 use std::collections::HashSet;
 use std::path::Path;

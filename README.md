@@ -93,7 +93,7 @@ idle. The first run downloads the model and embeds the whole repository, and
 reports both while it does:
 
 ```text
-⠇ downloading the embedding model (~70 MB, first run)
+⠇ downloading the embedding model (~130 MB, first run)
 ⠙ embedding ▕██████████░░░░▏ 64/89 chunks
 ```
 
@@ -148,21 +148,19 @@ worse and were reverted.
 ## What it costs to run
 
 Measured on an M-series Mac against this repository (113 documents, 1119
-chunks). The middle column is the previous release, which ran as two processes
-speaking gRPC behind an HTTP API; see
-[docs/architecture.md](docs/architecture.md) for what changed and why.
+chunks):
 
-| | v0.1 (two processes) | v0.2 (one) |
-|---|---|---|
-| search, idle | 20 ms via CLI | **10 ms via CLI, 5 ms on an open socket** |
-| search, while indexing | 1300 ms | **9 ms** |
-| per keystroke in Telescope | 290 ms | **5 ms** |
-| resident, idle | 4507 MB | **350 MB** |
-| resident, peak while indexing | 4507 MB | **740 MB** |
-| index on disk | 59 MB | **6 MB** |
+| | |
+|---|---|
+| a search, warm | 5 ms on an open socket, 10 ms via the CLI |
+| a keystroke in the Telescope picker | ~5 ms |
+| a search while indexing is running | ~9 ms |
+| save a file → re-embedded and searchable | ~180 ms |
+| resident memory | ~350 MB idle, ~740 MB peak while indexing |
+| the index on disk | 6 MB |
 
-Retrieval quality is unchanged: the same query returns the same files, the same
-chunks, and the same scores to three decimals.
+Queries never wait on indexing: the daemon keeps a dedicated inference session
+for search, so saving a file costs the picker nothing.
 
 ## Documentation
 
@@ -170,8 +168,8 @@ chunks, and the same scores to three decimals.
   reporting, and indexing before you ask
 - [docs/cli.md](docs/cli.md) — the CLI, the socket protocol, MCP, and where
   state lives
-- [docs/architecture.md](docs/architecture.md) — the single-process design, and
-  what the two-process one cost
+- [docs/architecture.md](docs/architecture.md) — how lum works, why it is
+  shaped that way, and where it is going
 - [docs/diagrams.md](docs/diagrams.md) — data flow, boundaries, and lifecycle
 - [eval/README.md](eval/README.md) — how retrieval is measured, and what has
   and has not worked
