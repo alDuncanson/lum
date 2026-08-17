@@ -19,7 +19,10 @@ local state = {
   spawn_attempted = false,
 }
 
---- Where the daemon listens. Mirrors src/config.rs.
+--- Where the daemon listens. Mirrors src/transport.rs: a socket path on
+--- Unix, a named pipe on Windows. The pipe name encodes the data directory
+--- with separators and the drive colon mapped to dashes — the same sanitizer
+--- the Rust side uses, so mixed separators wash out identically.
 ---
 --- `os.getenv` rather than `vim.env`, and memoized. `vim.env` goes through
 --- Vimscript's `getenv`, which throws E5560 in a fast event context — and the
@@ -33,7 +36,11 @@ function M.socket_path()
     if not dir or dir == "" then
       dir = (vim.uv.os_homedir() or ".") .. "/.lum"
     end
-    socket_path = dir .. "/lum.sock"
+    if (vim.uv.os_uname().sysname or ""):find("Windows") then
+      socket_path = "\\\\.\\pipe\\lum-" .. dir:gsub("[\\/:]", "-")
+    else
+      socket_path = dir .. "/lum.sock"
+    end
   end
   return socket_path
 end
@@ -129,6 +136,13 @@ local function spawn(executable)
   end
   state.spawn_attempted = true
   local log = M.socket_path():gsub("lum%.sock$", "daemon.log")
+  if log:find("^\\\\") then
+    -- Windows: no sh, and the endpoint is a pipe name rather than a path the
+    -- log can live beside. Spawn directly; the daemon's own tracing still
+    -- reaches LUM_DATA_DIR/daemon.log when it starts far enough to open it.
+    vim.system({ executable, "serve" }, { detach = true })
+    return
+  end
   vim.system(
     { "sh", "-c", 'exec "$1" serve >>"$2" 2>&1', "lum-spawn", executable, log },
     { detach = true }

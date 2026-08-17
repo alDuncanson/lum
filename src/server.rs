@@ -12,12 +12,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::engine::Engine;
 use crate::events::Event;
+use crate::transport;
 use crate::wire::{Op, Reply, Request};
 
 /// Outgoing lines per connection. A subscriber that stops reading fills this
@@ -63,18 +63,7 @@ pub async fn serve(config: Config) -> Result<()> {
         );
     }
 
-    let socket = config.socket_path();
-    // A socket file outliving its process is normal after a hard kill, and
-    // bind fails on an existing path regardless of whether anyone is behind
-    // it. The daemon lock above is what actually proves nobody is.
-    let _ = std::fs::remove_file(&socket);
-    let listener =
-        UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-    }
+    let mut listener: transport::Listener = transport::listen(&config)?;
 
     let engine = Engine::new(config.clone())?;
     engine.start_background();
@@ -82,7 +71,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let activity =
         Arc::new(Activity { last: Mutex::new(Instant::now()), subscribers: AtomicUsize::new(0) });
 
-    tracing::info!(socket = %socket.display(), "lum daemon listening");
+    tracing::info!(endpoint = %transport::endpoint_name(&config), "lum daemon listening");
 
     let idle_timeout = config.idle_timeout;
     let shutdown = Arc::clone(&engine.shutdown);
@@ -106,12 +95,11 @@ pub async fn serve(config: Config) -> Result<()> {
         }
     });
 
-    let mut sigterm = signal_stream()?;
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 match accepted {
-                    Ok((stream, _)) => {
+                    Ok(stream) => {
                         let engine = Arc::clone(&engine);
                         let activity = Arc::clone(&activity);
                         tokio::spawn(async move {
@@ -125,13 +113,13 @@ pub async fn serve(config: Config) -> Result<()> {
             }
             _ = shutdown.notified() => break,
             _ = tokio::signal::ctrl_c() => break,
-            _ = sigterm.recv() => break,
+            _ = terminate_signal() => break,
         }
     }
 
     tracing::info!("shutting down");
     drop(listener);
-    let _ = std::fs::remove_file(&socket);
+    transport::cleanup(&config);
     // Drop the engine (and with it the database connections and any loaded
     // model) before releasing the lock, so a replacement daemon starting the
     // instant the lock frees never overlaps this one's files.
@@ -140,14 +128,27 @@ pub async fn serve(config: Config) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn signal_stream() -> Result<tokio::signal::unix::Signal> {
-    use tokio::signal::unix::{signal, SignalKind};
-    Ok(signal(SignalKind::terminate())?)
+/// Resolves when the OS asks the daemon to stop, beyond Ctrl-C. On Unix that
+/// is SIGTERM; Windows has no equivalent this process can catch here, so the
+/// future simply never resolves and Ctrl-C carries the job.
+async fn terminate_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+            sigterm.recv().await;
+            return;
+        }
+    }
+    std::future::pending::<()>().await
 }
 
-async fn handle(stream: UnixStream, engine: Arc<Engine>, activity: Arc<Activity>) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
+async fn handle(
+    stream: transport::Stream,
+    engine: Arc<Engine>,
+    activity: Arc<Activity>,
+) -> Result<()> {
+    let (reader, mut writer) = tokio::io::split(stream);
     let (out, mut outbox) = mpsc::channel::<String>(WRITE_QUEUE);
 
     let writer_task = tokio::spawn(async move {
