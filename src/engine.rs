@@ -473,15 +473,43 @@ impl Engine {
         })
         .await??;
 
-        // Exact rescore. The shortlist is int8 and may have the order of
-        // near-ties slightly wrong; scoring the shortlist in f32 makes the
-        // result identical to a full exact search.
-        let mut payloads = self.db.chunk_payloads(&ids)?;
+        // Keyword retrieval over the same chunks: BM25 via FTS5. This is what
+        // answers the queries an embedding misses — the exact identifier is in
+        // the file, but nothing about the phrasing is semantically near it.
+        let keyword_ids = if self.config.keyword_search {
+            self.db.keyword_search(&request.q, rescore, filter.as_deref())?
+        } else {
+            Vec::new()
+        };
+
+        // Hydrate the union of both candidate sets and rescore the vector side
+        // exactly. The int8 shortlist may misorder near-ties, and a candidate
+        // only the keyword side found still needs a real cosine to display, so
+        // every candidate gets one from its stored f32 vector.
+        let mut candidates: Vec<i64> = ids.clone();
+        for id in &keyword_ids {
+            if !candidates.contains(id) {
+                candidates.push(*id);
+            }
+        }
+        let mut payloads = self.db.chunk_payloads(&candidates)?;
         let mut scored: Vec<(f32, crate::db::ChunkPayload)> = payloads
             .drain(..)
             .map(|payload| (dot_f32(&vector, &payload.vector), payload))
             .collect();
+
+        // The ranking stays purely semantic — exact cosine over the whole
+        // candidate set — and keyword hits are slotted in below the head. See
+        // `slot_keyword_hits` for why fusion is shaped this way and the
+        // measurements behind it.
         scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        let semantic_order: Vec<i64> = scored.iter().map(|(_, p)| p.chunk_id).collect();
+        let final_order = slot_keyword_hits(&semantic_order, &keyword_ids);
+        let position: HashMap<i64, usize> =
+            final_order.iter().enumerate().map(|(rank, id)| (*id, rank)).collect();
+        scored.sort_by_key(|(_, payload)| {
+            position.get(&payload.chunk_id).copied().unwrap_or(usize::MAX)
+        });
 
         let mut results = Vec::with_capacity(request.limit);
         let mut per_file: HashMap<String, usize> = HashMap::new();
@@ -950,6 +978,82 @@ fn collect_batch(
     batch
 }
 
+/// Merge keyword hits into the semantic ranking: the head stays semantic,
+/// and the best keyword-supported candidates are slotted in below it.
+///
+/// The ranking is the exact-cosine order. Up to three insertions land at
+/// fixed positions (4th, 7th, 10th), chosen from the keyword hits by
+/// reciprocal rank fusion over both rankings — so a candidate with mid
+/// keyword rank *and* mid semantic rank beats a top keyword hit with no
+/// semantic support, which is what keeps a common-word BM25 match from
+/// wasting a slot. A query with no keyword matches is byte-identical to pure
+/// semantic search.
+///
+/// Shaped by three measurements on the eval (same tree, same index), each a
+/// design that lost:
+///
+/// - **Pure vector**: recall@1 63%, recall@10 93%, right-chunk 73%. The
+///   baseline; misses queries whose exact words are in the file.
+/// - **Rank fusion for the whole list** (RRF, equal or down-weighted):
+///   recall@10 98% and right-chunk 85%, but recall@1 fell to 54%. RRF's gap
+///   between semantic ranks one and two is 1/60 − 1/61 ≈ 0.0003, so any
+///   keyword bonus big enough to matter vaults a semantic-#2 over a confident
+///   #1. Rank fusion structurally cannot protect a confident head.
+/// - **Slotting by raw BM25 order**: head recovered (63%) but the tail gain
+///   vanished (recall@10 back to 93%) — common-word matches ate the slots
+///   before the real answers deeper in the keyword ranking were reached.
+///
+/// Fusion-selected slotting keeps both: the head cannot be displaced, and
+/// agreement decides who enters below it.
+fn slot_keyword_hits(semantic: &[i64], keyword: &[i64]) -> Vec<i64> {
+    /// Where keyword hits land, 0-based: 5th, 8th, and 10th place. Below the
+    /// top four, so the picker's first screen stays semantic; within the top
+    /// ten, so a lexical-only answer is still seen without scrolling.
+    const SLOTS: [usize; 3] = [4, 7, 9];
+    const K: f64 = 60.0;
+
+    if keyword.is_empty() {
+        return semantic.to_vec();
+    }
+    let semantic_rank: HashMap<i64, usize> =
+        semantic.iter().enumerate().map(|(rank, id)| (*id, rank)).collect();
+
+    // Only candidates the semantic top ten does not already show. A hit that
+    // is already visible gains nothing from moving up a few places, and
+    // lifting it evicts something else from the top five — measured as two
+    // recall@5 losses for zero gain anywhere. Slots are for answers the
+    // picker would otherwise never show.
+    //
+    // Every candidate is in the semantic list (the hydrated union), so both
+    // ranks always exist.
+    const VISIBLE: usize = 10;
+    let mut eligible: Vec<(f64, i64)> = keyword
+        .iter()
+        .enumerate()
+        .filter(|(_, id)| semantic_rank.get(id).copied().unwrap_or(usize::MAX) >= VISIBLE)
+        .map(|(keyword_rank, id)| {
+            let cosine_rank = semantic_rank.get(id).copied().unwrap_or(usize::MAX - 1);
+            let score = 1.0 / (K + keyword_rank as f64) + 1.0 / (K + cosine_rank as f64);
+            (score, *id)
+        })
+        .collect();
+    eligible.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut out: Vec<i64> = semantic.to_vec();
+    let mut eligible = eligible.into_iter().map(|(_, id)| id);
+    for slot in SLOTS {
+        if slot > out.len() {
+            break;
+        }
+        let Some(candidate) = eligible.next() else { break };
+        if let Some(from) = out.iter().position(|o| *o == candidate) {
+            out.remove(from);
+        }
+        out.insert(slot, candidate);
+    }
+    out
+}
+
 /// How many chunks to shortlist so that `limit` survive collapsing.
 fn fetch_limit(limit: usize, per_file: usize) -> usize {
     if per_file == 0 {
@@ -1053,6 +1157,73 @@ mod tests {
         // /a/bc is not inside /a/b. Comparing whole components rather than
         // string prefixes is what makes that true.
         assert!(nesting_conflict("/a/bc", &[source("/a/b")]).is_none());
+    }
+
+    #[test]
+    fn slotting_never_touches_the_top_three() {
+        // The head is semantic by construction — the property rank fusion
+        // could not provide.
+        let semantic = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let keyword = vec![99, 98, 97];
+        let out = slot_keyword_hits(&semantic, &keyword);
+        assert_eq!(&out[..4], &[1, 2, 3, 4], "the head is semantic by construction");
+        assert_eq!(out[4], 99, "best keyword hit lands in fifth place");
+        assert_eq!(out[7], 98);
+        assert_eq!(out[9], 97);
+    }
+
+    #[test]
+    fn no_keyword_matches_means_pure_semantic_order() {
+        let semantic = vec![4, 2, 9, 1];
+        let empty: Vec<i64> = Vec::new();
+        assert_eq!(slot_keyword_hits(&semantic, &empty), semantic);
+    }
+
+    #[test]
+    fn already_visible_hits_cost_no_slot() {
+        // Keyword's favorites sit at semantic #1 and #8 — both already on
+        // screen. Lifting them would only evict something else from the top
+        // five, so neither takes a slot; the invisible 55 does.
+        let semantic = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 55];
+        let keyword = vec![1, 8, 55];
+        let out = slot_keyword_hits(&semantic, &keyword);
+        assert_eq!(&out[..4], &[1, 2, 3, 4]);
+        assert_eq!(out[4], 55, "{out:?}");
+        assert_eq!(out[8], 8, "8 shifted down by the insertion but was not lifted");
+    }
+
+    #[test]
+    fn a_slotted_hit_moves_rather_than_duplicates() {
+        // Keyword's favorite sits below the visible ten; slotting lifts it
+        // and must not leave a copy behind.
+        let semantic = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 42];
+        let keyword = vec![42];
+        let out = slot_keyword_hits(&semantic, &keyword);
+        assert_eq!(out[4], 42);
+        assert_eq!(out.iter().filter(|&&i| i == 42).count(), 1);
+        assert_eq!(out.len(), semantic.len());
+    }
+
+    #[test]
+    fn agreement_beats_a_lexical_only_top_hit_for_a_slot() {
+        // 40 is keyword #2 with semantic support (rank 10); 99 is keyword #1
+        // with almost none (rank 13). Both are off screen; fusion slots the
+        // supported one first — the case raw-BM25-order slotting lost.
+        let semantic = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 40, 12, 13, 99];
+        let keyword = vec![99, 40];
+        let out = slot_keyword_hits(&semantic, &keyword);
+        assert_eq!(&out[..4], &[1, 2, 3, 4], "head untouched");
+        assert_eq!(out[4], 40, "the supported hit takes the first slot: {out:?}");
+    }
+
+    #[test]
+    fn keyword_only_candidates_grow_the_list() {
+        // A hit the vector shortlist never contained still enters the top
+        // ten — the whole point of running BM25 at all.
+        let semantic = vec![1, 2, 3, 4];
+        let keyword = vec![99];
+        let out = slot_keyword_hits(&semantic, &keyword);
+        assert_eq!(out, vec![1, 2, 3, 4, 99]);
     }
 
     #[test]
