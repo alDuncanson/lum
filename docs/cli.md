@@ -165,6 +165,7 @@ will not remove an index it did not write.
 | `LUM_EMBED_THREADS` | half the cores | inference threads; a speed knob, not a memory one |
 | `LUM_EXCLUDE_DIRS` | `node_modules,vendor,target,__pycache__` | replaces the list; set empty to disable |
 | `LUM_EMBEDDING_MODEL` | `standard` | or `quantized`; changing it requires `lum reindex` |
+| `LUM_KEYWORD_SEARCH` | `on` | `off` reverts to pure-vector retrieval, for relevance debugging |
 | `LUM_LOG` | `lum=info,warn` | tracing filter |
 
 Durations accept `500ms`, `90s`, `5m`, `2h`.

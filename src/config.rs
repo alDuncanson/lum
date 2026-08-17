@@ -125,6 +125,11 @@ pub struct Config {
     pub embed_threads: Option<usize>,
     pub exclude_dirs: HashSet<String>,
     pub model: Model,
+    /// Whether search fuses BM25 keyword ranking with the vector ranking.
+    /// On by default; `LUM_KEYWORD_SEARCH=off` reverts to pure-vector, which
+    /// exists so a relevance question — and the eval — can compare the two on
+    /// the same index.
+    pub keyword_search: bool,
 }
 
 impl Config {
@@ -149,6 +154,10 @@ impl Config {
                 Ok(raw) => Model::parse(&raw)?,
                 Err(_) => Model::Standard,
             },
+            keyword_search: !matches!(
+                std::env::var("LUM_KEYWORD_SEARCH").as_deref(),
+                Ok("off") | Ok("0") | Ok("false")
+            ),
         };
         config.validate()?;
         Ok(config)
@@ -343,6 +352,7 @@ mod tests {
             embed_batch: DEFAULT_EMBED_BATCH,
             embed_token_budget: DEFAULT_TOKEN_BUDGET,
             embed_threads: None,
+            keyword_search: true,
             exclude_dirs: HashSet::new(),
             model: Model::Standard,
         };
