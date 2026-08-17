@@ -1,176 +1,175 @@
-# lum outside Neovim
+# The CLI, the socket, and MCP
 
-Lum is API-first, and that is a constraint rather than a slogan: the CLI is a
-pure client of the REST API, so a capability that is not reachable over HTTP
-cannot exist in the CLI either. Every integration is peer to every other one.
+One binary. `lum serve` is the daemon; every other subcommand is a client of
+its socket, and starts it if nothing is listening.
 
-## Searching
-
-```sh
-lum search --root . "where is daemon startup coordinated?"
-lum search --root . --json  "daemon startup"   # one JSON document
-lum search --root . --jsonl "daemon startup"   # one result per line
-```
-
-`--root` discovers and idempotently registers the repository, so there is no
-separate setup step. Lum indexes Markdown and common source extensions across
-~20 languages plus configuration and web formats. It honors nested `.gitignore`
-files including negation rules, watches the repository for changes, and returns
-inclusive, 1-based line ranges with every result.
-
-At most two results come from any one file, so a single large file cannot fill
-the list. `--per-file 1` gives one result per file, `--per-file 0` returns raw
-nearest neighbours, and `--no-tests` omits test files. Those defaults are
-measured, not guessed — see [../eval/README.md](../eval/README.md).
-
-Repositories can also be managed explicitly:
+## Commands
 
 ```sh
-lum add ~/code/my-project
-lum remove ~/code/my-project    # and everything indexed from it
-lum status                      # health, counts, and what is in flight
-lum top                         # live indexing activity
-lum stop
+lum search <query...>     # semantic search
+lum add <path>            # register a directory and index it
+lum remove <id | path>    # unregister and delete everything indexed from it
+lum sources               # list registered directories
+lum scan <id | path>      # rescan now
+lum status                # state, counts, memory, work in flight
+lum top                   # live activity
+lum stop                  # stop the daemon
+lum serve                 # run the daemon in the foreground
+lum mcp                   # speak MCP on stdin/stdout
+lum reindex --force       # discard every embedding and index again
 ```
 
-Registering a directory inside — or containing — one already registered is
-refused. Documents are scoped to the source that produced them, so an overlap
-is indexed twice and returned twice under two document IDs that nothing can
-merge. Use `lum search --root <subdirectory>` to search part of a registered
-source; it does not need its own registration.
+### search
 
-`lum status` names the document being worked on and the queue behind it. On a
-first index every count reads zero for a minute while the first batch embeds,
-and without that line it is indistinguishable from being stuck.
+```sh
+lum search --root ~/code/thing "retry backoff"
+```
 
-Lum starts on demand — the first search, tool call, or `curl` brings it up. It
+`--root` registers the directory if it is new, waits for its first index, and
+restricts results to it. That is what makes lum need no setup: the first search
+in a repository is also the command that starts indexing it.
 
-## Tuning memory
+| flag | default | |
+|---|---|---|
+| `--limit N` | 10 | maximum results |
+| `--root PATH` | | ensure and search only this workspace |
+| `--source ID` | | restrict to one registered source |
+| `--per-file N` | 2 | chunks any one file may contribute; `0` returns raw nearest neighbours |
+| `--no-tests` | off | omit test files |
+| `--json` | | one JSON envelope |
+| `--jsonl` | | one JSON result per line |
+| `-q`, `--quiet` | | no progress on stderr |
 
-Indexing peaks in ONNX Runtime, which sizes its allocations to the largest
-batch it has ever embedded and then keeps that memory until the worker exits.
-Peak scales linearly with the embedding batch, measured on this repository:
+`--per-file` exists because nearest-neighbour search returns chunks, and a
+question about one file is usually answered by several of them. Left alone,
+three chunks of the same file take three of the five slots anyone reads.
 
-| `LUM_EMBED_BATCH_SIZE` | peak worker memory |
+`--no-tests` is all-or-nothing on purpose. Tests describe the feature they
+exercise in prose-like assertion names, so they outrank implementations for
+several queries — but scaling test scores down by 0.95, 0.9, 0.8 and 0 made
+every retrieval metric monotonically worse once the fixture contained queries
+looking *for* a test, which people do. See [eval/README.md](../eval/README.md).
+
+Progress is drawn on stderr, only when stderr is a terminal and `TERM` is not
+`dumb`. Piping to `jq` gets clean JSON.
+
+## The socket
+
+`$LUM_DATA_DIR/lum.sock`, inside a 0700 directory. Newline-delimited JSON: one
+object per line, in both directions.
+
+A line with `id` is a reply to the request that carried that `id`. A line with
+`event` is an unsolicited event, sent after `subscribe`. Requests may be
+pipelined and are answered independently.
+
+```sh
+# Everything the CLI does, without the CLI.
+printf '{"id":1,"op":"search","q":"retry backoff","limit":5}\n' \
+  | socat - UNIX-CONNECT:$HOME/.lum/lum.sock | jq
+```
+
+### Operations
+
+| `op` | fields | |
+|---|---|---|
+| `ping` | | liveness, without touching the model or the index |
+| `search` | `q`, `limit`, `root`, `source`, `per_file`, `exclude_tests`, `wait` | |
+| `add_source` | `uri`, `wait` | |
+| `remove_source` | `source` | an id or a path |
+| `list_sources` | | |
+| `scan` | `source` | queue a rescan |
+| `status` | | |
+| `subscribe` | `kinds`, `replay` | stream events on this connection |
+| `shutdown` | | |
+
+`wait` is the interesting one. The CLI sets it, because `lum search --root .`
+on a cold repository promising results it does not have would be a lie. The
+Neovim picker does not: it wants whatever is indexed *this keystroke*, and
+watches progress events on the same connection to know more is coming.
+
+Note that `remove_source` and `scan` take `source`, not `id` — `id` belongs to
+the envelope, and a field of that name inside an operation is silently
+shadowed by it.
+
+### Events
+
+`subscribe` with `kinds: []` for all of them, or name the ones you want.
+`replay: true` replays a 512-event ring buffer, which is right for a display
+(`lum top`) and wrong for anything that reacts to events, since it would
+announce work that finished before you connected.
+
+| `event` | |
 |---|---|
-| 64 (default) | 3979 MB |
-| 32 | 2210 MB |
-| 16 | 1182 MB |
-| 8 | 718 MB |
-
-Smaller batches cost throughput — 16 indexed the same repository in 114s
-against 90s for 64 — so the default favours speed on a machine with memory to
-spare. On a smaller one, set it lower:
+| `state` | `starting` → `downloading-model` → `ready`, or `failed` |
+| `scan_started`, `scan_finished`, `scan_failed` | brackets one source scan |
+| `doc_indexed`, `doc_deleted`, `doc_failed` | one document |
+| `progress` | `phase`, `done`, `total`, `unit` — the part that moves |
+| `snapshot` | every 2s: counts, queue depths, resident bytes |
+| `request` | whole-request latency, for `lum top` |
 
 ```sh
-LUM_EMBED_BATCH_SIZE=16 lum serve
+# Watch indexing from a shell.
+printf '{"id":1,"op":"subscribe","kinds":["progress","doc_indexed"]}\n' \
+  | socat - UNIX-CONNECT:$HOME/.lum/lum.sock | jq -c
 ```
 
-`LUM_EMBED_THREADS` caps the threads ONNX Runtime uses inside one inference
-call. It does not change peak memory at all, only speed, and ORT's default is
-one thread per logical core. On a 16-core machine capping it to 8 was
-consistently faster (59s against 114s at batch 16), which suggests the default
-over-subscribes — but that is one machine, so it is a knob rather than a new
-default.
+## MCP
 
-Neither setting changes the vectors that come out, so switching them does not
-require a re-index.
+`lum mcp` speaks the Model Context Protocol over stdio: an agent spawns it and
+calls its tools over JSON-RPC. Four tools — `search`, `add_source`,
+`list_sources`, `status`.
 
-## HTTP and events
-
-```sh
-curl 'localhost:7420/v1/search?q=retry+backoff&limit=3'
-curl 'localhost:7420/v1/search?q=retry+backoff&source=<source-id>'
-curl -X DELETE localhost:7420/v1/sources/<source-id>
-```
-
-Server-Sent Events expose scans, document lifecycle, worker readiness, queue
-depth, current work, and index totals — no client library required:
-
-```sh
-curl -N localhost:7420/v1/events
-curl -N 'localhost:7420/v1/events?types=document_ingested,document_failed'
-```
-
-`lum mcp` serves the Model Context Protocol over stdio with `search`,
-`add_source`, `list_sources`, and `status` tools, each delegating to that same
-REST API:
+It is a client, not a daemon. Every tool goes through the same socket the CLI
+uses; the MCP process holds no state, opens no database, and loads no model.
+Kill it freely.
 
 ```json
-{
-  "mcpServers": {
-    "lum": {
-      "command": "/path/to/bin/lum",
-      "args": ["mcp"]
-    }
-  }
-}
+{ "mcpServers": { "lum": { "command": "lum", "args": ["mcp"] } } }
 ```
 
-Internally the extension points are interfaces rather than forks: a new file
-format is a `Parser`, a new chunking strategy is a `Chunker`, a new embedding
-model is an `Embedder`, a different index is a `VectorStore`, and a new thing
-to index is a `Source`. Adding one is an implementation, not an architecture
-change.
+One stdio rule: it never writes to stdout except protocol messages, because
+stdout *is* the channel. Diagnostics go to stderr.
 
-## How it runs
+## Where state lives
 
-```text
-CLI · Telescope · MCP · curl
-              │ REST + SSE over loopback (MCP speaks stdio, then REST)
-              ▼
-      lum — the dispatcher
-      repository scans · watching · catalog · public API
-              │ private gRPC over ~/.lum/lum-worker.sock
-              ▼
-      lum-worker — the worker
-      parse → line-aware chunks → embed → vector search
+Everything is under `~/.lum` (or `$LUM_DATA_DIR`), and deleting it resets lum
+completely.
+
+```
+lum.db              sources, documents, chunks, vectors  (plus -wal, -shm)
+models/             the embedding model, in HuggingFace cache layout
+lum.sock            the socket
+daemon.lock         held for the daemon's lifetime
+daemon-start.lock   held while deciding whether to spawn
+daemon.log          the daemon's stderr
 ```
 
-Two processes, one product. The dispatcher owns orchestration and every public
-interface; the worker owns parsing, embedding, and vector search. The dispatcher
-starts and supervises the worker, so there is never a second thing to install or
-run.
+Deleting the directory is a full reset only once the daemon has exited. On
+Unix, `rm -rf` removes the directory entry but a running process keeps its open
+files alive by inode, so it keeps serving the old index and `lum status` looks
+unaffected until it exits. `lum stop` first.
 
-The HTTP API listens on `127.0.0.1:7420` (`LUM_HTTP_ADDR` overrides it) and the
-worker opens no TCP port at all. The dispatcher exits after 15 minutes without a
-request. Its worker is shed after 5 minutes without an ingest or search, which
-releases the model and index memory, then respawned on demand; a worker crash is
-handled the same way. `lum serve` runs everything in the foreground for
-debugging.
+Upgrading from lum 0.1: its `catalog.db`, `vectors/` and `lum-worker.sock`
+are left in place and reported once at startup. They are yours to delete; lum
+will not remove an index it did not write.
 
-See [docs/architecture.md](architecture.md) for the design and
-[docs/diagrams.md](diagrams.md) for data flow, architecture, and
-protocol-boundary diagrams.
+## Configuration
 
-## ## State and reset
+| variable | default | |
+|---|---|---|
+| `LUM_DATA_DIR` | `~/.lum` | everything lum persists |
+| `LUM_IDLE_TIMEOUT` | `15m` | daemon exits after this long idle |
+| `LUM_STARTUP_TIMEOUT` | `5m` | bounds a client's wait, including the first download |
+| `LUM_EMBED_TOKEN_BUDGET` | `1024` | padded tokens per inference call — the memory knob |
+| `LUM_EMBED_BATCH_SIZE` | `16` | ceiling on rows per call |
+| `LUM_EMBED_THREADS` | half the cores | inference threads; a speed knob, not a memory one |
+| `LUM_EXCLUDE_DIRS` | `node_modules,vendor,target,__pycache__` | replaces the list; set empty to disable |
+| `LUM_EMBEDDING_MODEL` | `standard` | or `quantized`; changing it requires `lum reindex` |
+| `LUM_LOG` | `lum=info,warn` | tracing filter |
 
-Everything lives under `~/.lum` (override with `LUM_DATA_DIR`):
+Durations accept `500ms`, `90s`, `5m`, `2h`.
 
-```text
-~/.lum/
-├── catalog.db              # repositories, documents, hashes, chunk counts, failures
-├── daemon.log              # detached logs from both processes
-├── daemon.lock             # held for the dispatcher's complete lifetime
-├── daemon-start.lock       # coordinates concurrent on-demand starts
-├── lum-worker.sock         # private dispatcher-to-worker gRPC socket
-├── models/                 # downloaded embedding model cache
-├── vectors/                # qdrant-edge index and chunk payloads
-└── vectors.manifest.json   # model and dimension the index was built with
-```
-
-Run `lum stop` before deleting that directory. `lum stop` waits until every file
-is released; on Unix, deleting state while Lum is running does not reset the open
-SQLite and vector files.
-
-`LUM_DATA_DIR` has to be shallow enough to hold the worker socket: a Unix domain
-socket address caps out at 104 bytes on macOS and 108 on Linux, path included.
-Lum checks this at startup and tells you if the path is too deep, so the default
-`~/.lum` and anything comparable is fine.
-
-The full-precision model is the default. For higher CPU throughput at a small
-retrieval-quality cost, use `lum serve --embedding-model quantized` or set
-`LUM_EMBEDDING_MODEL=quantized`. The two produce incompatible vectors, so when
-switching, stop Lum and remove `catalog.db`, `vectors/`, and
-`vectors.manifest.json`, then re-index — keep `models/` to avoid another
-download.
+`LUM_EMBED_TOKEN_BUDGET` is the one worth knowing about. It bounds padded
+tokens per inference call, which is what activation memory actually scales
+with; smaller is both leaner and faster, up to a point. The measurements are
+in [architecture.md](architecture.md#memory).

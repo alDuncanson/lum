@@ -26,12 +26,16 @@
 #
 # Adding a query is a real edit to the benchmark. Do it when you find
 # something lum should surface and does not, before changing anything.
+#
+# Rewritten alongside the single-process rewrite. Every path here changed, so
+# the numbers are not comparable with runs from before it — a fixture pointing
+# at deleted files measures nothing but its own staleness.
 
 queries:
   # --- documentation and prose ---
-  # Path-flavored: the words are in the filename as much as the content.
-  # Nothing embeds the path today — only chunk text becomes a vector — so
-  # these measure how far the prose alone carries.
+  # Path-flavored: the words are in the filename as much as the content. The
+  # display path is embedded with every chunk (see embed::passage_text), so
+  # these measure that as much as they measure the prose.
   - query: ingestion diagram
     files: [docs/diagrams.md]
     contains: Ingestion data flow
@@ -57,114 +61,149 @@ queries:
     files: [lua/lum/telescope.lua]
     contains: make_entry
 
+  - query: editor socket client
+    files: [lua/lum/client.lua]
+
+  - query: lsp progress reporting
+    files: [lua/lum/lsp.lua, lua/lum/progress.lua]
+
   # --- scanning and file selection ---
   - query: indexable file extensions
-    files: [dispatcher/internal/source/localdir.go]
-    contains: indexableExtensions
+    files: [src/mime.rs]
+    contains: EXTENSIONS
 
   - query: parsed files
-    files: [dispatcher/internal/source/localdir.go, worker/src/pipeline/parser.rs]
+    files: [src/mime.rs, src/parse.rs]
 
   - query: gitignore rules
-    files: [dispatcher/internal/source/localdir.go]
+    files: [src/scan.rs]
 
   - query: excluded directories
-    files: [dispatcher/internal/source/localdir.go]
-    contains: defaultExcludedDirectories
+    files: [src/config.rs, src/scan.rs]
+    contains: DEFAULT_EXCLUDE_DIRS
 
   - query: file watcher
-    files: [dispatcher/internal/source/localdir.go]
-    contains: fsnotify
+    files: [src/watch.rs]
 
   - query: change detection fingerprint
-    files: [dispatcher/internal/source/localdir.go, dispatcher/internal/ingest/ingest.go]
+    files: [src/scan.rs]
+    contains: fingerprint
+
+  - query: racily clean file
+    files: [src/scan.rs]
+    contains: RACE_WINDOW
 
   # --- ingest pipeline ---
   - query: scan planner
-    files: [dispatcher/internal/ingest/ingest.go]
-    contains: planScan
+    files: [src/engine.rs]
+    contains: run_scan
 
   - query: retry backoff
-    files: [dispatcher/internal/ingest/ingest.go]
+    files: [src/engine.rs]
+    contains: schedule_retry
 
-  - query: batch ingest framing
-    files: [dispatcher/internal/worker/client.go, worker/src/service.rs]
+  - query: batching documents for inference
+    files: [src/engine.rs, src/embed.rs]
 
   - query: document identity
-    files: [dispatcher/internal/catalog/catalog.go]
+    files: [src/db.rs]
 
   - query: sqlite schema
-    files: [dispatcher/internal/catalog/catalog.go]
+    files: [src/db.rs]
     contains: CREATE TABLE
 
-  - query: database migration
-    files: [dispatcher/internal/catalog/catalog.go]
+  - query: index model identity check
+    files: [src/db.rs]
+    contains: check_identity
 
-  # --- worker pipeline ---
+  # --- embedding and retrieval ---
   - query: embedding model
-    files: [worker/src/pipeline/embedder.rs]
+    files: [src/embed.rs]
+
+  - query: token budget batching
+    files: [src/embed.rs]
+    contains: TOKEN_BUDGET
+
+  - query: cls pooling and normalization
+    files: [src/embed.rs]
+    contains: normalize
 
   - query: chunk overlap
-    files: [worker/src/pipeline/chunker/word_window.rs]
+    files: [src/chunk/word_window.rs]
     contains: WordWindowChunker
 
+  - query: syntax aware chunking
+    files: [src/chunk/syntax.rs]
+
+  - query: heading trail context
+    files: [src/chunk/syntax.rs]
+    contains: HeadingTrail
+
   - query: markdown front matter
-    files: [worker/src/pipeline/parser.rs]
+    files: [src/parse.rs]
     contains: strip_front_matter
 
   - query: vector store upsert
-    files: [worker/src/store/edge.rs]
+    files: [src/db.rs]
     contains: upsert_document
 
   - query: cosine similarity search
-    files: [worker/src/store/edge.rs]
+    files: [src/index.rs]
 
-  - query: index model manifest
-    files: [worker/src/store/edge.rs]
-    contains: validate_manifest
+  - query: int8 quantization
+    files: [src/index.rs]
+    contains: quantize
+
+  - query: collapse results per file
+    files: [src/engine.rs]
+    contains: per_file
 
   # --- process lifecycle ---
   - query: idle shedding
-    files: [dispatcher/internal/worker/manager.go]
-    contains: shedIfIdle
+    files: [src/embed.rs, src/server.rs]
+    contains: release_ingest
 
   - query: graceful shutdown
-    files: [dispatcher/internal/worker/supervisor.go, dispatcher/internal/cli/serve.go]
+    files: [src/server.rs]
 
   - query: daemon lock file
-    files: [dispatcher/internal/apiclient/client.go, dispatcher/internal/cli/serve.go]
+    files: [src/client.rs, src/server.rs]
 
-  - query: worker crashed state
-    files: [dispatcher/internal/worker/manager.go]
+  - query: daemon failed to start
+    files: [src/client.rs]
 
   - query: spawn child process
-    files: [dispatcher/internal/worker/supervisor.go]
+    files: [src/client.rs]
+    contains: spawn_daemon
 
   # --- interfaces ---
-  - query: rest api endpoints
-    files: [dispatcher/internal/api/server.go]
+  - query: wire protocol framing
+    files: [src/wire.rs]
 
-  - query: server sent events stream
-    files: [dispatcher/internal/api/server.go, dispatcher/internal/cli/events.go]
+  - query: event subscription stream
+    files: [src/server.rs, src/events.rs]
 
   - query: mcp tools
-    files: [dispatcher/internal/mcpserver/server.go]
+    files: [src/mcp.rs]
 
   - query: cli commands
-    files: [dispatcher/internal/cli/commands.go, dispatcher/internal/cli/root.go]
+    files: [src/cli.rs]
 
   - query: live activity tui
-    files: [dispatcher/internal/cli/top.go]
+    files: [src/top.rs]
+
+  - query: progress spinner
+    files: [src/render.rs]
 
   # --- configuration and build ---
   - query: environment variables
-    files: [dispatcher/internal/config/config.go]
+    files: [src/config.rs]
 
   - query: unix socket path
-    files: [dispatcher/internal/config/config.go, dispatcher/internal/worker/client.go]
+    files: [src/config.rs, src/server.rs]
 
-  - query: grpc contract
-    files: [proto/lum/v1/worker.proto]
+  - query: resident memory reporting
+    files: [src/sys.rs]
 
   - query: nix flake outputs
     files: [flake.nix]
@@ -179,21 +218,28 @@ queries:
   # several queries above. Without a query whose answer *is* a test, that
   # change can only ever look free, and the benchmark would be measuring its
   # own bias rather than lum.
+  #
+  # Rust puts tests in the same file as the code they exercise, so these no
+  # longer discriminate by path at all — they ask for a specific part of a
+  # file that also contains the implementation. That makes them a sharper
+  # measure of `contains` than they were, and it is why `exclude_tests`
+  # deliberately has no rule for Rust source.
   - query: test that a shrunk document leaves no stale vectors
-    files: [worker/src/store/edge.rs]
-    contains: reingesting_a_shrunk_document_leaves_no_stale_tail
+    files: [src/db.rs]
+    contains: a_shrinking_reingest_leaves_no_stale_tail
 
-  - query: scan debounce test
-    files: [dispatcher/internal/ingest/ingest_test.go]
-    contains: EnqueueDebouncedScanResetsQuietWindow
+  - query: test that deleting a source removes its vectors
+    files: [src/db.rs]
+    contains: deleting_a_source_takes_its_chunks_and_vectors_with_it
 
-  - query: tests for deleting a source
-    files: [dispatcher/internal/ingest/ingest_test.go]
-    contains: TestDeleteSourceRemovesVectorsCatalogRowsAndSource
+  - query: test that reindexing does not leak rows
+    files: [src/index.rs]
+    contains: replacing_a_document_reuses_its_rows_instead_of_growing
 
-  - query: ingest failure backoff test
-    files: [dispatcher/internal/ingest/ingest_test.go]
-    contains: TestDocumentFailurePersistsAttemptsAndCapsBackoff
+  - query: ingest failure attempts test
+    files: [src/db.rs]
+    contains: failures_count_attempts_and_clear_on_success
 
-  - query: catalog migration test
-    files: [dispatcher/internal/catalog/catalog_test.go]
+  - query: model mismatch refused test
+    files: [src/db.rs]
+    contains: a_mismatched_model_is_refused_rather_than_mixed

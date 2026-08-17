@@ -1,0 +1,9 @@
+# Formatting is settled here so `cargo fmt` and `nix flake check` agree, and so
+# nobody has to have an opinion about it in review.
+#
+# `Max` heuristics keep a struct literal, a call, or a match arm on one line
+# whenever it fits inside max_width, instead of exploding anything past a
+# fraction of it. This file has a lot of small literals — chunk rows, events,
+# test fixtures — and one line each reads better than four.
+max_width = 100
+use_small_heuristics = "Max"

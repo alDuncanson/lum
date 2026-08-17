@@ -4,7 +4,7 @@
 -- When a result looks wrong you want the only variable to be lum, and a
 -- personal config is a large pile of variables.
 --
--- Loaded by `lum-nvim-dev`, which builds the dispatcher from the working
+-- Loaded by `lum-nvim-dev`, which builds lum from the working
 -- tree, puts it first on PATH, and sets the LUM_DEV_* variables below.
 -- Run that rather than sourcing this by hand.
 
@@ -200,12 +200,12 @@ require("telescope").setup({
       -- honest: it exercises the same lookup a real user's setup does.
       executable = "lum",
       limit = 50,
-      debounce_ms = 200,
+      debounce_ms = 80,
       -- Both on here, off by default in the plugin: watching indexing happen
       -- is most of the point of a dev session, and waiting on a cold index
       -- inside the picker is the thing being avoided.
       -- verbose adds the dev tier: per-document failures, scans that
-      -- changed nothing, worker idle/respawn churn.
+      -- changed nothing, lifecycle churn.
       notify = { verbose = true },
       index_on_open = true,
     },
@@ -231,7 +231,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
       "  :LumRoot <dir>                 search another directory",
       "  binary: " .. (vim.fn.exepath("lum") ~= "" and vim.fn.exepath("lum") or "NOT ON PATH"),
       "  data:   " .. (vim.env.LUM_DATA_DIR or "?"),
-      "  api:    " .. (vim.env.LUM_HTTP_ADDR or "?"),
+      "  socket: " .. (vim.env.LUM_DATA_DIR or "~/.lum") .. "/lum.sock",
     }, "\n"), vim.log.levels.INFO)
   end,
 })

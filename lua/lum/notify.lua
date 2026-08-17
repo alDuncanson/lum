@@ -4,56 +4,56 @@
 -- Two channels, because these are two different kinds of thing.
 --
 -- Progress goes out as LSP `$/progress`, the same way rust-analyzer reports
--- indexing (see lum/progress.lua and lum/lsp.lua). Whatever renders a
--- language server's progress renders lum's, in the same corner and the same
--- style, and they stack rather than covering each other.
+-- indexing (see lum/progress.lua and lum/lsp.lua). Whatever renders a language
+-- server's progress renders lum's, in the same corner and the same style, and
+-- they stack rather than covering each other.
 --
--- Discrete events go through `vim.notify`, where they belong: a crashed
--- worker, a failed scan, a file that could not be indexed. Whichever notifier
--- is installed renders those and persists them however it persists things.
+-- Discrete events go through `vim.notify`, where they belong: a failed scan, a
+-- file that could not be indexed. Whichever notifier is installed renders
+-- those and persists them however it persists things.
 --
 -- Two tiers of detail. The default reports only what makes someone wait or
 -- tells them something broke. `verbose = true` adds per-document failures,
--- scans that changed nothing, and routine worker lifecycle churn.
+-- scans that changed nothing, and routine lifecycle churn.
+--
+-- The transport is the shared socket (lum/client.lua), and subscriptions
+-- survive the daemon idling out and restarting — a spinner must never outlive
+-- the work it reports.
 
 local M = {}
 
+local client = require("lum.client")
 local progress = require("lum.progress")
 
--- Phase labels, in the order they occur. Keys match the worker's `phase`
--- field plus the phases only the dispatcher knows about. The model download
--- is absent on purpose: it is a separate operation with its own token, the
--- way rust-analyzer reports "Roots Scanned" apart from "Indexing".
+-- Phase labels, in the order they occur. Keys match the daemon's `phase`
+-- field. The model download is absent on purpose: it is a separate operation
+-- with its own token, the way rust-analyzer reports "Roots Scanned" apart from
+-- "Indexing".
 local PHASE_LABELS = {
   reading = "reading files",
   parsing = "parsing",
   embedding = "embedding",
   storing = "storing",
-  deleting = "removing deleted files",
 }
 
 local state = {
-  job = nil,
-  stopping = false,
+  running = false,
+  unsubscribe = nil,
   scans = {},
-  -- Last worker state acted on, so transitions are measured from when this
-  -- session attached rather than from the daemon's boot. The server only
-  -- publishes a transition once it has a previous state to compare against,
-  -- so the first state its loop sees — on a cold start, the model download —
-  -- never produces one. Snapshots carry worker_state unconditionally, so
-  -- comparing them here sees it regardless.
-  worker_state = nil,
+  -- Last state acted on, so transitions are measured from when this session
+  -- attached rather than from the daemon's boot.
+  daemon_state = nil,
   activity = nil,
 }
 
 local function new_activity()
   return {
-    -- Files, from the dispatcher. Coarse: a whole batch resolves at once.
+    -- Files, from the scan planner. Coarse: a whole batch resolves at once.
     files_total = 0,
     files_done = 0,
     failed = 0,
-    -- The current phase and its own units, from inside the worker. This is
-    -- what actually advances during the slow part.
+    -- The current phase and its own units. This is what actually advances
+    -- during the slow part.
     phase = nil,
     phase_done = 0,
     phase_total = 0,
@@ -67,15 +67,15 @@ local defaults = {
   enabled = false,
   verbose = false,
   -- Progress reporting. `false` turns it off; a table is passed to
-  -- lum.progress.setup, where `mode` chooses between LSP progress ("lsp"),
-  -- a line lum draws itself ("window"), and asking whether anything renders
-  -- LSP progress before deciding ("auto", the default).
+  -- lum.progress.setup, where `mode` chooses between LSP progress ("lsp"), a
+  -- line lum draws itself ("window"), and asking whether anything renders LSP
+  -- progress before deciding ("auto", the default).
   progress = true,
   -- Stay quiet about scans faster than this that changed nothing. A warm
   -- rescan finishes in milliseconds and announcing it is flicker.
   min_scan_ms = 750,
-  -- How long a completion summary stays up before it clears. The pause is
-  -- the point: it is the confirmation that what you waited for is done.
+  -- How long a completion summary stays up before it clears. The pause is the
+  -- point: it is the confirmation that what you waited for is done.
   summary_ms = 4000,
   -- Per-level dismissal for vim.notify messages, in milliseconds. `false`
   -- means stay until dismissed, which is what an error wants.
@@ -116,14 +116,6 @@ local function notify(message, level, extra)
     end
   end
   vim.notify(message, level, opts)
-end
-
-local function relative(uri)
-  local root = vim.uv.cwd()
-  if root and vim.startswith(uri, root .. "/") then
-    return uri:sub(#root + 2)
-  end
-  return uri
 end
 
 -- ---- progress ----
@@ -169,31 +161,31 @@ local function render()
   end
 end
 
--- ---- worker state ----
+-- ---- daemon state ----
 
-function M.worker_transition(to, detail)
-  if to == nil or to == "" or to == state.worker_state then
+function M.state_transition(to, detail)
+  if to == nil or to == "" or to == state.daemon_state then
     return
   end
-  local from = state.worker_state
-  state.worker_state = to
+  local from = state.daemon_state
+  state.daemon_state = to
 
   if to == "downloading-model" then
     if progress_on() then
       progress.report("model", {
         title = "downloading the embedding model",
-        message = "~70 MB, first run",
+        message = "~130 MB, first run",
       })
     end
     return
   end
 
-  if to == "crashed" then
+  if to == "failed" then
     -- Discrete and serious: this belongs in the notifier, sticky, not on a
     -- progress report that clears itself.
     state.activity = new_activity()
     progress.hide()
-    notify(("worker crashed: %s"):format(detail or "unknown"), vim.log.levels.ERROR)
+    notify(("lum could not start: %s"):format(detail or "unknown"), vim.log.levels.ERROR)
     return
   end
 
@@ -204,8 +196,8 @@ function M.worker_transition(to, detail)
     return
   end
 
-  if config.verbose and (to == "idle" or to == "starting") then
-    notify(("worker %s"):format(to), vim.log.levels.INFO)
+  if config.verbose and to == "starting" then
+    notify("lum starting", vim.log.levels.INFO)
   end
 end
 
@@ -213,20 +205,23 @@ end
 
 -- describe folds one event into the display. Exposed for testing.
 function M.describe(event)
-  local kind = event.kind
+  local kind = event.event
   local a = state.activity
 
-  if kind == "snapshot" or kind == "worker_state_changed" then
-    M.worker_transition(event.worker_state, event.detail)
+  if kind == "state" or kind == "snapshot" then
+    M.state_transition(event.state, event.detail)
+    if kind == "snapshot" and (event.pending_documents or 0) > a.files_total then
+      a.files_total = event.pending_documents
+    end
     return
   end
 
   if kind == "scan_started" then
-    state.scans[event.source_id] = vim.uv.now()
+    state.scans[event.source] = vim.uv.now()
     return
   end
 
-  if kind == "worker_progress" then
+  if kind == "progress" then
     a.phase = event.phase
     a.phase_done = event.done or 0
     a.phase_total = event.total or 0
@@ -235,44 +230,42 @@ function M.describe(event)
     return
   end
 
-  if kind == "document_queued" then
-    a.files_total = a.files_total + 1
-    render()
-    return
-  end
-
-  if kind == "document_ingested" or kind == "document_deleted" then
+  if kind == "doc_indexed" or kind == "doc_deleted" then
     a.files_done = a.files_done + 1
+    if a.files_done > a.files_total then
+      a.files_total = a.files_done
+    end
     return
   end
 
-  if kind == "document_failed" then
+  if kind == "doc_failed" then
     a.files_done = a.files_done + 1
     a.failed = a.failed + 1
     if config.verbose then
       notify(
-        ("could not index %s: %s"):format(relative(event.uri or "?"), event.error or "unknown"),
+        ("could not index %s: %s"):format(event.path or "?", event.error or "unknown"),
         vim.log.levels.WARN
       )
     end
     return
   end
 
+  if kind == "scan_failed" then
+    state.activity = new_activity()
+    progress.finish("index")
+    notify(("indexing failed: %s"):format(event.error or "unknown"), vim.log.levels.ERROR)
+    return
+  end
+
   if kind == "scan_finished" then
-    local started = state.scans[event.source_id]
-    state.scans[event.source_id] = nil
+    local started = state.scans[event.source]
+    state.scans[event.source] = nil
     local took = event.took_ms or (started and (vim.uv.now() - started)) or 0
     local had_work = a.files_total > 0 or a.phase ~= nil
     state.activity = new_activity()
 
-    if event.error and event.error ~= "" then
-      progress.finish("index")
-      notify(("indexing failed: %s"):format(event.error), vim.log.levels.ERROR)
-      return
-    end
-
-    local ingested, removed, failed = event.ingested or 0, event.removed or 0, event.failed or 0
-    if ingested == 0 and removed == 0 and failed == 0 and took < config.min_scan_ms and not config.verbose then
+    local indexed, removed, failed = event.indexed or 0, event.removed or 0, event.failed or 0
+    if indexed == 0 and removed == 0 and failed == 0 and took < config.min_scan_ms and not config.verbose then
       -- Nothing changed and it was quick: the common case after the first
       -- index, and not news.
       progress.finish("index")
@@ -280,8 +273,8 @@ function M.describe(event)
     end
 
     local parts = {}
-    if ingested > 0 then
-      table.insert(parts, ("%d indexed"):format(ingested))
+    if indexed > 0 then
+      table.insert(parts, ("%d indexed"):format(indexed))
     end
     if removed > 0 then
       table.insert(parts, ("%d removed"):format(removed))
@@ -315,28 +308,27 @@ function M.setup(opts)
 end
 
 function M.is_running()
-  return state.job ~= nil
+  return state.running
 end
 
--- subscribed_types is derived rather than configured: progress needs the
--- per-document and worker-progress events, and subscribing to them with
--- progress off would be traffic nobody reads. Filtered server-side.
-local function subscribed_types()
-  local types = { "scan_started", "scan_finished", "worker_state_changed", "snapshot" }
+-- subscribed_kinds is derived rather than configured: progress needs the
+-- per-document and phase events, and subscribing to them with progress off
+-- would be traffic nobody reads. Filtered daemon-side.
+local function subscribed_kinds()
+  local kinds = { "state", "snapshot", "scan_started", "scan_finished", "scan_failed" }
   if progress_on() then
-    vim.list_extend(types, {
-      "document_queued",
-      "document_ingested",
-      "document_deleted",
-      "document_failed",
-      -- The one that actually moves: chunks embedded, documents stored,
-      -- reported from inside the worker while a batch is in flight.
-      "worker_progress",
+    vim.list_extend(kinds, {
+      "doc_indexed",
+      "doc_deleted",
+      "doc_failed",
+      -- The one that actually moves: chunks embedded while a batch is in
+      -- flight.
+      "progress",
     })
   elseif config.verbose then
-    table.insert(types, "document_failed")
+    table.insert(kinds, "doc_failed")
   end
-  return types
+  return kinds
 end
 
 local function handle(event)
@@ -348,60 +340,23 @@ local function handle(event)
 end
 
 -- start subscribes to the event stream. Safe to call repeatedly; only the
--- first call in a session starts a job.
+-- first call in a session subscribes.
 function M.start(executable)
-  if not config.enabled or state.job then
+  if not config.enabled or state.running then
     return
   end
-  state.worker_state = nil
+  state.running = true
+  state.daemon_state = nil
   state.activity = new_activity()
-  state.stopping = false
 
-  -- --no-replay: the server keeps a ring buffer for late joiners, which would
+  -- No replay: the daemon keeps a ring buffer for late joiners, which would
   -- otherwise arrive as a burst of reports about work that finished before
   -- Neovim started.
-  local cmd = { executable or "lum", "events", "--no-replay", "--types", table.concat(subscribed_types(), ",") }
-
-  local ok, job = pcall(vim.system, cmd, {
-    text = true,
-    stdout = function(err, data)
-      if err or not data then
-        return
-      end
-      for line in data:gmatch("[^\r\n]+") do
-        local decoded, event = pcall(vim.json.decode, line)
-        if decoded and type(event) == "table" then
-          vim.schedule(function()
-            handle(event)
-          end)
-        end
-      end
-    end,
-  }, function(result)
-    local was_stopping = state.stopping
-    state.job = nil
-    if was_stopping then
-      return
-    end
-    -- The stream died on its own. Clear everything — leaving a spinner up
-    -- forever is the exact impression this module exists to avoid — and say
-    -- so, because silence here is indistinguishable from "nothing is
-    -- happening".
+  state.unsubscribe = client.subscribe(executable or "lum", subscribed_kinds(), function(event)
     vim.schedule(function()
-      state.activity = new_activity()
-      progress.stop()
-      notify(
-        ("stopped following lum activity (exit %s); run :Telescope lum to resume")
-          :format(tostring(result and result.code or "?")),
-        vim.log.levels.WARN
-      )
+      handle(event)
     end)
-  end)
-
-  if not ok then
-    return
-  end
-  state.job = job
+  end, false)
 
   vim.api.nvim_create_autocmd("VimLeavePre", {
     once = true,
@@ -413,13 +368,11 @@ end
 
 function M.stop()
   progress.stop()
-  if state.job then
-    state.stopping = true
-    pcall(function()
-      state.job:kill("sigterm")
-    end)
-    state.job = nil
+  if state.unsubscribe then
+    state.unsubscribe()
+    state.unsubscribe = nil
   end
+  state.running = false
 end
 
 return M

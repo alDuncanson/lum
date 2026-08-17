@@ -1,37 +1,9 @@
 # lum in Neovim
 
-A Telescope extension. It discovers the current Git root, registers it, and
-runs `lum search --root <repo> --jsonl`, using the line range in each result to
+A Telescope extension. It discovers the current Git root, registers it with
+the lum daemon, and sends a search per keystroke down a socket held open for
+the session — a few milliseconds each — using the line range in each result to
 preview and open the matching code.
-
-It is an ordinary CLI client: no database, no vector index, no private socket —
-the same deal every other integration gets.
-
-Install the `lum-nvim` flake output, or add the repository with your plugin
-manager.
-
-## Getting the binary
-
-The plugin is Lua; lum is two native binaries, so they arrive separately.
-
-If `lum` is on your `PATH` — a Nix profile, a release you unpacked, a build
-from source — the plugin uses it and there is nothing else to do. Otherwise
-run `:LumInstall`, which downloads the release for your platform into
-`stdpath("data")/lum/<version>/` and verifies it against the published
-`SHA256SUMS` before unpacking. `:LumInstall!` re-downloads.
-
-It is a command rather than something that happens on startup: an editor
-plugin that quietly fetches ninety megabytes of executable the first time you
-open a file is not a thing lum should do. The picker names the command when
-the binary is missing, so it is one message and one command.
-
-The version it fetches is pinned in `lua/lum/install.lua` rather than resolved
-as "latest", because a plugin and a binary that shipped together are a tested
-pair. `nix flake check` fails if that pin disagrees with the flake.
-
-For an internal mirror, set `LUM_RELEASE_BASE_URL` to a location serving the
-same archive and `SHA256SUMS` names.
-
 
 ```lua
 require("telescope").load_extension("lum")
@@ -40,7 +12,33 @@ vim.keymap.set("n", "<leader>fs", function()
 end)
 ```
 
-Run it with the mapping or `:Telescope lum`. Optional configuration:
+Run it with the mapping or `:Telescope lum`. On a repository lum has not seen,
+the picker does not wait for indexing: it shows what is indexed so far, and
+the progress display (below) reports the rest arriving.
+
+## Getting the binary
+
+The plugin is Lua; lum is a native executable, so they arrive separately.
+
+If `lum` is on your `PATH` — a Nix profile, a release you unpacked, a build
+from source — the plugin uses it and there is nothing else to do. Otherwise
+run `:LumInstall`, which downloads the release for your platform into
+`stdpath("data")/lum/<version>/` and verifies it against the published
+`SHA256SUMS` before unpacking. `:LumInstall!` re-downloads.
+
+It is a command rather than something that happens on startup: an editor
+plugin that quietly fetches an executable the first time you open a file is
+not a thing lum should do. The picker names the command when the binary is
+missing.
+
+The version it fetches is pinned in `lua/lum/install.lua` rather than resolved
+as "latest", because a plugin and a binary that shipped together are a tested
+pair. `nix flake check` fails if that pin disagrees with the flake.
+
+For an internal mirror, set `LUM_RELEASE_BASE_URL` to a location serving the
+same archive and `SHA256SUMS` names.
+
+## Configuration
 
 ```lua
 require("telescope").setup({
@@ -48,7 +46,9 @@ require("telescope").setup({
     lum = {
       executable = "lum",
       limit = 50,
-      debounce_ms = 200,
+      debounce_ms = 80,
+      per_file = 2,            -- chunks any one file may contribute
+      exclude_tests = false,
       notify = false,          -- see below
       index_on_open = false,   -- see below
     },
@@ -59,7 +59,7 @@ require("telescope").setup({
 ## Knowing what it is doing
 
 `notify = true` reports what lum is doing. Off by default: subscribing starts
-the daemon, and opening Neovim should not.
+the daemon and keeps it warm, and opening Neovim should not.
 
 Progress is reported as LSP `$/progress`, the same way rust-analyzer reports
 indexing. Whatever renders a language server's progress renders lum's — noice,
@@ -84,8 +84,7 @@ buffer-scoped sees it, which is what statusline components use.
 
 Anything that draws its own window instead is competing for the same cells as
 your notifier, and no zindex settles that — whichever wins hides the other.
-lum tried it, and it covered rust-analyzer. Speaking the protocol every
-notifier already understands is the fix.
+Speaking the protocol every notifier already understands is the fix.
 
 With nothing listening for `LspProgress` there is nothing to see, since core
 Neovim records progress but displays none of it. In that case lum falls back
@@ -100,8 +99,8 @@ A successful index produces no notifications at all. Discrete events go
 through `vim.notify`, where your notifier renders and persists them:
 
 ```text
-worker crashed: exited: exit status 3
-could not index src/huge.json: document exceeds 32 MiB ingest limit
+lum could not start: no network access to download the embedding model
+could not index src/vendored.min.js: no parser registered for MIME type
 ```
 
 The split is deliberate: `vim.notify` is built for discrete messages, and
@@ -109,20 +108,19 @@ progress is a status display. It is why fidget exists separately from
 nvim-notify.
 
 Each phase counts whatever unit it actually advances in. Embedding counts
-chunks rather than files on purpose: the worker embeds a whole batch at once,
-so no file finishes until they all do, but chunks complete steadily throughout
-— and they are far more uniform in cost than files, so the bar moves smoothly
-instead of lurching. The percentage tracks the current phase rather than the
-whole scan, because the phase is the only thing that reports a denominator.
+chunks rather than files on purpose: a whole batch embeds at once, so no file
+finishes until they all do, but chunks complete steadily throughout — and they
+are far more uniform in cost than files, so the bar moves smoothly instead of
+lurching. The percentage tracks the current phase rather than the whole scan,
+because the phase is the only thing that reports a denominator.
 
 Errors stay on screen until dismissed. Progress stays while it runs. Routine
 information times out. Nothing is said about a warm rescan that changed
-nothing, idle shedding, or the respawn after it — a channel that reports
-non-events is one you learn to ignore.
+nothing — a channel that reports non-events is one you learn to ignore.
 
 ```lua
 notify = {
-  verbose = false,     -- add per-document failures, no-op scans, worker churn
+  verbose = false,     -- add per-document failures, no-op scans, lifecycle churn
   progress = true,     -- false leaves only notifications; a table configures
                        -- it: { mode = "auto" | "lsp" | "window" } plus, for
                        -- the window fallback, anchor / row_offset /
@@ -140,27 +138,27 @@ notify = {
 ## Indexing before you ask
 
 `index_on_open = true` registers and indexes the current Git repository when
-Neovim starts, instead of when the picker first opens.
-
-The picker registers its repository through `lum search --root`, which blocks
-until that repository's *first* index finishes — a model download plus a full
-embed on a cold repository. Telescope respawns the search on every keystroke,
-so typing during that window actively restarts the wait and the picker just
-sits empty. Indexing at open moves the work off the critical path, the way an
-LSP attaches when you open a file rather than when you first ask it something.
+Neovim starts, instead of when the picker first opens. The picker never blocks
+on indexing either way; this just moves the embedding off the moment you first
+want to search, the way an LSP attaches when you open a file rather than when
+you first ask it something.
 
 Off by default because it starts a background daemon in every Neovim session,
-including ones where you never search. Worth turning on if you use lum
-regularly. It does nothing outside a Git repository, and on an already-indexed
-one it costs a path lookup and a rescan of unchanged files.
+including ones where you never search. It does nothing outside a Git
+repository, and on an already-indexed one it costs a rescan of unchanged
+files — about a millisecond.
 
 ## Nothing here is Neovim-specific
 
-`lum events` streams the same thing as newline-delimited JSON, for any
-consumer:
+The plugin is an ordinary client of the daemon's socket: newline-delimited
+JSON, replies matched by `id`, events pushed on the same connection. Anything
+else can speak it —
 
 ```sh
-lum events --kinds                        # what can be subscribed to
-lum events --types scan_finished          # filtered server-side
-lum events --no-replay | jq -r .kind      # only what happens from now on
+printf '{"id":1,"op":"subscribe","kinds":["progress","scan_finished"]}\n' \
+  | socat - UNIX-CONNECT:$HOME/.lum/lum.sock | jq -c
 ```
+
+— and the full protocol is documented in [cli.md](cli.md). `lua/lum/client.lua`
+is a complete client in ~230 lines, the starting point for an integration with
+any other editor.

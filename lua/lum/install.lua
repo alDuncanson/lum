@@ -1,16 +1,16 @@
 -- Find lum's binary, or fetch it.
 --
--- lum is two native binaries, so it cannot ship inside a Neovim plugin the way
--- a pure-Lua one can. Nix users already have it on PATH and this module does
+-- lum is a native binary, so it cannot ship inside a Neovim plugin the way a
+-- pure-Lua one can. Nix users already have it on PATH and this module does
 -- nothing for them. Everyone else would otherwise have to install a Rust
 -- toolchain and wait out an ONNX Runtime build, which is a lot to ask before
 -- you have seen whether you like the search.
 --
 -- So: `:LumInstall` downloads the release archive for this platform into
 -- Neovim's data directory and verifies its checksum. Not automatic — an editor
--- plugin that quietly fetches 90 MB of executable on startup is not a thing
--- lum should do — but one command, and the picker says so by name when the
--- binary is missing.
+-- plugin that quietly fetches an executable on startup is not a thing lum
+-- should do — but one command, and the picker says so by name when the binary
+-- is missing.
 --
 -- The pinned version is deliberate. A plugin and a binary that shipped
 -- together are a tested pair; resolving "latest" at runtime would silently mix
@@ -21,7 +21,7 @@ local M = {}
 
 --- Release this plugin expects. Bump with flake.nix; the `plugin-version`
 --- flake check keeps them honest.
-M.version = "0.1.0"
+M.version = "0.2.0"
 
 local REPO = "alDuncanson/lum"
 
@@ -53,8 +53,7 @@ function M.target()
   local uname = vim.uv.os_uname()
   local os_name = ({ Darwin = "darwin", Linux = "linux" })[uname.sysname]
   if not os_name then
-    -- Windows is not supported at all: the dispatcher talks to the worker over
-    -- a Unix domain socket.
+    -- Windows is not supported: the daemon listens on a Unix domain socket.
     return nil, ("lum has no build for %s"):format(uname.sysname)
   end
   local arch = ({ arm64 = "arm64", aarch64 = "arm64", x86_64 = "x86_64", amd64 = "x86_64" })[uname.machine]
@@ -191,9 +190,7 @@ function M.install(opts)
 
   local dir = binary_dir()
   vim.fn.mkdir(dir, "p")
-  -- --strip-components drops the versioned directory inside the archive, so
-  -- the binaries land side by side, which is how the dispatcher finds its
-  -- worker.
+  -- --strip-components drops the versioned directory inside the archive.
   ok, err = run({ "tar", "-xzf", tarball, "-C", dir, "--strip-components", "1" })
   if not ok then
     return nil, err
@@ -203,9 +200,7 @@ function M.install(opts)
   if not executable(lum) then
     return nil, ("%s did not contain lum"):format(archive)
   end
-  for _, name in ipairs({ "lum", "lum-worker" }) do
-    vim.uv.fs_chmod(vim.fs.joinpath(dir, name), 493) -- 0755
-  end
+  vim.uv.fs_chmod(lum, 493) -- 0755
   vim.fn.delete(scratch, "rf")
   return lum
 end
@@ -232,7 +227,7 @@ function M.command()
     vim.notify(("lum %s installed at %s"):format(M.version, path), vim.log.levels.INFO)
   end, {
     bang = true,
-    desc = "Download lum's binaries for this platform (! re-downloads)",
+    desc = "Download lum's binary for this platform (! re-downloads)",
   })
 end
 

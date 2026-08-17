@@ -1,6 +1,6 @@
-# Publishes prebuilt binaries, so installing lum does not require Nix or a
-# Rust toolchain. Both binaries are self-contained — ONNX Runtime is statically
-# linked and TLS is rustls — so a release archive is two files and nothing else.
+# Publishes a prebuilt binary, so installing lum does not require Nix or a Rust
+# toolchain. It is self-contained — ONNX Runtime is statically linked and TLS is
+# rustls — so a release archive is one executable and nothing else.
 #
 # Deliberately does NOT build with Nix, even though the flake is the source of
 # truth for development. A binary built inside `nix develop` links libraries
@@ -85,11 +85,6 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: dispatcher/go.mod
-          cache-dependency-path: dispatcher/go.sum
-
       - name: Install Rust
         run: |
           # Pinned to the flake's toolchain so a release is built with what
@@ -101,7 +96,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: worker
           key: ${{ matrix.target }}
 
       - name: Build, verify, smoke test, and package
