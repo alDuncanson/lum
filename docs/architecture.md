@@ -40,7 +40,8 @@ CLI / Neovim / MCP / socat
 | `main.rs`, `cli.rs` | clap commands; `serve` runs the daemon, everything else is a socket client |
 | `config.rs` | data dir, socket path, the knobs that bound inference memory |
 | `wire.rs` | the protocol: request, reply, event |
-| `server.rs` | socket listener, per-connection framing, idle shutdown |
+| `server.rs` | listener, per-connection framing, idle shutdown |
+| `transport.rs` | the platform seam: Unix socket on Unix, named pipe on Windows |
 | `client.rs` | socket client, on-demand daemon spawn, lock-based liveness |
 | `engine.rs` | sources, scans, planning, ingest, search |
 | `db.rs` | one SQLite file — sources, documents, chunks, vectors |

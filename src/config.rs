@@ -17,7 +17,7 @@ use anyhow::{bail, Result};
 /// of the two is right for a check that only ever needs to be conservative.
 #[cfg(target_os = "macos")]
 const MAX_SOCKET_PATH: usize = 103;
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 const MAX_SOCKET_PATH: usize = 107;
 
 /// How long the daemon stays up after the last request.
@@ -160,6 +160,21 @@ impl Config {
     /// immediately rather than starting a daemon that dies and then waiting
     /// out the startup timeout.
     fn validate(&self) -> Result<()> {
+        #[cfg(unix)]
+        self.validate_socket_path()?;
+        if self.embed_batch == 0 {
+            bail!("LUM_EMBED_BATCH_SIZE must be at least 1");
+        }
+        if self.embed_token_budget < 512 {
+            bail!("LUM_EMBED_TOKEN_BUDGET must be at least 512, one full-length chunk");
+        }
+        Ok(())
+    }
+
+    /// Unix only: a named pipe has no path-length ceiling, and the socket
+    /// path is not what Windows connects to.
+    #[cfg(unix)]
+    fn validate_socket_path(&self) -> Result<()> {
         let socket = self.socket_path();
         let socket = std::path::absolute(&socket).unwrap_or(socket);
         if socket.as_os_str().len() > MAX_SOCKET_PATH {
@@ -171,12 +186,6 @@ impl Config {
                 socket.as_os_str().len(),
             );
         }
-        if self.embed_batch == 0 {
-            bail!("LUM_EMBED_BATCH_SIZE must be at least 1");
-        }
-        if self.embed_token_budget < 512 {
-            bail!("LUM_EMBED_TOKEN_BUDGET must be at least 512, one full-length chunk");
-        }
         Ok(())
     }
 
@@ -187,7 +196,8 @@ impl Config {
 
     /// The one socket. Inside the 0700 data directory rather than on a port,
     /// so access control is the directory's and no other local user can reach
-    /// it.
+    /// it. Unix only — Windows connects by pipe name; see `transport`.
+    #[cfg(unix)]
     pub fn socket_path(&self) -> PathBuf {
         self.data_dir.join("lum.sock")
     }
@@ -332,6 +342,7 @@ mod tests {
         std::env::remove_var("LUM_TEST_DURATION");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_too_long_data_dir_is_reported_as_such() {
         // Otherwise this surfaces as a bind failure mentioning SUN_LEN, which

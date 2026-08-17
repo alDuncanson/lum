@@ -88,7 +88,29 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+mod imp {
+    pub fn resident_bytes() -> u64 {
+        use windows_sys::Win32::System::ProcessStatus::{
+            K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let mut counters = unsafe { std::mem::zeroed::<PROCESS_MEMORY_COUNTERS>() };
+        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        // Safety: `counters` is a live, correctly sized PROCESS_MEMORY_COUNTERS
+        // and `cb` describes it. A zero return means nothing was written,
+        // which is why it is checked before the field is read.
+        let ok =
+            unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+        if ok == 0 {
+            return 0;
+        }
+        counters.WorkingSetSize as u64
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod imp {
     pub fn resident_bytes() -> u64 {
         0
