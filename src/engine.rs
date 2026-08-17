@@ -959,7 +959,7 @@ fn fetch_limit(limit: usize, per_file: usize) -> usize {
 }
 
 fn display_path(root: &Path, uri: &str) -> String {
-    Path::new(uri).strip_prefix(root).unwrap_or(Path::new(uri)).to_string_lossy().into_owned()
+    scan::display_path(root, Path::new(uri))
 }
 
 fn canonicalize(uri: &str) -> Result<String> {

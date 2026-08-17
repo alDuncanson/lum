@@ -119,13 +119,29 @@ pub fn scan(root: &Path, exclude: &HashSet<String>) -> Result<Vec<FileRef>> {
 
         refs.push(FileRef {
             uri: path.to_string_lossy().into_owned(),
-            path: path.strip_prefix(&root).unwrap_or(path).to_string_lossy().into_owned(),
+            path: display_path(&root, path),
             mime,
             fingerprint: fingerprint(metadata.len(), modified),
             content_hash,
         });
     }
     Ok(refs)
+}
+
+/// The path relative to the source root, always with forward slashes.
+///
+/// This string is embedded with every chunk and rendered by the picker, and
+/// the convention people search with is `docs/diagrams.md` — on every
+/// platform. Windows' native separator would otherwise leak into embeddings,
+/// making the same file embed differently depending on the OS that indexed
+/// it.
+pub fn display_path(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
+    if cfg!(windows) {
+        relative.replace('\\', "/")
+    } else {
+        relative.into_owned()
+    }
 }
 
 /// Size plus mtime in nanoseconds. Both come from the stat the walk already
@@ -229,9 +245,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "deep/nested/file.rs", "fn f() {}");
         let refs = scan(dir.path(), &HashSet::new()).unwrap();
-        assert_eq!(refs[0].path, "deep/nested/file.rs");
-        assert!(refs[0].uri.ends_with("deep/nested/file.rs"));
-        assert!(refs[0].uri.starts_with('/'));
+        assert_eq!(refs[0].path, "deep/nested/file.rs", "forward slashes on every platform");
+        assert!(Path::new(&refs[0].uri).is_absolute());
     }
 
     #[test]
@@ -248,9 +263,11 @@ mod tests {
     fn fingerprints_change_with_size_and_with_mtime() {
         let epoch = UNIX_EPOCH + Duration::from_secs(1_000);
         assert_ne!(fingerprint(10, Some(epoch)), fingerprint(11, Some(epoch)));
+        // A microsecond, not a nanosecond: SystemTime on Windows has 100 ns
+        // resolution, and an increment below it rounds to the same instant.
         assert_ne!(
             fingerprint(10, Some(epoch)),
-            fingerprint(10, Some(epoch + Duration::from_nanos(1)))
+            fingerprint(10, Some(epoch + Duration::from_micros(1)))
         );
     }
 }
