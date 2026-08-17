@@ -276,7 +276,13 @@ mod tests {
         // out, or spawns duplicates.
         let dir = tempfile::tempdir().unwrap();
         let config = test_config(dir.path());
-        let error = connect(&config).await.expect_err("nothing is listening");
+        // Not `expect_err`: that requires the success type to be Debug, and
+        // the Windows Stream wraps tokio types this test has no business
+        // constraining.
+        let error = match connect(&config).await {
+            Ok(_) => panic!("connected to an endpoint nothing is serving"),
+            Err(error) => error,
+        };
         assert!(is_unavailable(&error), "unexpected error kind: {error:?}");
     }
 }
