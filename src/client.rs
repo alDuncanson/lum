@@ -16,10 +16,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::config::Config;
+use crate::transport;
 
 /// Nothing is listening. Distinguished from every other failure because for
 /// `stop` it means success — there being nothing to stop is not an error, and
@@ -49,11 +49,11 @@ pub struct Client {
 impl Client {
     /// Connect, starting the daemon if nothing is listening.
     pub async fn connect(config: &Config) -> Result<Self> {
-        match UnixStream::connect(config.socket_path()).await {
+        match transport::connect(config).await {
             Ok(stream) => Ok(Self::wrap(stream)),
-            Err(error) if is_unavailable(&error) => {
+            Err(error) if transport::is_unavailable(&error) => {
                 ensure_daemon(config).await?;
-                let stream = UnixStream::connect(config.socket_path())
+                let stream = transport::connect(config)
                     .await
                     .context("connecting to the daemon we just started")?;
                 Ok(Self::wrap(stream))
@@ -64,15 +64,15 @@ impl Client {
 
     /// Connect only if a daemon is already running.
     pub async fn connect_existing(config: &Config) -> Result<Self> {
-        match UnixStream::connect(config.socket_path()).await {
+        match transport::connect(config).await {
             Ok(stream) => Ok(Self::wrap(stream)),
-            Err(error) if is_unavailable(&error) => Err(NotRunning.into()),
+            Err(error) if transport::is_unavailable(&error) => Err(NotRunning.into()),
             Err(error) => Err(error).context("connecting to the lum daemon"),
         }
     }
 
-    fn wrap(stream: UnixStream) -> Self {
-        let (reader, mut writer) = stream.into_split();
+    fn wrap(stream: transport::Stream) -> Self {
+        let (reader, mut writer) = tokio::io::split(stream);
         let (outbox, mut queue) = mpsc::channel::<String>(64);
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (events, _) = broadcast::channel(1024);
@@ -160,15 +160,6 @@ impl Client {
     }
 }
 
-fn is_unavailable(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::NotFound
-            | std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::AddrNotAvailable
-    )
-}
-
 /// Start a daemon, unless someone else is already doing it.
 ///
 /// Concurrent commands converge on one daemon by taking an exclusive lock,
@@ -190,7 +181,7 @@ async fn ensure_daemon(config: &Config) -> Result<()> {
             bail!("timed out waiting for another lum command to start the daemon");
         }
         // Someone else is starting it; it may already be up.
-        if UnixStream::connect(config.socket_path()).await.is_ok() {
+        if transport::connect(config).await.is_ok() {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -204,7 +195,7 @@ async fn ensure_daemon(config: &Config) -> Result<()> {
 async fn spawn_and_wait(config: &Config) -> Result<()> {
     // Recheck under the lock: whoever held it before us may have finished the
     // job while we waited.
-    if UnixStream::connect(config.socket_path()).await.is_ok() {
+    if transport::connect(config).await.is_ok() {
         return Ok(());
     }
 
@@ -217,7 +208,7 @@ async fn spawn_and_wait(config: &Config) -> Result<()> {
     let grace = Instant::now() + Duration::from_millis(500);
     let deadline = Instant::now() + config.startup_timeout;
     loop {
-        if UnixStream::connect(config.socket_path()).await.is_ok() {
+        if transport::connect(config).await.is_ok() {
             return Ok(());
         }
         if Instant::now() > grace && daemon_lock_is_free(&config.lock_path()) {

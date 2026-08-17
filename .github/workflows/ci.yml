@@ -18,6 +18,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Windows has no Nix; this is the platform's whole verification story. It
+  # runs the same `cargo test` a Unix developer runs, which includes the
+  # transport round-trip over an actual named pipe — the seam where a Windows
+  # breakage would have to show up.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
   nix:
     strategy:
       fail-fast: false
