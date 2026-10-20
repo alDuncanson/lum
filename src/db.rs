@@ -914,7 +914,7 @@ mod tests {
     #[test]
     fn an_index_created_before_fts_existed_is_backfilled_on_open() {
         // Simulates upgrading: rows in chunks the triggers never saw. The
-        // count mismatch is detected on open and the index rebuilt.
+        // inconsistency is caught by the integrity check on open and rebuilt.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lum.db");
         {

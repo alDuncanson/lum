@@ -982,7 +982,7 @@ fn collect_batch(
 /// and the best keyword-supported candidates are slotted in below it.
 ///
 /// The ranking is the exact-cosine order. Up to three insertions land at
-/// fixed positions (4th, 7th, 10th), chosen from the keyword hits by
+/// fixed positions (5th, 8th, 10th), chosen from the keyword hits by
 /// reciprocal rank fusion over both rankings — so a candidate with mid
 /// keyword rank *and* mid semantic rank beats a top keyword hit with no
 /// semantic support, which is what keeps a common-word BM25 match from
@@ -1160,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn slotting_never_touches_the_top_three() {
+    fn slotting_never_touches_the_top_four() {
         // The head is semantic by construction — the property rank fusion
         // could not provide.
         let semantic = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
