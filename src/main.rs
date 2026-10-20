@@ -19,6 +19,7 @@ mod scan;
 mod server;
 mod sys;
 mod top;
+mod transport;
 mod watch;
 mod wire;
 

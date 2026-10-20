@@ -56,7 +56,9 @@ Progress is drawn on stderr, only when stderr is a terminal and `TERM` is not
 ## The socket
 
 `$LUM_DATA_DIR/lum.sock`, inside a 0700 directory. Newline-delimited JSON: one
-object per line, in both directions.
+object per line, in both directions. (On Windows — experimental, no release
+binaries yet — the endpoint is the named pipe `\\.\pipe\lum-<data-dir>`
+instead; everything else is identical.)
 
 A line with `id` is a reply to the request that carried that `id`. A line with
 `event` is an unsolicited event, sent after `subscribe`. Requests may be
