@@ -95,6 +95,12 @@ pub async fn serve(config: Config) -> Result<()> {
         }
     });
 
+    // Registered once, outside the loop. A listener created inside
+    // `select!` is dropped and re-registered on every accept, and a signal
+    // landing in that gap is lost.
+    let ctrl_c = tokio::signal::ctrl_c();
+    let terminate = terminate_signal();
+    tokio::pin!(ctrl_c, terminate);
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -112,8 +118,8 @@ pub async fn serve(config: Config) -> Result<()> {
                 }
             }
             _ = shutdown.notified() => break,
-            _ = tokio::signal::ctrl_c() => break,
-            _ = terminate_signal() => break,
+            _ = &mut ctrl_c => break,
+            _ = &mut terminate => break,
         }
     }
 
