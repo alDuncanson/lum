@@ -28,19 +28,18 @@ points.
 ## Current
 
 `bge-small-en-v1.5`, path and heading-trail context in the embedded text,
-tree-sitter chunking, at most two chunks per file. 54 phrase queries over 113
+tree-sitter chunking, hybrid retrieval (vector ranking with fusion-selected
+BM25 slots), at most two chunks per file. 54 phrase queries over 113
 documents / 1119 chunks:
 
 | recall@1 | recall@5 | recall@10 | MRR | chunk hit |
 |---|---|---|---|---|
-| 0.59 | 0.89 | 0.89 | 0.693 | 0.73 |
+| 0.63 | 0.89 | 0.98 | 0.734 | 0.88 |
 
-The six whole misses cluster in one failure mode — queries whose exact words
-are in the file but not near anything the embedding considers similar
-("indexable file extensions" misses `src/mime.rs`, which contains a literal
-table of them). Those are lexical misses, which is what
-[#30](https://github.com/alDuncanson/lum/issues/30) (hybrid BM25 + vector
-search) exists to fix.
+One whole miss remains ("live activity tui"). `LUM_KEYWORD_SEARCH=off`
+reverts to pure-vector retrieval, which is how the hybrid comparison below
+was measured and how a "was that hit lexical or semantic?" question gets
+answered.
 
 ## What the fixture has already decided
 
@@ -80,6 +79,21 @@ queries whose answer *is* a test (people do look for tests). What shipped is
 `--no-tests`: all or nothing, off by default. The general lesson is about
 fixtures — a benchmark with no counter-examples to a change will endorse it,
 so check whether the fixture is capable of disagreeing before measuring.
+
+**Keyword search helps as an assist, and only as an assist.** Pure vector
+scored recall@1 0.63 / recall@10 0.93 / chunk hit 0.73; its whole misses were
+queries whose exact words are in the file but not near anything the embedding
+considers similar ("indexable file extensions" missing the literal
+`EXTENSIONS` table). Fusing BM25 in with reciprocal rank fusion fixed the
+tail and broke the head — recall@10 0.98 but recall@1 down to 0.54, because
+RRF's gap between semantic ranks one and two (~0.0003) is smaller than any
+useful keyword bonus, so a confident semantic first place is structurally
+indefensible. Slotting by raw BM25 order protected the head and lost the tail
+gain again: common-word matches ate the slots. What shipped keeps the ranking
+purely semantic and slots the best fusion-scored keyword hits *not already on
+screen* into 5th/8th/10th place: recall@1 0.63, recall@10 0.98, chunk hit
+0.88, MRR unchanged, for one recall@5 query. Both losing designs are recorded
+in `slot_keyword_hits`'s doc comment.
 
 **Query phrasing is part of the measurement.** An earlier fixture of full
 natural-language questions scored MRR 0.259; rewriting the same intents as the

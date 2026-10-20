@@ -108,6 +108,17 @@ result is identical to a full f32 search. Chunk *text* stays on disk and is
 fetched only for results, so an index costs its vectors and nothing else
 resident.
 
+Retrieval is hybrid. An FTS5 index over the same chunks (one virtual table in
+the same file, maintained by triggers so even cascaded deletes keep it in
+step) answers the queries an embedding misses — the exact identifier is in
+the file, but nothing about the phrasing is semantically near it. The ranking
+stays purely semantic; the best fusion-scored keyword hits not already on
+screen are slotted into 5th, 8th, and 10th place. Measured against pure
+vector on the eval: whole misses 6 → 1, recall@10 93% → 98%, right-chunk 73%
+→ 88%, with recall@1 and MRR unchanged. `LUM_KEYWORD_SEARCH=off` reverts to
+pure vector. Why fusion is slotted rather than scored — and the two designs
+that measured worse — is recorded at `slot_keyword_hits` in `engine.rs`.
+
 ## Memory
 
 Inference is where the memory is, and the knob that controls it is
@@ -232,8 +243,6 @@ Direction, tracked as issues:
   integrations stop being hand-written
 - [#29](https://github.com/alDuncanson/lum/issues/29) — a centroid pre-filter
   for the vector scan, if an index ever outgrows the flat scan
-- [#30](https://github.com/alDuncanson/lum/issues/30) — hybrid search: BM25
-  over the same chunks, fused with the vector ranking
 
 ## Known gaps (deliberate, ordered)
 

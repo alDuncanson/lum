@@ -97,8 +97,9 @@ sequenceDiagram
     M-->>E: 384 floats, L2-normalized
     E->>I: shortlist(vector, limit×8, source)
     I-->>E: chunk ids (int8 scan, approximate order)
-    E->>DB: fetch those chunks (text + exact f32)
-    E->>E: rescore in f32, sort, drop tests, collapse per file
+    E->>DB: keyword_search — BM25 over chunks_fts
+    E->>DB: fetch the union (text + exact f32)
+    E->>E: rescore in f32, slot keyword hits,<br/>drop tests, collapse per file
     E-->>S: results
     S-->>C: {"id":1,"ok":{…}}
 ```
