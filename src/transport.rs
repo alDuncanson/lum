@@ -237,6 +237,7 @@ mod tests {
             embed_batch: crate::config::DEFAULT_EMBED_BATCH,
             embed_token_budget: crate::config::DEFAULT_TOKEN_BUDGET,
             embed_threads: None,
+            keyword_search: true,
             exclude_dirs: Default::default(),
             model: crate::config::Model::Standard,
         }
