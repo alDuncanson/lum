@@ -198,6 +198,13 @@
           name = "lum-eval";
           runtimeInputs = [ pkgs.git rustToolchain ];
           text = (devPreamble "/tmp/lum-eval") + ''
+            # The preamble parses the Neovim loop's flags too. This one has
+            # no editor to attach to, and an unread variable fails shellcheck.
+            if [ "$userConfig" = 1 ]; then
+              echo "lum-eval: --user-config belongs to the Neovim loop" >&2
+              exit 2
+            fi
+
             # Keep eval/ out of the index. queries.yaml contains the phrases
             # verbatim, so indexing it made the fixture the best match for its
             # own queries — it appeared in the top five for half of them,
