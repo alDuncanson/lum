@@ -114,7 +114,7 @@ mv -f "$INSTALL_DIR/lum.tmp" "$INSTALL_DIR/lum"
 # A daemon from a previous version is still running and still answering. Every
 # command talks to whatever holds the socket, so without this the binary you
 # just installed is not the one that serves your next search.
-if [ -S "''${LUM_DATA_DIR:-$HOME/.lum}/lum.sock" ]; then
+if [ -S "${LUM_DATA_DIR:-$HOME/.lum}/lum.sock" ]; then
   "$INSTALL_DIR/lum" stop >/dev/null 2>&1 || true
 fi
 
