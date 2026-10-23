@@ -7,6 +7,7 @@
 //! ```text
 //! nix run .#eval                                  # builds, isolates, runs
 //! cargo test --release --test eval -- --ignored --nocapture
+//! LUM_EVAL_VERBOSE=1 ...                         # plus the rank of every query
 //! ```
 //!
 //! Why it exists: parsing, chunking, and embedding changes are judged on
@@ -118,6 +119,9 @@ fn retrieval_quality() {
     let mut contains_checked = 0usize;
     let mut contains_hit = 0usize;
     let mut misses: Vec<&Case> = Vec::new();
+    // Per-query ranks on request, so a two-point move in a summary metric can
+    // be traced to the queries behind it rather than guessed at.
+    let verbose = std::env::var_os("LUM_EVAL_VERBOSE").is_some();
 
     for case in &cases {
         let results = search(&root, &case.query);
@@ -136,6 +140,12 @@ fn retrieval_quality() {
                 reciprocal_rank += 1.0 / (index as f64 + 1.0);
             }
             None => misses.push(case),
+        }
+        if verbose {
+            match rank {
+                Some(index) => println!("  {:>2}  {}", index + 1, case.query),
+                None => println!("  --  {}", case.query),
+            }
         }
 
         if let Some(needle) = &case.contains {
