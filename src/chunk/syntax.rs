@@ -11,12 +11,27 @@
 //! largest nodes that fit the budget; a node too big to fit is replaced by
 //! its children, and the text between children (braces, operators, blank
 //! lines) is kept as its own span so nothing is dropped. The resulting spans
-//! tile the file end to end, and are then merged back up to the budget so
-//! chunks are as large as they can be without straddling a boundary that
-//! matters.
+//! tile the file end to end, and are then merged back up to the budget, with
+//! one rule: a declaration never shares a chunk with another declaration. A
+//! function, type, impl, or class is its own chunk, with its doc comment and
+//! attributes, so the chunk *is* the item and the picker lands on it. What
+//! merges is the text between items. The root is always descended, so a file
+//! that would fit in one chunk still yields one chunk per item.
 //!
-//! Two details earn their complexity:
+//! What a chunk does not carry is the chain of declarations enclosing it.
+//! That was built and measured (eval/README.md): shared by every method of
+//! an impl and every test of a module, it made those chunks compete for
+//! queries they should lose, and limited to enclosing functions it changed
+//! nothing. The heading trail stays for markdown, where it was measured to
+//! help.
 //!
+//! Three details earn their complexity:
+//!
+//! - **Declarations are listed per grammar.** Each language names its items
+//!   differently, and the same name can mean different things: a Lua
+//!   `function_definition` is an anonymous expression while a Python one is
+//!   the declaration itself. Bindings, imports, and constants are left out on
+//!   purpose; they are the connective tissue between items.
 //! - **Leading text travels with what it introduces.** A doc comment is a
 //!   *sibling* of the declaration in every grammar here, and a markdown
 //!   heading is a sibling of the prose under it, so greedy merging would
@@ -70,8 +85,9 @@ impl Chunker for SyntaxChunker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Body,
-    /// Text that introduces what comes after it: a doc comment, a heading.
-    /// Never the tail of a chunk if it can be the head of the next one.
+    /// Text that introduces what comes after it: a doc comment, an attribute
+    /// or decorator, a heading. Never the tail of a chunk if it can be the
+    /// head of the next one.
     Lead,
     /// Whitespace only. Never starts a chunk, never interrupts a run of
     /// leads — a blank line between a doc comment and its function must not
@@ -84,6 +100,9 @@ struct Span {
     start: usize,
     end: usize,
     kind: Kind,
+    /// One whole declaration — a function, type, impl, class — which never
+    /// shares a chunk with another declaration.
+    declaration: bool,
 }
 
 impl SyntaxChunker {
@@ -99,7 +118,7 @@ impl SyntaxChunker {
         // text goes missing from the index.
         let mut spans = Vec::new();
         self.push_text(0, root.start_byte(), src, &mut spans);
-        self.descend(root, src, 0, &mut spans);
+        self.descend(root, src, language, 0, &mut spans);
         self.push_text(root.end_byte(), src.len(), src, &mut spans);
 
         let spans = self.coalesce_leads(&spans, src);
@@ -149,13 +168,28 @@ impl SyntaxChunker {
 
     /// Emit spans covering `node` exactly, descending only where a node is
     /// too large to stand on its own.
-    fn descend(&self, node: Node, src: &[u8], depth: usize, out: &mut Vec<Span>) {
+    fn descend(
+        &self,
+        node: Node,
+        src: &[u8],
+        language: Language,
+        depth: usize,
+        out: &mut Vec<Span>,
+    ) {
         let (start, end) = (node.start_byte(), node.end_byte());
         if end <= start {
             return;
         }
-        if end - start <= self.max_bytes {
-            out.push(Span { start, end, kind: classify(&src[start..end], leads(node)) });
+        // The root is always descended, however small the file: its children
+        // are the declarations, and a file that fits in one chunk still wants
+        // one chunk per item. Below the root a node is taken whole when it fits.
+        if end - start <= self.max_bytes && node.parent().is_some() {
+            out.push(Span {
+                start,
+                end,
+                kind: classify(&src[start..end], leads(node)),
+                declaration: is_declaration(node, language),
+            });
             return;
         }
         if depth >= MAX_DEPTH || node.child_count() == 0 {
@@ -171,7 +205,7 @@ impl SyntaxChunker {
             // The gap before this child: punctuation and layout that belongs
             // to no child but is part of the file.
             self.push_text(cursor, child.start_byte(), src, out);
-            self.descend(child, src, depth + 1, out);
+            self.descend(child, src, language, depth + 1, out);
             cursor = cursor.max(child.end_byte());
         }
         self.push_text(cursor, end, src, out);
@@ -184,7 +218,12 @@ impl SyntaxChunker {
             return;
         }
         if end - start <= self.max_bytes {
-            out.push(Span { start, end, kind: classify(&src[start..end], false) });
+            out.push(Span {
+                start,
+                end,
+                kind: classify(&src[start..end], false),
+                declaration: false,
+            });
         } else {
             self.split_lines(start, end, src, out);
         }
@@ -208,6 +247,7 @@ impl SyntaxChunker {
                         start: chunk_start,
                         end: fitted,
                         kind: classify(&src[chunk_start..fitted], false),
+                        declaration: false,
                     });
                     chunk_start = fitted;
                 }
@@ -221,6 +261,7 @@ impl SyntaxChunker {
                         start: chunk_start,
                         end: boundary,
                         kind: classify(&src[chunk_start..boundary], false),
+                        declaration: false,
                     });
                     chunk_start = boundary;
                 }
@@ -232,6 +273,10 @@ impl SyntaxChunker {
     }
 
     /// Merge spans back up to the budget, then turn each run into a chunk.
+    ///
+    /// Two things end a chunk: the budget, and a declaration arriving while
+    /// the chunk already holds code. The second is what makes a chunk one
+    /// item rather than whatever happened to fit.
     fn assemble(
         &self,
         parsed: &ParsedText,
@@ -241,6 +286,10 @@ impl SyntaxChunker {
         let text = &parsed.text;
         let mut ranges: Vec<(usize, usize)> = Vec::new();
         let mut current: Option<(usize, usize)> = None;
+        // Whether `current` holds code yet, as opposed to only comments. A
+        // declaration may join a chunk that is so far only its own doc
+        // comment, never one that already holds another item.
+        let mut current_has_code = false;
         // Start of the run of comments at the tail of `current`, if any.
         let mut trailing_lead: Option<usize> = None;
 
@@ -248,11 +297,25 @@ impl SyntaxChunker {
             if span.end <= span.start {
                 continue;
             }
+            // Punctuation left over after an item: a closing brace, a
+            // semicolon. Never letters, so prose always stays within budget.
+            let scrap = span.kind == Kind::Body
+                && span.end - span.start <= 32
+                && !text.as_bytes()[span.start..span.end].iter().any(|b| b.is_ascii_alphanumeric());
             match current {
                 // Leading blank space belongs to no chunk.
                 None if span.kind == Kind::Blank => continue,
-                None => current = Some((span.start, span.end)),
-                Some((start, end)) if span.end - start <= self.max_bytes => {
+                None => {
+                    current = Some((span.start, span.end));
+                    current_has_code = false;
+                }
+                // Scraps join the item before them even when the budget is
+                // spent: a chunk that is one `}` helps nobody, and the budget
+                // guides the model's context rather than marking a hard edge.
+                Some((start, end))
+                    if !(span.declaration && current_has_code)
+                        && (span.end - start <= self.max_bytes || scrap) =>
+                {
                     current = Some((start, span.end.max(end)))
                 }
                 Some((start, end)) => {
@@ -282,13 +345,17 @@ impl SyntaxChunker {
                         }
                     }
                     trailing_lead = None;
+                    current_has_code = false;
                 }
             }
             match span.kind {
                 Kind::Lead => {
                     trailing_lead.get_or_insert(span.start);
                 }
-                Kind::Body => trailing_lead = None,
+                Kind::Body => {
+                    trailing_lead = None;
+                    current_has_code = true;
+                }
                 Kind::Blank => {}
             }
         }
@@ -322,10 +389,43 @@ impl SyntaxChunker {
 
 /// Whether a node introduces what follows it: a comment in any of the
 /// spellings the grammars use (`comment`, `line_comment`, `block_comment`,
-/// `doc_comment`), or a markdown heading.
+/// `doc_comment`), a Rust attribute or Python decorator, or a markdown
+/// heading.
 fn leads(node: Node) -> bool {
     let kind = node.kind();
-    kind.contains("comment") || kind.contains("heading")
+    kind.contains("comment")
+        || kind.contains("heading")
+        || kind == "attribute_item"
+        || kind == "decorator"
+}
+
+/// Whether a node is one whole declaration: the unit a chunk should be.
+///
+/// Per grammar, because the names differ and so do the traps: a Lua
+/// `function_definition` is an anonymous expression while a Python one is
+/// the declaration itself. Bindings, imports, and constants are deliberately
+/// absent — they are the connective tissue between items, and merging them
+/// into a neighbour is right.
+fn is_declaration(node: Node, language: Language) -> bool {
+    let kind = node.kind();
+    match language {
+        Language::Rust => match kind {
+            "function_item" | "impl_item" | "trait_item" | "enum_item" | "struct_item"
+            | "union_item" | "macro_definition" => true,
+            // `mod tests { ... }` is an item to land on; `mod db;` is one line of
+            // plumbing that belongs with its neighbours.
+            "mod_item" => node.child_by_field_name("body").is_some(),
+            _ => false,
+        },
+        Language::Lua => kind == "function_declaration",
+        Language::Go => {
+            matches!(kind, "function_declaration" | "method_declaration" | "type_declaration")
+        }
+        Language::Python => {
+            matches!(kind, "function_definition" | "class_definition" | "decorated_definition")
+        }
+        Language::Nix | Language::Markdown => false,
+    }
 }
 
 /// The heading trail in force at any point in a markdown document.
@@ -505,11 +605,99 @@ func (r *Runner) Run(ctx context.Context, uri string) (int, error) {
 "#;
 
     #[test]
-    fn small_file_is_one_chunk() {
+    fn every_declaration_is_its_own_chunk() {
+        // The whole file fits in the budget and still splits: a type and a
+        // function are two things to land on, each with the comment that
+        // introduces it. What merges is the preamble between them.
         let chunks = SyntaxChunker::default().chunk(&code(GO_FILE, Language::Go));
-        assert_eq!(chunks.len(), 1, "{GO_FILE} is well under the budget");
-        assert!(chunks[0].text.starts_with("package ingest"));
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(chunks.len(), 3, "{texts:#?}");
+        assert!(texts[0].starts_with("package ingest"));
+        assert!(texts[1].starts_with("// Runner drives"), "{:?}", texts[1]);
+        assert!(texts[1].contains("type Runner struct"));
+        assert!(texts[2].starts_with("// Run reads"), "{:?}", texts[2]);
         assert_eq!(chunks[0].start_line, 1);
+        assert_eq!(chunks[1].start_line, 5);
+        assert_eq!(chunks[2].start_line, 10);
+    }
+
+    const RUST_ENUM_FILE: &str = r#"//! Which grammar, if any, applies to a document.
+//!
+//! Lookup goes through MIME types rather than extensions.
+
+use tree_sitter::Language as Grammar;
+
+/// A language lum can parse into a syntax tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    Go,
+    Rust,
+}
+
+impl Language {
+    /// The language for a MIME type.
+    pub fn from_mime(mime_type: &str) -> Option<Self> {
+        match mime_type {
+            "text/x-go" => Some(Self::Go),
+            "text/x-rust" => Some(Self::Rust),
+            _ => None,
+        }
+    }
+
+    /// The compiled grammar.
+    pub fn grammar(self) -> Grammar {
+        match self {
+            Self::Go => tree_sitter_go::LANGUAGE.into(),
+            Self::Rust => tree_sitter_rust::LANGUAGE.into(),
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn a_small_enum_is_its_own_chunk_with_its_attributes() {
+        // The picker should land on `pub enum Language`, not on the module
+        // doc above it, so the enum, its doc comment, and its derive open a
+        // chunk of their own even though the whole file would fit in one.
+        let chunks = SyntaxChunker::default().chunk(&code(RUST_ENUM_FILE, Language::Rust));
+        let with_enum = chunks
+            .iter()
+            .find(|c| c.text.contains("pub enum Language"))
+            .expect("the enum must be in some chunk");
+        assert!(with_enum.text.starts_with("/// A language lum can parse"), "{:?}", with_enum.text);
+        assert!(
+            !with_enum.text.contains("//! Which grammar"),
+            "the module doc leaked into the enum's chunk: {:?}",
+            with_enum.text
+        );
+        assert_eq!(with_enum.start_line, 7);
+    }
+
+    #[test]
+    fn methods_of_an_oversized_impl_are_their_own_chunks() {
+        // 300 bytes cannot hold the impl, so each method is a chunk, opening
+        // on its own doc comment.
+        let chunker = SyntaxChunker { max_bytes: 300, ..Default::default() };
+        let chunks = chunker.chunk(&code(RUST_ENUM_FILE, Language::Rust));
+        let from_mime = chunks.iter().find(|c| c.text.contains("fn from_mime")).unwrap();
+        assert!(
+            from_mime.text.starts_with("/// The language for a MIME type"),
+            "{:?}",
+            from_mime.text
+        );
+        assert!(!from_mime.text.contains("fn grammar"), "{:?}", from_mime.text);
+    }
+
+    #[test]
+    fn module_declarations_without_bodies_are_plumbing() {
+        // `mod db;` is one line that names a file; twenty of them in main.rs
+        // are one chunk, not twenty. `mod tests { ... }` is a different thing.
+        let text =
+            "//! The binary.\n\nmod cli;\nmod db;\nmod embed;\n\nfn main() {\n    cli::run();\n}\n";
+        let chunks = SyntaxChunker::default().chunk(&code(text, Language::Rust));
+        assert_eq!(chunks.len(), 2, "{chunks:#?}");
+        assert!(chunks[0].text.contains("mod cli;") && chunks[0].text.contains("mod embed;"));
+        assert!(chunks[1].text.starts_with("fn main()"), "{:?}", chunks[1].text);
     }
 
     #[test]
@@ -785,9 +973,18 @@ Trailing prose.
     }
 
     #[test]
-    fn code_carries_no_heading_context() {
-        for chunk in SyntaxChunker::default().chunk(&code(GO_FILE, Language::Go)) {
-            assert_eq!(chunk.context, "");
+    fn code_carries_no_context() {
+        // Measured, not assumed: a chain of enclosing declarations as context
+        // made every method of an impl compete for the impl's queries. See the
+        // module docs and eval/README.md.
+        for max_bytes in [200, 1200] {
+            let chunker = SyntaxChunker { max_bytes, ..Default::default() };
+            for chunk in chunker.chunk(&code(GO_FILE, Language::Go)) {
+                assert_eq!(chunk.context, "");
+            }
+            for chunk in chunker.chunk(&code(RUST_ENUM_FILE, Language::Rust)) {
+                assert_eq!(chunk.context, "");
+            }
         }
     }
 
