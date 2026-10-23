@@ -32,6 +32,11 @@ Changes to parsing, chunking, or the embedding model are hard to judge by
 looking at results, so [eval/](../eval/README.md) scores them: recall@k, MRR,
 and whether the returned chunk is the part you wanted.
 
+CI runs the same measurement on every pull request, in the `eval` job, and
+prints the numbers in the job summary; the model is cached between runs. It
+is informative rather than required: the test only enforces a recall@5
+floor, so a regression shows up as a number to read, not a red check.
+
 ## Neovim loop
 
 ```sh
