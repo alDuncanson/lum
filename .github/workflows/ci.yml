@@ -43,3 +43,44 @@ jobs:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
       - run: nix flake check --print-build-logs
+
+  # Retrieval quality, measured: the eval fixture scored by the real binary
+  # against a real index of this repository. Linux only, because retrieval is
+  # the same on every platform; the model is cached between runs, so a run
+  # costs one release build plus one embedding pass. The numbers land in the
+  # job summary. Informative rather than required, like the Windows job, until
+  # it has a track record — the test itself only enforces a recall@5 floor.
+  eval:
+    runs-on: ubuntu-latest
+    env:
+      LUM_DATA_DIR: /tmp/lum-eval
+      # Mirrors what `nix run .#eval` sets: eval/ holds the queries verbatim,
+      # so indexing it would score the fixture against itself.
+      LUM_EXCLUDE_DIRS: node_modules,vendor,target,__pycache__,eval
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lum-eval/models
+          key: eval-model-${{ hashFiles('src/model.rs') }}
+      - name: Score retrieval against eval/queries.yaml
+        shell: bash
+        run: cargo test --release --locked --test eval -- --ignored --nocapture 2>&1 | tee eval.log
+      - name: Post the numbers to the job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '```'
+            sed -n '/^  queries/,/^test retrieval_quality/p' eval.log | grep -v '^test retrieval_quality'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Stop the daemon the test started
+        if: always()
+        run: target/release/lum stop || true
