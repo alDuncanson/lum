@@ -25,16 +25,10 @@ local M = {}
 local client = require("lum.client")
 local progress = require("lum.progress")
 
--- Phase labels, in the order they occur. Keys match the daemon's `phase`
--- field. The model download is absent on purpose: it is a separate operation
--- with its own token, the way rust-analyzer reports "Roots Scanned" apart from
--- "Indexing".
-local PHASE_LABELS = {
-  reading = "reading files",
-  parsing = "parsing",
-  embedding = "embedding",
-  storing = "storing",
-}
+-- The daemon reports one indexing phase, embedding, and its `phase` field is
+-- shown as is. The model download is reported separately on purpose: it is
+-- its own operation with its own token, the way rust-analyzer reports "Roots
+-- Scanned" apart from "Indexing".
 
 local state = {
   running = false,
@@ -121,8 +115,8 @@ end
 -- ---- progress ----
 
 -- indexing composes the current activity into the three fields LSP progress
--- carries: a fixed title, a message that changes, and a percentage. Exposed
--- for testing — these rules are the whole design.
+-- carries: a fixed title, a message that changes, and a percentage. These
+-- rules are the whole design.
 --
 -- The percentage tracks the current phase rather than the whole scan, because
 -- the phase is the only thing reporting a denominator. A bar that restarts at
@@ -130,7 +124,7 @@ end
 -- inventing the ratio between them.
 function M.indexing()
   local a = state.activity
-  local label = a.phase and (PHASE_LABELS[a.phase] or a.phase) or nil
+  local label = a.phase
 
   local message, percentage
   if label and a.phase_total > 0 then
@@ -203,7 +197,7 @@ end
 
 -- ---- events ----
 
--- describe folds one event into the display. Exposed for testing.
+-- describe folds one event into the display.
 function M.describe(event)
   local kind = event.event
   local a = state.activity
@@ -305,10 +299,6 @@ function M.setup(opts)
   if type(config.progress) == "table" then
     progress.setup(config.progress)
   end
-end
-
-function M.is_running()
-  return state.running
 end
 
 -- subscribed_kinds is derived rather than configured: progress needs the

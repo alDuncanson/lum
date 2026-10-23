@@ -268,8 +268,4 @@ function M.stop()
   lsp.stop()
 end
 
-function M.is_visible()
-  return state.win ~= nil and vim.api.nvim_win_is_valid(state.win)
-end
-
 return M
