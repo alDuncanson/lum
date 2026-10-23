@@ -31,7 +31,8 @@ nix run .#eval -- --fresh      # wipe the eval index first
 
 Changes to parsing, chunking, or the embedding model are hard to judge by
 looking at results, so [eval/](../eval/README.md) scores them: recall@k, MRR,
-and whether the returned chunk is the part you wanted.
+and whether the returned chunk is the part you wanted. `LUM_EVAL_VERBOSE=1`
+adds the rank of every query, for finding which ones moved.
 
 CI runs the same measurement on every pull request, in the `eval` job, and
 prints the numbers in the job summary; the model is cached between runs. It

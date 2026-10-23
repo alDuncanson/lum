@@ -189,6 +189,14 @@ lum add ~/code/thing
               └─ vanished ──▶ delete (chunks cascade)
 ```
 
+Code is chunked one declaration per chunk: a function, type, impl, or class
+with its doc comment and attributes, so a result is the item itself and the
+picker lands on it. Anything larger than the 1200-byte budget splits at
+syntax boundaries below that; text between items merges into a neighbour.
+Markdown splits at headings and carries its heading trail as embedded
+context. Code carries only its path: embedding the enclosing declarations
+measured worse (see [eval/README.md](../eval/README.md)).
+
 Scans are stat-only in the common case; only files whose fingerprint moved are
 read and hashed (BLAKE3). Files written within the last two seconds are hashed
 regardless — a write landing in the same mtime tick with the same size is

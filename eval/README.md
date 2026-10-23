@@ -16,6 +16,10 @@ LUM_EXCLUDE_DIRS=node_modules,vendor,target,__pycache__,eval \
 cargo test --release --test eval -- --ignored --nocapture
 ```
 
+Add `LUM_EVAL_VERBOSE=1` to print the rank of every query as well. That is how
+a two-point move in a summary metric gets traced to the queries behind it,
+rather than guessed at.
+
 It runs against its own data directory (`/tmp/lum-eval`), so a measurement
 never depends on — or disturbs — your real index. Use `--fresh` whenever the
 change under test invalidates existing vectors, which anything touching the
@@ -33,16 +37,17 @@ macOS run of the same tree. Compare CI to CI, and a laptop to itself.
 
 ## Current
 
-`bge-small-en-v1.5`, path and heading-trail context in the embedded text,
-tree-sitter chunking, hybrid retrieval (vector ranking with fusion-selected
-BM25 slots), at most two chunks per file. 54 phrase queries over 113
-documents / 1119 chunks:
+`bge-small-en-v1.5` on bare text (no query instruction, no passage prefix),
+the path as embedded context plus the heading trail for markdown, one chunk
+per declaration under a 1200-byte budget, hybrid retrieval (vector ranking
+with fusion-selected BM25 slots), at most two chunks per file. 62 phrase
+queries over 47 documents / 733 chunks, on an M-series Mac:
 
 | recall@1 | recall@5 | recall@10 | MRR | chunk hit |
 |---|---|---|---|---|
-| 0.63 | 0.89 | 0.98 | 0.734 | 0.88 |
+| 0.65 | 0.90 | 0.98 | 0.767 | 0.83 |
 
-One whole miss remains ("live activity tui"). `LUM_KEYWORD_SEARCH=off`
+One whole miss remains ("indexable file extensions"). `LUM_KEYWORD_SEARCH=off`
 reverts to pure-vector retrieval, which is how the hybrid comparison below
 was measured and how a "was that hit lexical or semantic?" question gets
 answered.
@@ -100,6 +105,34 @@ purely semantic and slots the best fusion-scored keyword hits *not already on
 screen* into 5th/8th/10th place: recall@1 0.63, recall@10 0.98, chunk hit
 0.88, MRR unchanged, for one recall@5 query. Both losing designs are recorded
 in `slot_keyword_hits`'s doc comment.
+
+**The model's own text format, not another model's.** The embedder wrapped
+queries in `query:` and chunks in `passage:`, which is the e5 family's
+convention; BGE v1.5 makes the query instruction optional and gives passages
+none. Measured with fresh indexes on the 62-query fixture: bare text moved
+recall@1 0.58 → 0.63 and MRR 0.705 → 0.734 for a two-point cost at recall@5
+and one chunk hit, and the official query instruction did worse than either
+on chunk hit (0.73 against 0.83 on the 54-query fixture). Bare text shipped,
+and the index identity string changed with it so old indexes rebuild.
+
+**One chunk per declaration.** Merging up to the budget regardless of content
+put a ten-line enum in the same chunk as the module doc above it, and the
+picker landed on line 1. Giving every function, type, impl, and class its own
+chunk, doc comment and attributes attached, moved "lum language enum" from
+fifth to first and nine queries into first place overall: recall@1 0.63 →
+0.65, MRR 0.734 → 0.767, recall@10 0.97 → 0.98, chunk hit 0.80 → 0.83, and
+the "live activity tui" miss recovered. The cost is at recall@5 (0.92 →
+0.90): three file-level queries about the Lua client and picker, whose answer
+used to be one big chunk and is now spread across many small ones. The index
+grew from 492 to 733 chunks.
+
+**Enclosing-declaration context does not help code.** The natural step after
+the heading trail, embedding `impl Language > fn from_mime` above a chunk,
+was built and measured. Shared by every method of an impl and every test of
+a module, it made those chunks compete for the impl's queries: chunk hit
+fell 0.83 → 0.71 and two whole misses appeared. Limited to enclosing
+functions only, it changed nothing (MRR 0.768 against 0.767). Removed. The
+heading trail stays, because for prose it measured the other way.
 
 **Query phrasing is part of the measurement.** An earlier fixture of full
 natural-language questions scored MRR 0.259; rewriting the same intents as the
