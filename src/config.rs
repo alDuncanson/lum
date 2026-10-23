@@ -76,12 +76,16 @@ impl Model {
     /// changing this string would silently mix incomparable vectors.
     ///
     /// Labels, frozen once written: the quantized one names the repository
-    /// its file was first taken from, not where `repo()` fetches it today,
-    /// and renaming it would force every quantized index to rebuild.
+    /// its file was first taken from, not where `repo()` fetches it today.
+    ///
+    /// The `@2` is the text format, which is part of the identity because it
+    /// changes every vector: format 2 embeds chunks bare and at declaration
+    /// granularity; format 1 wrapped them in e5-style prefixes. An index from
+    /// one refuses the other with a `lum reindex` hint instead of mixing them.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Standard => "BAAI/bge-small-en-v1.5",
-            Self::Quantized => "Qdrant/bge-small-en-v1.5-onnx-Q",
+            Self::Standard => "BAAI/bge-small-en-v1.5@2",
+            Self::Quantized => "Qdrant/bge-small-en-v1.5-onnx-Q@2",
         }
     }
 

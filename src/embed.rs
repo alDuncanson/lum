@@ -176,13 +176,16 @@ impl Embedder {
         self.model.dimension()
     }
 
-    /// Embed a search query.
+    /// Embed a search query, bare.
     ///
-    /// bge models are trained with asymmetric prefixes, so a query and the
-    /// passage answering it land near each other rather than queries landing
-    /// near queries.
+    /// BGE v1.5 makes the query instruction optional and gives passages none.
+    /// Measured on the eval, same tree and same fixture: bare text scored
+    /// recall@1 65% and MRR 0.743 against 57% and 0.704 for the e5-style
+    /// `query:`/`passage:` pair this used to add, and the official instruction
+    /// did worse still on chunk hits. The pair was another model family's
+    /// convention; this model never saw it in training.
     pub fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
-        let text = format!("query: {query}");
+        let text = query.to_owned();
         let mut session = self.query.lock().expect("query session poisoned");
         let mut vectors = infer(&mut session, &self.tokenizer, &[text], self.dimension())?;
         vectors.pop().ok_or_else(|| anyhow!("model returned no vector for the query"))
@@ -204,8 +207,6 @@ impl Embedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let prefixed: Vec<String> = texts.iter().map(|t| format!("passage: {t}")).collect();
-
         // Length-sorted, token-budgeted batching.
         //
         // Padding is per batch, so grouping similar-length sequences keeps the
@@ -217,8 +218,8 @@ impl Embedder {
         //
         // Sorting descending puts the widest batch first, so the peak is
         // established immediately rather than creeping up over a long index.
-        let mut order: Vec<usize> = (0..prefixed.len()).collect();
-        order.sort_by_key(|&i| std::cmp::Reverse(estimated_tokens(&prefixed[i])));
+        let mut order: Vec<usize> = (0..texts.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(estimated_tokens(&texts[i])));
 
         let mut guard = self.ingest.lock().expect("ingest session poisoned");
         let session = match guard.as_mut() {
@@ -234,17 +235,17 @@ impl Embedder {
         while start < order.len() {
             // Sorted descending, so the first entry is the widest and sets the
             // padded width for the whole batch.
-            let width = estimated_tokens(&prefixed[order[start]]).max(1);
+            let width = estimated_tokens(&texts[order[start]]).max(1);
             let rows = (self.token_budget / width).clamp(1, self.batch);
             let end = (start + rows).min(order.len());
             batches.push(&order[start..end]);
             start = end;
         }
 
-        let mut out: Vec<Vec<f32>> = vec![Vec::new(); prefixed.len()];
+        let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
         let mut done = 0;
         for batch in batches {
-            let inputs: Vec<String> = batch.iter().map(|&i| prefixed[i].clone()).collect();
+            let inputs: Vec<String> = batch.iter().map(|&i| texts[i].clone()).collect();
             let vectors = infer(session, &self.tokenizer, &inputs, self.dimension())?;
             for (&index, vector) in batch.iter().zip(vectors) {
                 out[index] = vector;
