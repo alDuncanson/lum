@@ -28,8 +28,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         run: |
-          rustup toolchain install 1.90.0 --profile minimal
-          rustup default 1.90.0
+          # The flake pins the toolchain; read it from there, as release.yml does.
+          toolchain=$(grep -oE 'rust-bin\.stable\."[0-9.]+"' flake.nix | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup default "$toolchain"
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
 
@@ -61,8 +63,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         run: |
-          rustup toolchain install 1.90.0 --profile minimal
-          rustup default 1.90.0
+          # The flake pins the toolchain; read it from there, as release.yml does.
+          toolchain=$(grep -oE 'rust-bin\.stable\."[0-9.]+"' flake.nix | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup default "$toolchain"
       - uses: Swatinem/rust-cache@v2
       - name: Cache the embedding model
         uses: actions/cache@v4
