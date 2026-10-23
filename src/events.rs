@@ -72,8 +72,6 @@ pub struct Event {
     pub unchanged: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub queued: Option<u64>,
 
     // snapshot
     #[serde(skip_serializing_if = "Option::is_none")]
