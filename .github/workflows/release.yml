@@ -25,7 +25,7 @@
 # Every step below is `scripts/build-release.sh`, so this path can be run on a
 # laptop instead of only on a tag.
 #
-# Trigger with a tag (`git tag v0.1.0 && git push --tags`) or from the Actions
+# Trigger with a tag (`git tag vX.Y.Z && git push --tags`) or from the Actions
 # tab, which builds without publishing so the pipeline can be exercised on a
 # private repository.
 

@@ -184,7 +184,7 @@ local function open(executable, callback)
         pipe:close()
       end
       -- Nothing listening: start it, then keep trying while it comes up. A
-      -- first run includes a 133 MB model download, so the ceiling is
+      -- first run includes a ~130 MB model download, so the ceiling is
       -- generous; every attempt after the first is a cheap connect.
       if attempts == 1 then
         -- vim.system touches the Vim API, and this is a connect callback.
@@ -260,10 +260,6 @@ end
 function M.close()
   state.subscribers = {}
   teardown()
-end
-
-function M.is_connected()
-  return state.status == "open"
 end
 
 return M

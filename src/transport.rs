@@ -97,8 +97,8 @@ mod imp {
 
     /// One type for both directions. A named-pipe server end and client end
     /// are different types in tokio, and everything above this module wants
-    /// one `Stream`; boxing the client side unifies them for the cost of a
-    /// vtable hop per read, which does not measure against a pipe hop.
+    /// one `Stream`; an enum over both ends unifies them, one match per read,
+    /// which does not measure against a pipe hop.
     pub enum Stream {
         Server(NamedPipeServer),
         Client(tokio::net::windows::named_pipe::NamedPipeClient),

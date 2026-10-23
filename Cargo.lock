@@ -1357,7 +1357,6 @@ dependencies = [
  "hf-hub",
  "ignore",
  "libc",
- "ndarray",
  "notify",
  "ort",
  "ratatui",

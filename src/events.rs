@@ -72,8 +72,6 @@ pub struct Event {
     pub unchanged: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub queued: Option<u64>,
 
     // snapshot
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +86,8 @@ pub struct Event {
     pub total_chunks: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rss_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<&'static str>,
 }

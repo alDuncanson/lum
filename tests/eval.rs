@@ -200,7 +200,7 @@ fn the_fixture_parses_and_points_at_files_that_exist() {
     // Runs in the ordinary suite, unlike the measurement itself. A fixture
     // naming a path that no longer exists cannot ever be satisfied, and it
     // shows up as a permanent miss that reads like a retrieval regression —
-    // which is exactly what happened to every entry in it during the rewrite.
+    // which is exactly what happened to every entry in it when files moved.
     let root = repo_root();
     let fixture = std::fs::read_to_string(root.join("eval/queries.yaml")).unwrap();
     let cases = parse(&fixture);

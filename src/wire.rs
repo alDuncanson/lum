@@ -1,4 +1,4 @@
-//! The protocol: newline-delimited JSON over one Unix socket.
+//! The protocol: newline-delimited JSON over one local socket.
 //!
 //! Every message is a single JSON object on a single line, and there are
 //! exactly two kinds. A reply carries `id`, matching the `id` of the request
@@ -204,8 +204,8 @@ pub struct Status {
     pub sources: i64,
     pub documents: i64,
     pub chunks: i64,
-    /// Resident set size in bytes, so `lum status` can answer the question
-    /// this rewrite exists to answer without anyone reaching for `ps`.
+    /// Resident set size in bytes, so `lum status` can answer "how much is
+    /// this costing me" without anyone reaching for `ps`.
     pub rss_bytes: u64,
     pub index_bytes: u64,
     /// Resident bytes held by the searchable vectors themselves.

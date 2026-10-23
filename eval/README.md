@@ -12,6 +12,7 @@ nix run .#eval -- --fresh               # wipe and re-index first
 Or directly, against whatever daemon is already running:
 
 ```sh
+LUM_EXCLUDE_DIRS=node_modules,vendor,target,__pycache__,eval \
 cargo test --release --test eval -- --ignored --nocapture
 ```
 
@@ -20,10 +21,15 @@ never depends on — or disturbs — your real index. Use `--fresh` whenever the
 change under test invalidates existing vectors, which anything touching the
 chunker, the parsers, or the model does.
 
+CI runs the same test on every pull request, in the `eval` job, and posts
+the numbers to the job summary; see [docs/development.md](../docs/development.md).
+
 The corpus is this repository, which changes underneath the benchmark — so
 only runs taken on the same tree compare, and the numbers are comparable
 rather than precise. With ~50 queries, one flipping moves recall by two
-points.
+points. Platforms do not compare either: inference is not bit-identical
+across CPUs, so the CI job's Linux numbers sit a query or two away from a
+macOS run of the same tree. Compare CI to CI, and a laptop to itself.
 
 ## Current
 
@@ -128,7 +134,8 @@ the system does not have.
   by the person optimizing against it drifts toward what the system already
   does well.
 
-Two guards run in the ordinary test suite, because a stale answer key
-otherwise scores as a miss forever: every `files` entry must exist, and the
-fixture itself is excluded from the index — it contains every query verbatim,
-and indexing it once made it the best match for half of its own queries.
+One guard runs in the ordinary test suite, because a stale answer key
+otherwise scores as a miss forever: every `files` entry must exist. The
+fixture itself is kept out of the index by `LUM_EXCLUDE_DIRS`, which the
+wrapper and the CI job both set — it contains every query verbatim, and
+indexing it once made it the best match for half of its own queries.

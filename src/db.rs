@@ -100,7 +100,7 @@ pub struct Source {
     pub uri: String,
 }
 
-/// What the catalog remembers about a document, for diffing against a scan.
+/// What the database remembers about a document, for diffing against a scan.
 #[derive(Debug, Clone)]
 pub struct DocumentState {
     pub fingerprint: String,
@@ -189,7 +189,7 @@ impl Db {
     }
 
     /// Bytes on disk, including the write-ahead log. Reported by `status`
-    /// because it is the number this rewrite most wants to be held to.
+    /// because the size of the index is a number worth holding lum to.
     pub fn size_bytes(&self) -> u64 {
         let mut total = 0;
         for suffix in ["", "-wal", "-shm"] {
@@ -257,7 +257,7 @@ impl Db {
 
     // ---- documents ----
 
-    /// Everything the catalog knows about one source's documents, keyed by
+    /// Everything the database knows about one source's documents, keyed by
     /// URI, for diffing a scan against.
     pub fn document_states(&self, source_id: &str) -> Result<HashMap<String, DocumentState>> {
         let conn = self.read.lock().unwrap();
@@ -748,8 +748,8 @@ mod tests {
 
     #[test]
     fn deleting_a_source_takes_its_chunks_and_vectors_with_it() {
-        // The invariant the old two-store design had to maintain by hand, and
-        // could still lose after a hard crash.
+        // The invariant a second store would have to maintain by hand, and
+        // could still lose after a hard crash; here one foreign key holds it.
         let (_dir, db) = db();
         let (source, _) = db.add_source("/repo").unwrap();
         let vectors = vec![vec![1.0, 0.0], vec![0.0, 1.0]];

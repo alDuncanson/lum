@@ -73,8 +73,8 @@ impl Index {
         self.live
     }
 
-    /// Resident bytes. Reported by `status` so the memory claim this rewrite
-    /// makes is checkable without a profiler.
+    /// Resident bytes. Reported by `status` so the memory claim in the
+    /// architecture doc is checkable without a profiler.
     pub fn memory_bytes(&self) -> usize {
         self.codes.capacity()
             + self.scales.capacity() * 4

@@ -1,6 +1,7 @@
 # Developing lum
 
-Lum targets Unix-like systems; it listens on a Unix domain socket.
+Lum runs on macOS and Linux over a Unix domain socket. Windows support is
+experimental, over a named pipe, and verified only by CI.
 
 ```sh
 nix develop                      # pinned Rust toolchain

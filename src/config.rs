@@ -74,6 +74,10 @@ pub enum Model {
 impl Model {
     /// Identity recorded in the database. Changing embedder output without
     /// changing this string would silently mix incomparable vectors.
+    ///
+    /// Labels, frozen once written: the quantized one names the repository
+    /// its file was first taken from, not where `repo()` fetches it today,
+    /// and renaming it would force every quantized index to rebuild.
     pub fn name(self) -> &'static str {
         match self {
             Self::Standard => "BAAI/bge-small-en-v1.5",
@@ -113,7 +117,7 @@ pub struct Config {
     pub startup_timeout: Duration,
     pub embed_batch: usize,
     /// Padded tokens per inference call — the knob that actually sets peak
-    /// memory. See `embed::TOKEN_BUDGET`.
+    /// memory. See `DEFAULT_TOKEN_BUDGET`, and the measurements recorded in `embed`.
     pub embed_token_budget: usize,
     /// Threads ONNX Runtime may use inside one inference call.
     ///

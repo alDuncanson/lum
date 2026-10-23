@@ -21,8 +21,9 @@ path = "src/main.rs"
 
 [dependencies]
 # --- async runtime and the one socket ---
-# The daemon is I/O-bound on the socket and CPU-bound on inference. Inference
-# runs on spawn_blocking; everything else is a handful of tasks.
+# The daemon is I/O-bound on the socket and CPU-bound on inference. Ingest
+# runs on its own OS thread and query embedding on spawn_blocking; everything
+# else is a handful of tasks.
 tokio = { version = "1", features = [
   "rt-multi-thread",
   "macros",
@@ -32,12 +33,10 @@ tokio = { version = "1", features = [
   "sync",
   "time",
   "signal",
-  "process",
-  "fs",
 ] }
 
 # --- wire format ---
-# Newline-delimited JSON over a Unix socket. Chosen because the two clients
+# Newline-delimited JSON over a local socket. Chosen because the two clients
 # that matter can already speak it with nothing added: Neovim has vim.json
 # and vim.uv, and a shell has jq and socat.
 serde = { version = "1", features = ["derive"] }
@@ -49,10 +48,8 @@ serde_json = "1"
 # exposes the allocator knobs that keep the arena from growing to gigabytes.
 ort = { version = "2.0.0-rc.10", default-features = false, features = [
   "std",
-  "ndarray",
   "tracing",
 ] }
-ndarray = "0.16"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 # Model download on first run, into HuggingFace's standard cache layout, so
 # an existing ~/.lum/models is reused rather than re-downloaded.

@@ -53,12 +53,15 @@ function M.target()
   local uname = vim.uv.os_uname()
   local os_name = ({ Darwin = "darwin", Linux = "linux" })[uname.sysname]
   if not os_name then
-    -- Windows is not supported: the daemon listens on a Unix domain socket.
-    return nil, ("lum has no build for %s"):format(uname.sysname)
+    -- No Windows release binaries yet (issue #27); the daemon itself runs there.
+    return nil, ("lum has no release for %s yet"):format(uname.sysname)
   end
   local arch = ({ arm64 = "arm64", aarch64 = "arm64", x86_64 = "x86_64", amd64 = "x86_64" })[uname.machine]
   if not arch then
     return nil, ("lum has no build for %s %s"):format(uname.sysname, uname.machine)
+  end
+  if os_name == "darwin" and arch == "x86_64" then
+    return nil, "lum has no build for Intel macOS: its inference runtime publishes no prebuilt library for it"
   end
   return ("%s-%s"):format(os_name, arch)
 end
