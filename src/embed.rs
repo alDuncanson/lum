@@ -257,10 +257,9 @@ impl Embedder {
 
     /// Drop the ingest session, returning its arena to the OS.
     ///
-    /// Called when the ingest queue drains. This is the whole of what the old
-    /// build needed a second process, a supervisor, and a five-minute idle
-    /// timer to accomplish, and unlike that version it costs queries nothing:
-    /// the query session was never involved.
+    /// Called when the ingest queue drains. This is all idle shedding amounts
+    /// to: one session dropped when its queue drains. It costs queries
+    /// nothing, because the query session was never involved.
     pub fn release_ingest(&self) -> bool {
         let mut guard = self.ingest.lock().expect("ingest session poisoned");
         let had = guard.is_some();

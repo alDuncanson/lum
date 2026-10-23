@@ -628,9 +628,9 @@ impl Engine {
             self.generation.send_modify(|generation| *generation += 1);
 
             // Nothing left to index: hand the ingest session's arena back.
-            // This is the whole of the old idle-shedding feature, at session
-            // granularity instead of process granularity, and queries never
-            // noticed either way because they use a different session.
+            // Idle shedding at session granularity: the weights leave memory
+            // between edits, and queries never notice because they use a
+            // different session.
             if self.queued.lock().unwrap().is_empty() {
                 if let Some(embedder) = self.embedder_now() {
                     if embedder.release_ingest() {

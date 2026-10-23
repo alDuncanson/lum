@@ -25,9 +25,7 @@
         rustToolchain = pkgs.rust-bin.stable."1.90.0".default;
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # One crate at the repository root, so this is Crane's ordinary path:
-        # no nested manifest, no protobuf contract to keep in the source tree,
-        # no second package to wrap around the first.
+        # One crate at the repository root, so this is Crane's ordinary path.
         #
         # A denylist, not an allowlist. The allowlist this replaced named `src`
         # and the manifests, and silently omitted `rustfmt.toml` — so the
@@ -132,7 +130,7 @@
           # before deleting anything.
           lum stop >/dev/null 2>&1 || true
           if [ "$freshModel" = "1" ]; then
-            echo "clearing $LUM_DATA_DIR including the model (~133 MB will download again)"
+            echo "clearing $LUM_DATA_DIR including the model (~130 MB will download again)"
             rm -rf "''${LUM_DATA_DIR:?}"
           elif [ "$fresh" = "1" ]; then
             # models/ survives. It never changes, and re-fetching it on every

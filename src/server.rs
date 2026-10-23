@@ -1,4 +1,4 @@
-//! The daemon: one Unix socket, one process.
+//! The daemon: one local socket, one process.
 //!
 //! Requests on a connection are handled concurrently, so a client is never
 //! blocked behind its own slow call. That matters for exactly one client: the
