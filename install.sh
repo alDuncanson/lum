@@ -7,7 +7,7 @@
 # SHA256SUMS, and installs a single binary.
 #
 # Environment:
-#   LUM_INSTALL_DIR   where to put the binaries (default ~/.local/bin)
+#   LUM_INSTALL_DIR   where to put the binary (default ~/.local/bin)
 #   LUM_VERSION       a specific version, e.g. 0.2.0 (default: latest release)
 #   LUM_RELEASE_BASE_URL  an internal mirror serving the same file names
 #
@@ -29,7 +29,7 @@ os=$(uname -s)
 case "$os" in
   Darwin) os=darwin ;;
   Linux)  os=linux ;;
-  *) die "no lum build for $os. lum listens on a Unix domain socket, so Windows is not supported; WSL works." ;;
+  *) die "no lum build for $os. there are no Windows release binaries yet (github.com/alDuncanson/lum/issues/27); WSL works." ;;
 esac
 
 arch=$(uname -m)
@@ -39,6 +39,7 @@ case "$arch" in
   *) die "no lum build for $arch" ;;
 esac
 target="$os-$arch"
+[ "$target" != darwin-x86_64 ] || die "no lum build for Intel macOS: the inference runtime lum links publishes no prebuilt library for it"
 
 need uname
 need tar
