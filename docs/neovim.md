@@ -68,7 +68,6 @@ rather than on top of it:
 
 ```text
 ▕█████████░░░░░▏ embedding 256/443 chunks (57%)  ⠹ indexing lum
-▕█████████████░▏ storing 57/69 documents (82%)   ⠼ indexing lum
 ✔ indexing lum
 ```
 
@@ -160,5 +159,5 @@ printf '{"id":1,"op":"subscribe","kinds":["progress","scan_finished"]}\n' \
 ```
 
 — and the full protocol is documented in [cli.md](cli.md). `lua/lum/client.lua`
-is a complete client in ~230 lines, the starting point for an integration with
+is a complete client in under 300 lines, the starting point for an integration with
 any other editor.

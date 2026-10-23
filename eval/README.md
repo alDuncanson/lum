@@ -12,6 +12,7 @@ nix run .#eval -- --fresh               # wipe and re-index first
 Or directly, against whatever daemon is already running:
 
 ```sh
+LUM_EXCLUDE_DIRS=node_modules,vendor,target,__pycache__,eval \
 cargo test --release --test eval -- --ignored --nocapture
 ```
 
@@ -131,7 +132,8 @@ the system does not have.
   by the person optimizing against it drifts toward what the system already
   does well.
 
-Two guards run in the ordinary test suite, because a stale answer key
-otherwise scores as a miss forever: every `files` entry must exist, and the
-fixture itself is excluded from the index — it contains every query verbatim,
-and indexing it once made it the best match for half of its own queries.
+One guard runs in the ordinary test suite, because a stale answer key
+otherwise scores as a miss forever: every `files` entry must exist. The
+fixture itself is kept out of the index by `LUM_EXCLUDE_DIRS`, which the
+wrapper and the CI job both set — it contains every query verbatim, and
+indexing it once made it the best match for half of its own queries.

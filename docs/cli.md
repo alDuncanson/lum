@@ -1,14 +1,14 @@
 # The CLI, the socket, and MCP
 
 One binary. `lum serve` is the daemon; every other subcommand is a client of
-its socket, and starts it if nothing is listening.
+its socket, and all but `stop` start it if nothing is listening.
 
 ## Commands
 
 ```sh
 lum search <query...>     # semantic search
-lum add <path>            # register a directory and index it
-lum remove <id | path>    # unregister and delete everything indexed from it
+lum add <path>            # register a directory and index it (--wait, -q)
+lum remove <id | path>    # unregister and delete everything indexed from it (alias: rm)
 lum sources               # list registered directories
 lum scan <id | path>      # rescan now
 lum status                # state, counts, memory, work in flight
@@ -106,7 +106,7 @@ announce work that finished before you connected.
 | `scan_started`, `scan_finished`, `scan_failed` | brackets one source scan |
 | `doc_indexed`, `doc_deleted`, `doc_failed` | one document |
 | `progress` | `phase`, `done`, `total`, `unit` — the part that moves |
-| `snapshot` | every 2s: counts, queue depths, resident bytes |
+| `snapshot` | every 2s: counts, queue depths, resident and index bytes |
 | `request` | whole-request latency, for `lum top` |
 
 ```sh
@@ -151,7 +151,7 @@ Unix, `rm -rf` removes the directory entry but a running process keeps its open
 files alive by inode, so it keeps serving the old index and `lum status` looks
 unaffected until it exits. `lum stop` first.
 
-Upgrading from lum 0.1: its `catalog.db`, `vectors/` and `lum-worker.sock`
+Upgrading from lum 0.1: its `catalog.db`, `vectors/`, `vectors.manifest.json` and `lum-worker.sock`
 are left in place and reported once at startup. They are yours to delete; lum
 will not remove an index it did not write.
 

@@ -17,7 +17,7 @@ line, or over MCP from a coding agent.
 
 ```sh
 $ lum search --root ~/code/lum "where is daemon startup coordinated"
- 1. 0.784  src/client.rs:165
+ 1. 0.784  /home/you/code/lum/src/client.rs:165 (chunk 8)
      // Start a daemon, unless someone else is already doing it. Concurrent
      commands converge on one daemon by taking an exclusive lock, rechecking…
 ```
@@ -136,7 +136,7 @@ reporting.
 
 One process owns everything. A daemon starts on the first command that needs
 it, indexes into a single SQLite file, holds the vectors in memory as int8,
-and answers newline-delimited JSON over a Unix socket. Every client, including
+and answers newline-delimited JSON over a local socket. Every client, including
 the Neovim picker and the MCP server, speaks that same protocol. Retrieval is
 an exhaustive vector scan rescored exactly, with BM25 keyword hits slotted in
 below the semantic head. The whole design, with the measurements behind each

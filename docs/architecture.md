@@ -7,7 +7,7 @@ embeddings, the index — stays on the machine.
 It runs as **one process**: a daemon that owns the index and answers queries,
 started on demand by the first command that needs it and gone fifteen minutes
 after the last. Clients — the CLI, the Neovim picker, `lum mcp`, anything with
-`socat` — all speak the same newline-delimited JSON over one Unix socket.
+`socat` — all speak the same newline-delimited JSON over one local socket.
 
 ```
 CLI / Neovim / MCP / socat
@@ -21,7 +21,7 @@ CLI / Neovim / MCP / socat
 
 ## Design constraints
 
-1. **Local-only.** One Unix socket inside a 0700 directory. No port, no auth,
+1. **Local-only.** One Unix socket inside a 0700 directory (a named pipe on Windows). No port, no auth,
    no TLS, no service to operate.
 2. **A keystroke is the latency budget.** The Neovim picker sends a query per
    keystroke, so anything that can make a query wait on indexing is a bug, not
@@ -255,8 +255,9 @@ The seams, from smallest to largest:
 
 Direction, tracked as issues:
 
-- [#27](https://github.com/alDuncanson/lum/issues/27) — Windows, via named
-  pipes behind a transport seam
+- [#27](https://github.com/alDuncanson/lum/issues/27) — Windows: the named-pipe transport is
+  in and experimental; release binaries, a tighter pipe ACL, and installer
+  support remain
 - [#28](https://github.com/alDuncanson/lum/issues/28) — speak LSP, so editor
   integrations stop being hand-written
 - [#29](https://github.com/alDuncanson/lum/issues/29) — a centroid pre-filter
