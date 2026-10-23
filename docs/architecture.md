@@ -120,6 +120,23 @@ vector on the eval: whole misses 6 → 1, recall@10 93% → 98%, right-chunk 73%
 pure vector. Why fusion is slotted rather than scored — and the two designs
 that measured worse — is recorded at `slot_keyword_hits` in `engine.rs`.
 
+## What it costs to run
+
+Measured on an M-series Mac against this repository (113 documents, 1119
+chunks):
+
+| | |
+|---|---|
+| a search, warm | 5 ms on an open socket, 10 ms via the CLI |
+| a keystroke in the Telescope picker | ~5 ms |
+| a search while indexing is running | ~9 ms |
+| save a file → re-embedded and searchable | ~180 ms |
+| resident memory | ~350 MB idle, ~740 MB peak while indexing |
+| the index on disk | 6 MB |
+
+Queries never wait on indexing: the daemon keeps a dedicated inference
+session for search, so saving a file costs the picker nothing.
+
 ## Memory
 
 Inference is where the memory is, and the knob that controls it is

@@ -20,6 +20,9 @@ never depends on — or disturbs — your real index. Use `--fresh` whenever the
 change under test invalidates existing vectors, which anything touching the
 chunker, the parsers, or the model does.
 
+CI runs the same test on every pull request, in the `eval` job, and posts
+the numbers to the job summary; see [docs/development.md](../docs/development.md).
+
 The corpus is this repository, which changes underneath the benchmark — so
 only runs taken on the same tree compare, and the numbers are comparable
 rather than precise. With ~50 queries, one flipping moves recall by two
