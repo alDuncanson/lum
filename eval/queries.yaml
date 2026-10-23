@@ -189,11 +189,16 @@ queries:
   - query: cli commands
     files: [src/cli.rs]
 
+  - query: cli status command
+    files: [src/cli.rs]
+    contains: async fn status
+
   - query: live activity tui
     files: [src/top.rs]
 
   - query: progress spinner
-    files: [src/render.rs]
+    files: [src/render.rs, lua/lum/progress.lua]
+    contains: SPINNER
 
   # --- configuration and build ---
   - query: environment variables
@@ -243,3 +248,35 @@ queries:
   - query: model mismatch refused test
     files: [src/db.rs]
     contains: a_mismatched_model_is_refused_rather_than_mixed
+
+  # --- declarations by name ---
+  # What someone types when they can picture the item and want the picker to
+  # land on it. `contains` names the declaration, so these measure whether the
+  # chunk that comes back is the item and not the file around it.
+  - query: lum language enum
+    files: [src/language.rs]
+    contains: pub enum Language
+
+  - query: named pipe listener
+    files: [src/transport.rs]
+    contains: NamedPipeServer
+
+  - query: stale socket file
+    files: [src/transport.rs]
+    contains: remove_file
+
+  - query: keyword hit slots
+    files: [src/engine.rs]
+    contains: fn slot_keyword_hits
+
+  - query: daemon idle timeout
+    files: [src/server.rs]
+    contains: idle_timeout
+
+  - query: vector shortlist
+    files: [src/index.rs]
+    contains: fn shortlist
+
+  - query: bm25 keyword search
+    files: [src/db.rs]
+    contains: fn keyword_search
