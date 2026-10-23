@@ -586,6 +586,7 @@ impl Engine {
         event.documents = Some(stats.documents as u64);
         event.total_chunks = Some(stats.chunks as u64);
         event.rss_bytes = Some(sys::resident_bytes());
+        event.index_bytes = Some(self.db.size_bytes());
         if !activity.document.is_empty() {
             event.path = Some(activity.document.clone());
             event.phase = Some(activity.stage);

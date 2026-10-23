@@ -66,6 +66,7 @@ impl Model {
                 self.documents = number("documents");
                 self.chunks = number("total_chunks");
                 self.rss = number("rss_bytes");
+                self.index_bytes = number("index_bytes");
                 self.pending_scans = number("pending_scans");
                 self.pending_documents = number("pending_documents");
                 self.active = text("path");

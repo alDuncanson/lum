@@ -89,6 +89,8 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rss_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<&'static str>,
 }
 
