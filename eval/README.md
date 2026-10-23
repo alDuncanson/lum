@@ -27,7 +27,9 @@ the numbers to the job summary; see [docs/development.md](../docs/development.md
 The corpus is this repository, which changes underneath the benchmark — so
 only runs taken on the same tree compare, and the numbers are comparable
 rather than precise. With ~50 queries, one flipping moves recall by two
-points.
+points. Platforms do not compare either: inference is not bit-identical
+across CPUs, so the CI job's Linux numbers sit a query or two away from a
+macOS run of the same tree. Compare CI to CI, and a laptop to itself.
 
 ## Current
 
